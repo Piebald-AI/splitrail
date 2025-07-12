@@ -1,0 +1,26 @@
+[package]
+name = "splitrail"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+glob = "0.3"
+home = "0.5"
+lazy_static = "1.4"
+itertools = "0.13"
+chrono = "0.4"
+chrono-tz = "0.9"
+colored = "2.0"
+tokio = { version = "1", features = ["full"] }
+rayon = "1.8"
+dashmap = "5.5"
+num-format = "0.4"
+ratatui = "0.26"
+crossterm = "0.27"
+reqwest = { version = "0.11", features = ["json"] }
+toml = "0.8"
