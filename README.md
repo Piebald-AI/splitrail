@@ -1,6 +1,6 @@
 # Splitrail
 
-Analyzer for agentic AI coding tool usage.  Currently supports Claude Code.
+Analyzer for agentic AI coding tool usage.  Currently supports Claude Code&mdash;Gemini CLI and Codex support in progress.
 
 The Splitrail CLI can automatically upload usage data to the [Splitrail Leaderboard.](https://splitrail.dev/leaderboard)
 
@@ -13,3 +13,7 @@ Also check out our developer-first agentic AI experience, [Piebald](https://pieb
 
 ### [Splitrail Leaderboard](https://splitrail.dev/leaderboard)
 <img width="750" alt="Screenshot of the Splitrail Leaderboard" src="./screenshots/leaderboard.png" />
+
+## Releases
+
+Coming soon.
