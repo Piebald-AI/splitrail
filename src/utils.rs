@@ -5,17 +5,16 @@ use num_format::{Locale, ToFormattedString};
 
 use crate::types::{ConversationMessage, DailyStats};
 
-pub fn format_number(n: u64) -> String {
-    // TODO: Let's use a config file or something instead of env vars.
-    let use_comma = std::env::var("SPLITRAIL_NUMBER_COMMA").is_ok();
-    let use_human = std::env::var("SPLITRAIL_NUMBER_HUMAN").is_ok();
-    let locale_str = std::env::var("SPLITRAIL_LOCALE").unwrap_or_default();
-    let decimal_places = std::env::var("SPLITRAIL_DECIMAL_PLACES")
-        .unwrap_or_default()
-        .parse::<usize>()
-        .unwrap_or(2);
+#[derive(Clone)]
+pub struct NumberFormatOptions {
+    pub use_comma: bool,
+    pub use_human: bool,
+    pub locale: String,
+    pub decimal_places: usize,
+}
 
-    let locale = match locale_str.as_str() {
+pub fn format_number(n: u64, options: &NumberFormatOptions) -> String {
+    let locale = match options.locale.as_str() {
         "de" => Locale::de,
         "fr" => Locale::fr,
         "es" => Locale::es,
@@ -26,27 +25,27 @@ pub fn format_number(n: u64) -> String {
         _ => Locale::en,
     };
 
-    if use_human {
+    if options.use_human {
         if n >= 1_000_000_000_000 {
             format!(
                 "{:.prec$}t",
                 n as f64 / 1_000_000_000_000.0,
-                prec = decimal_places
+                prec = options.decimal_places
             )
         } else if n >= 1_000_000_000 {
             format!(
                 "{:.prec$}b",
                 n as f64 / 1_000_000_000.0,
-                prec = decimal_places
+                prec = options.decimal_places
             )
         } else if n >= 1_000_000 {
-            format!("{:.prec$}m", n as f64 / 1_000_000.0, prec = decimal_places)
+            format!("{:.prec$}m", n as f64 / 1_000_000.0, prec = options.decimal_places)
         } else if n >= 1_000 {
-            format!("{:.prec$}k", n as f64 / 1_000.0, prec = decimal_places)
+            format!("{:.prec$}k", n as f64 / 1_000.0, prec = options.decimal_places)
         } else {
             n.to_string()
         }
-    } else if use_comma {
+    } else if options.use_comma {
         n.to_formatted_string(&locale)
     } else {
         n.to_string()
