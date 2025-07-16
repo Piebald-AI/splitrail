@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub server: ServerConfig,
     pub upload: UploadConfig,
+    pub formatting: FormattingConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -23,6 +24,14 @@ pub struct UploadConfig {
     pub timeout_seconds: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FormattingConfig {
+    pub number_comma: bool,
+    pub number_human: bool,
+    pub locale: String,
+    pub decimal_places: usize,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -35,6 +44,12 @@ impl Default for Config {
                 upload_today_only: false,
                 retry_attempts: 3,
                 timeout_seconds: 30,
+            },
+            formatting: FormattingConfig {
+                number_comma: false,
+                number_human: false,
+                locale: "en".to_string(),
+                decimal_places: 2,
             },
         }
     }
@@ -115,6 +130,10 @@ pub fn show_config() -> Result<()> {
             );
             println!("   Auto Upload: {}", config.upload.auto_upload);
             println!("   Upload Today Only: {}", config.upload.upload_today_only);
+            println!("   Number Comma: {}", config.formatting.number_comma);
+            println!("   Number Human: {}", config.formatting.number_human);
+            println!("   Locale: {}", config.formatting.locale);
+            println!("   Decimal Places: {}", config.formatting.decimal_places);
         }
         None => {
             println!("❌ No configuration file found.");
@@ -140,6 +159,27 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
                 .parse::<bool>()
                 .context("Invalid boolean value. Use 'true' or 'false'")?;
             config.set_upload_today_only(enabled);
+        }
+        "number-comma" => {
+            let enabled = value
+                .parse::<bool>()
+                .context("Invalid boolean value. Use 'true' or 'false'")?;
+            config.formatting.number_comma = enabled;
+        }
+        "number-human" => {
+            let enabled = value
+                .parse::<bool>()
+                .context("Invalid boolean value. Use 'true' or 'false'")?;
+            config.formatting.number_human = enabled;
+        }
+        "locale" => {
+            config.formatting.locale = value.to_string();
+        }
+        "decimal-places" => {
+            let places = value
+                .parse::<usize>()
+                .context("Invalid number value")?;
+            config.formatting.decimal_places = places;
         }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }

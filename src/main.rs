@@ -1,5 +1,7 @@
 #![feature(if_let_guard, let_chains)]
 
+use clap::{Args, Parser, Subcommand};
+
 mod claude_code;
 mod config;
 mod models;
@@ -8,44 +10,90 @@ mod types;
 mod upload;
 mod utils;
 
-use std::env;
+#[derive(Parser)]
+#[command(name = "splitrail")]
+#[command(version)]
+#[command(disable_help_subcommand = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    /// Use comma-separated number formatting
+    #[arg(long)]
+    number_comma: bool,
+
+    /// Use human-readable number formatting (k, m, b, t)
+    #[arg(short = 'H', long)]
+    number_human: bool,
+
+    /// Locale for number formatting (en, de, fr, es, it, ja, ko, zh)
+    #[arg(long)]
+    locale: Option<String>,
+
+    /// Number of decimal places for human-readable formatting
+    #[arg(long)]
+    decimal_places: Option<usize>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Force upload stats to the Splitrail Leaderboard
+    Upload,
+    /// Manage configuration
+    Config(ConfigArgs),
+}
+
+#[derive(Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    subcommand: ConfigSubcommands,
+}
+
+#[derive(Subcommand)]
+enum ConfigSubcommands {
+    /// Create default configuration file
+    Init,
+    /// Show current configuration
+    Show,
+    /// Set configuration value
+    Set {
+        /// Configuration key (api-token, auto-upload, number-comma, number-human, locale, decimal-places)
+        key: String,
+        /// Configuration value
+        value: String,
+    },
+}
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    match args.len() {
-        1 => {
-            // No arguments - run normal flow with optional upload
-            run_default().await;
+    // Load config file to get defaults
+    let config = config::Config::load().unwrap_or_else(|_| None).unwrap_or_default();
+
+    // Create format options merging config defaults with CLI overrides
+    let format_options = utils::NumberFormatOptions {
+        use_comma: cli.number_comma || config.formatting.number_comma,
+        use_human: cli.number_human || config.formatting.number_human,
+        locale: cli.locale.unwrap_or(config.formatting.locale),
+        decimal_places: cli.decimal_places.unwrap_or(config.formatting.decimal_places),
+    };
+
+    match cli.command {
+        None => {
+            // No subcommand - run default behavior
+            run_default(format_options).await;
         }
-        2 => {
-            // Single argument - handle subcommands
-            match args[1].as_str() {
-                "upload" => run_upload().await,
-                "config" => config_subcommand(&args[2..]).await,
-                "help" | "--help" | "-h" => show_help(),
-                _ => {
-                    eprintln!("Unknown command: {}", args[1]);
-                    show_help();
-                    std::process::exit(1);
-                }
-            }
+        Some(Commands::Upload) => {
+            run_upload().await;
         }
-        _ => {
-            // Multiple arguments - handle config subcommands
-            if args[1] == "config" {
-                config_subcommand(&args[2..]).await;
-            } else {
-                eprintln!("Too many arguments");
-                show_help();
-                std::process::exit(1);
-            }
+        Some(Commands::Config(config_args)) => {
+            handle_config_subcommand(config_args).await;
         }
     }
 }
 
-async fn run_default() {
+async fn run_default(format_options: utils::NumberFormatOptions) {
     println!("🔍 Analyzing Claude Code usage...");
 
     // Get Claude Code stats
@@ -58,7 +106,7 @@ async fn run_default() {
     };
 
     // Show TUI
-    if let Err(e) = tui::run_tui(&stats) {
+    if let Err(e) = tui::run_tui(&stats, &format_options) {
         eprintln!("❌ Error displaying TUI: {}", e);
     }
 
@@ -130,81 +178,26 @@ async fn run_upload() {
     }
 }
 
-async fn config_subcommand(args: &[String]) {
-    if args.is_empty() {
-        show_config_help();
-        return;
-    }
-
-    match args[0].as_str() {
-        "init" => {
+async fn handle_config_subcommand(config_args: ConfigArgs) {
+    match config_args.subcommand {
+        ConfigSubcommands::Init => {
             if let Err(e) = config::create_default_config() {
                 eprintln!("❌ Error creating config: {}", e);
                 std::process::exit(1);
             }
         }
-        "show" => {
+        ConfigSubcommands::Show => {
             if let Err(e) = config::show_config() {
                 eprintln!("❌ Error showing config: {}", e);
                 std::process::exit(1);
             }
         }
-        "set" => {
-            if args.len() != 3 {
-                eprintln!("❌ Usage: splitrail config set <key> <value>");
-                eprintln!("   Keys: api-token, auto-upload");
-                std::process::exit(1);
-            }
-
-            if let Err(e) = config::set_config_value(&args[1], &args[2]) {
+        ConfigSubcommands::Set { key, value } => {
+            if let Err(e) = config::set_config_value(&key, &value) {
                 eprintln!("❌ Error setting config: {}", e);
                 std::process::exit(1);
             }
         }
-        _ => {
-            eprintln!("❌ Unknown config command: {}", args[0]);
-            show_config_help();
-            std::process::exit(1);
-        }
     }
 }
 
-fn show_help() {
-    println!("🚀 Splitrail - Claude Code Usage Analytics");
-    println!();
-    println!("USAGE:");
-    println!("    splitrail [COMMAND]");
-    println!();
-    println!("COMMANDS:");
-    println!("    (no args)    Show Claude Code stats and auto-upload if configured");
-    println!("    upload       Force upload stats to leaderboard");
-    println!("    config       Manage configuration");
-    println!("    help         Show this help message");
-    println!();
-    println!("CONFIG COMMANDS:");
-    println!("    config init            Create default configuration file");
-    println!("    config show            Show current configuration");
-    println!("    config set <key> <val> Set configuration value");
-    println!();
-    println!("EXAMPLES:");
-    println!("    splitrail                                    # Show stats");
-    println!("    splitrail config set api-token st_abc123...");
-    println!("    splitrail config set auto-upload true");
-    println!("    splitrail upload                             # Manual upload");
-}
-
-fn show_config_help() {
-    println!("🔧 Splitrail Configuration Commands");
-    println!();
-    println!("USAGE:");
-    println!("    splitrail config <COMMAND>");
-    println!();
-    println!("COMMANDS:");
-    println!("    init            Create default configuration file");
-    println!("    show            Show current configuration");
-    println!("    set <key> <val> Set configuration value");
-    println!();
-    println!("CONFIG KEYS:");
-    println!("    api-token       Your API token from the leaderboard");
-    println!("    auto-upload     Enable/disable automatic upload (true/false)");
-}

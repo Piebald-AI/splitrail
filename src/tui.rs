@@ -1,10 +1,10 @@
 use crate::types::AgenticCodingToolStats;
-use crate::utils::{format_date_for_display, format_number};
+use crate::utils::{format_date_for_display, format_number, NumberFormatOptions};
 use anyhow::Result;
 use colored::*;
 
 // TODO: We really need to use a libary for this.
-pub fn run_tui(stats: &AgenticCodingToolStats) -> Result<()> {
+pub fn run_tui(stats: &AgenticCodingToolStats, format_options: &NumberFormatOptions) -> Result<()> {
     println!();
     println!("{}", "AGENTIC CODING TOOL ACTIVITY ANALYSIS".cyan().bold());
     println!("{}", "=====================================".cyan().bold());
@@ -126,19 +126,19 @@ pub fn run_tui(stats: &AgenticCodingToolStats) -> Result<()> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let cached_tokens = format_number(day_stats.cached_tokens);
-        let input_tokens = format_number(day_stats.input_tokens);
-        let output_tokens = format_number(day_stats.output_tokens);
-        let conversations = format_number(day_stats.conversations as u64);
+        let cached_tokens = format_number(day_stats.cached_tokens, format_options);
+        let input_tokens = format_number(day_stats.input_tokens, format_options);
+        let output_tokens = format_number(day_stats.output_tokens, format_options);
+        let conversations = format_number(day_stats.conversations as u64, format_options);
         // let user_messages = format_number(day_stats.user_messages as u64);
         // let ai_messages = format_number(day_stats.ai_messages as u64);
-        let tool_calls = format_number(day_stats.tool_calls as u64);
+        let tool_calls = format_number(day_stats.tool_calls as u64, format_options);
 
         let lines_summary = format!(
             "{}/{}/{}",
-            format_number(day_stats.file_operations.lines_read),
-            format_number(day_stats.file_operations.lines_edited),
-            format_number(day_stats.file_operations.lines_written)
+            format_number(day_stats.file_operations.lines_read, format_options),
+            format_number(day_stats.file_operations.lines_edited, format_options),
+            format_number(day_stats.file_operations.lines_written, format_options)
         );
 
         // Check if this is an empty row (all zeros)
@@ -251,18 +251,18 @@ pub fn run_tui(stats: &AgenticCodingToolStats) -> Result<()> {
         "{:<15} {:>7} {:>12} {:>8} {:>9} {:>6} {:>6} {:>22}",
         format!("Total ({}d)", stats.daily_stats.len()),
         format!("${:.2}", total_cost).yellow().bold(),
-        format_number(total_cached).dimmed().bold(),
-        format_number(total_input).bold(),
-        format_number(total_output).bold(),
-        format_number(stats.num_conversations).bold(),
+        format_number(total_cached, format_options).dimmed().bold(),
+        format_number(total_input, format_options).bold(),
+        format_number(total_output, format_options).bold(),
+        format_number(stats.num_conversations, format_options).bold(),
         // format_number(total_your_msgs as u64).bold(),
         // format_number(total_ai_msgs as u64).bold(),
-        format_number(total_tool_calls as u64).green().bold(),
+        format_number(total_tool_calls as u64, format_options).green().bold(),
         format!(
             "{}/{}/{}",
-            format_number(total_lines_r),
-            format_number(total_lines_e),
-            format_number(total_lines_w)
+            format_number(total_lines_r, format_options),
+            format_number(total_lines_e, format_options),
+            format_number(total_lines_w, format_options)
         )
         .blue()
         .bold()
@@ -277,7 +277,7 @@ pub fn run_tui(stats: &AgenticCodingToolStats) -> Result<()> {
     println!(
         "{:<19} {}",
         "Tokens:",
-        format_number(total_tokens).bright_blue().bold()
+        format_number(total_tokens, format_options).bright_blue().bold()
     );
     // TODO: Message calculation is crazy, at least for CC.
     // println!(
@@ -288,7 +288,7 @@ pub fn run_tui(stats: &AgenticCodingToolStats) -> Result<()> {
     println!(
         "{:<19} {}",
         "Tools Calls:",
-        format_number(total_tool_calls as u64)
+        format_number(total_tool_calls as u64, format_options)
             .to_string()
             .bright_green()
             .bold()
