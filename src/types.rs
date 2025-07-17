@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::analyzer::CachingInfo;
 use crate::utils::ModelAbbreviations;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,8 +12,17 @@ pub enum ConversationMessage {
     AI {
         input_tokens: u64,
         output_tokens: u64,
+        
+        // Legacy fields for backward compatibility
+        #[serde(default)]
         cache_creation_tokens: u64,
+        #[serde(default)]
         cache_read_tokens: u64,
+        
+        // New flexible caching structure
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caching_info: Option<CachingInfo>,
+        
         cost: f64,
         model: String,
         timestamp: String,
@@ -21,12 +31,20 @@ pub enum ConversationMessage {
         conversation_file: String,
         file_operations: FileOperationStats,
         todo_stats: TodoStats,
+        
+        // Tool-specific data
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        analyzer_specific: std::collections::HashMap<String, serde_json::Value>,
     },
     #[serde(rename = "User")]
     User {
         timestamp: String,
         conversation_file: String,
         todo_stats: TodoStats,
+        
+        // Tool-specific data
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        analyzer_specific: std::collections::HashMap<String, serde_json::Value>,
     },
 }
 
@@ -132,6 +150,7 @@ pub struct AgenticCodingToolStats {
     pub num_conversations: u64,
     pub model_abbrs: ModelAbbreviations,
     pub messages: Vec<ConversationMessage>,
+    pub analyzer_name: String,
 }
 
 #[derive(Debug, Serialize)]

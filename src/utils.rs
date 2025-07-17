@@ -4,6 +4,7 @@ use chrono::Datelike;
 use num_format::{Locale, ToFormattedString};
 use serde::{Deserialize, Serialize};
 
+use crate::analyzer::CachingInfo;
 use crate::types::{ConversationMessage, DailyStats};
 
 #[derive(Clone)]
@@ -318,6 +319,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 cost,
                 cache_creation_tokens,
                 cache_read_tokens,
+                caching_info,
                 input_tokens,
                 output_tokens,
                 tool_calls,
@@ -327,7 +329,15 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 ..
             } => {
                 stats.cost += cost;
-                stats.cached_tokens += cache_creation_tokens + cache_read_tokens;
+                
+                // Handle both legacy caching fields and new flexible caching
+                let cached_tokens = if let Some(caching_info) = caching_info {
+                    caching_info.total_cached_tokens()
+                } else {
+                    cache_creation_tokens + cache_read_tokens
+                };
+                stats.cached_tokens += cached_tokens;
+                
                 stats.input_tokens += input_tokens;
                 stats.output_tokens += output_tokens;
                 stats.tool_calls += tool_calls;

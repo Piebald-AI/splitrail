@@ -9,7 +9,7 @@ pub fn run_tui(stats: &AgenticCodingToolStats, format_options: &NumberFormatOpti
     println!("{}", "AGENTIC CODING TOOL ACTIVITY ANALYSIS".cyan().bold());
     println!("{}", "=====================================".cyan().bold());
     println!();
-    println!("Claude Code ({} chats)", stats.num_conversations);
+    println!("{} ({} chats)", stats.analyzer_name, stats.num_conversations);
     println!();
     println!("{}", "*Models:".dimmed());
     for (k, v) in &stats.model_abbrs.abbr_to_desc {

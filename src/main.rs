@@ -2,6 +2,11 @@
 
 use clap::{Args, Parser, Subcommand};
 
+use analyzer::AnalyzerRegistry;
+use analyzers::ClaudeCodeAnalyzer;
+
+mod analyzer;
+mod analyzers;
 mod claude_code;
 mod config;
 mod models;
@@ -97,14 +102,35 @@ async fn main() {
     }
 }
 
-async fn run_default(format_options: utils::NumberFormatOptions) {
-    println!("🔍 Analyzing Claude Code usage...");
+fn create_analyzer_registry() -> AnalyzerRegistry {
+    let mut registry = AnalyzerRegistry::new();
+    
+    // Register available analyzers
+    registry.register(ClaudeCodeAnalyzer::new());
+    
+    registry
+}
 
-    // Get Claude Code stats
-    let stats = match claude_code::get_claude_code_stats().await {
+async fn run_default(format_options: utils::NumberFormatOptions) {
+    let registry = create_analyzer_registry();
+    
+    // Get the primary (first available) analyzer
+    let analyzer = match registry.get_primary_analyzer() {
+        Some(analyzer) => analyzer,
+        None => {
+            eprintln!("❌ No supported AI coding tools found on this system");
+            eprintln!("   💡 Supported tools: Claude Code, Codex (coming soon)");
+            std::process::exit(1);
+        }
+    };
+
+    println!("🔍 Analyzing {} usage...", analyzer.display_name());
+
+    // Get stats from the analyzer
+    let stats = match analyzer.get_stats().await {
         Ok(stats) => stats,
         Err(e) => {
-            eprintln!("❌ Error analyzing Claude Code data: {}", e);
+            eprintln!("❌ Error analyzing {} data: {}", analyzer.display_name(), e);
             std::process::exit(1);
         }
     };
@@ -118,17 +144,34 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
 }
 
 async fn run_upload(stats: Option<AgenticCodingToolStats>) {
-    println!("🔍 Analyzing Claude Code usage for upload...");
-
     let stats = match stats {
-        Some(stats) => stats,
-        None => match claude_code::get_claude_code_stats().await {
-            Ok(stats) => stats,
-            Err(e) => {
-                eprintln!("❌ Error analyzing Claude Code data: {}", e);
-                std::process::exit(1);
+        Some(stats) => {
+            println!("🔍 Uploading {} usage...", stats.analyzer_name);
+            stats
+        }
+        None => {
+            let registry = create_analyzer_registry();
+            
+            // Get the primary (first available) analyzer
+            let analyzer = match registry.get_primary_analyzer() {
+                Some(analyzer) => analyzer,
+                None => {
+                    eprintln!("❌ No supported AI coding tools found on this system");
+                    eprintln!("   💡 Supported tools: Claude Code, Codex (coming soon)");
+                    std::process::exit(1);
+                }
+            };
+
+            println!("🔍 Analyzing {} usage for upload...", analyzer.display_name());
+
+            match analyzer.get_stats().await {
+                Ok(stats) => stats,
+                Err(e) => {
+                    eprintln!("❌ Error analyzing {} data: {}", analyzer.display_name(), e);
+                    std::process::exit(1);
+                }
             }
-        },
+        }
     };
 
     match config::Config::load() {
