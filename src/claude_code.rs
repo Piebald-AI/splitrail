@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+use crate::analyzer::CachingInfo;
 use crate::models::MODEL_PRICING;
 use crate::types::{
     AgenticCodingToolStats, ConversationMessage, FileCategory, FileOperationStats, TodoStats,
@@ -393,6 +394,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                 timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
                 conversation_file: conversation_file.clone(),
                 todo_stats,
+                analyzer_specific: std::collections::HashMap::new(),
             });
             continue;
         }
@@ -408,8 +410,21 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                 entries.push(ConversationMessage::AI {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
+                    
+                    // Legacy fields for backward compatibility
                     cache_creation_tokens: usage.cache_creation_tokens,
                     cache_read_tokens: usage.cache_read_tokens,
+                    
+                    // New flexible caching structure
+                    caching_info: if usage.cache_creation_tokens > 0 || usage.cache_read_tokens > 0 {
+                        Some(CachingInfo::CreationAndRead {
+                            cache_creation_tokens: usage.cache_creation_tokens,
+                            cache_read_tokens: usage.cache_read_tokens,
+                        })
+                    } else {
+                        None
+                    },
+                    
                     cost: match data.cost_usd {
                         Some(precalc_cost) => precalc_cost,
                         None => calculate_cost_from_tokens(&usage, &model_name),
@@ -426,6 +441,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                     conversation_file: conversation_file.clone(),
                     file_operations: file_ops,
                     todo_stats,
+                    analyzer_specific: std::collections::HashMap::new(),
                 });
             }
             // User message.
@@ -433,6 +449,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                 timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
                 conversation_file: conversation_file.clone(),
                 todo_stats,
+                analyzer_specific: std::collections::HashMap::new(),
             }),
         }
     }
@@ -553,5 +570,6 @@ pub async fn get_claude_code_stats() -> Result<AgenticCodingToolStats> {
         num_conversations,
         model_abbrs: model_abbrs(),
         messages: all_msgs,
+        analyzer_name: "Claude Code".to_string(),
     })
 }
