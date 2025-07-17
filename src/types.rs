@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::utils::ModelAbbreviations;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConversationMessage {
+    #[serde(rename_all = "camelCase")]
+    #[serde(rename = "AI")]
     AI {
         input_tokens: u64,
         output_tokens: u64,
@@ -14,22 +16,13 @@ pub enum ConversationMessage {
         cost: f64,
         model: String,
         timestamp: String,
-        #[allow(dead_code)]
-        message_id: Option<String>,
-        #[allow(dead_code)]
-        request_id: Option<String>,
-        #[allow(dead_code)]
-        has_cost_usd: bool,
         tool_calls: u32,
-        #[allow(dead_code)]
-        entry_type: Option<String>,
         hash: Option<String>,
-        #[allow(dead_code)]
-        is_user_message: bool,
         conversation_file: String,
         file_operations: FileOperationStats,
         todo_stats: TodoStats,
     },
+    #[serde(rename = "User")]
     User {
         timestamp: String,
         conversation_file: String,
@@ -37,7 +30,7 @@ pub enum ConversationMessage {
     },
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyStats {
     #[allow(dead_code)]
     pub date: String,
@@ -63,13 +56,14 @@ pub struct ModelPricing {
     pub cache_read_input_token_cost: f64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileOperationStats {
     pub files_read: u32,
     pub files_edited: u32,
     pub files_written: u32,
     pub file_types: BTreeMap<String, u32>, // grouped by category
-    pub bash_commands: u32,
+    pub terminal_commands: u32,
     pub glob_searches: u32,
     pub grep_searches: u32,
     pub lines_read: u64,
@@ -80,7 +74,8 @@ pub struct FileOperationStats {
     pub bytes_written: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TodoStats {
     pub todos_created: u32,
     pub todos_completed: u32,
@@ -131,8 +126,42 @@ impl FileCategory {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgenticCodingToolStats {
     pub daily_stats: BTreeMap<String, DailyStats>,
     pub num_conversations: u64,
     pub model_abbrs: ModelAbbreviations,
+    pub messages: Vec<ConversationMessage>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UploadStatsRequest {
+    pub date: String,
+    pub stats: WebappStats,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebappStats {
+    pub hash: String,
+    pub message: ConversationMessage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectData {
+    pub percentage: f64,
+    pub lines: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LanguageData {
+    pub lines: u64,
+    pub files: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UploadResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub error: Option<String>,
 }

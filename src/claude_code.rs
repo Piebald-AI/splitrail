@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::DateTime;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -218,7 +219,7 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, TodoStats)
                                     file_ops.bytes_written += lines_written * 80;
                                 }
                             }
-                            "Bash" => file_ops.bash_commands += 1,
+                            "Bash" => file_ops.terminal_commands += 1,
                             "Glob" => file_ops.glob_searches += 1,
                             "Grep" => file_ops.grep_searches += 1,
                             "TodoWrite" => todo_stats.todo_writes += 1,
@@ -415,19 +416,13 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                     },
                     model: model_name,
                     timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
-                    message_id: message.id.clone(),
-                    request_id: data.request_id.clone(),
-                    has_cost_usd: data.cost_usd.is_some(),
-                    // Count the tool calls.  If this is a user message it will be 0.
                     tool_calls: match message.content {
                         Some(Content::Blocks(blocks)) => {
                             blocks.iter().filter(|c| c.r#type == "tool_use").count() as u32
                         }
                         _ => 0,
                     },
-                    entry_type: data.r#type.clone(),
                     hash,
-                    is_user_message: data.r#type.map(|s| s == "user").unwrap_or(false),
                     conversation_file: conversation_file.clone(),
                     file_operations: file_ops,
                     todo_stats,
@@ -504,14 +499,44 @@ pub async fn get_claude_code_data() -> Result<(Vec<ConversationMessage>, u64)> {
 
 pub fn model_abbrs() -> ModelAbbreviations {
     let mut abbrs = ModelAbbreviations::new();
-    abbrs.add("claude-sonnet-4-20250514", "CS4", "Claude Sonnet 4");
-    abbrs.add("claude-opus-4-20250514", "CO4", "Claude Opus 4");
     abbrs.add(
-        "<synthetic>",
-        "?",
-        "Not specified — denoted by <synthetic> internally in Claude Code",
+        "claude-sonnet-4-20250514".to_string(),
+        "CS4".to_string(),
+        "Claude Sonnet 4".to_string(),
+    );
+    abbrs.add(
+        "claude-opus-4-20250514".to_string(),
+        "CO4".to_string(),
+        "Claude Opus 4".to_string(),
+    );
+    abbrs.add(
+        "synthetic".to_string(),
+        "?".to_string(),
+        "Not specified — denoted by <synthetic> internally in Claude Code".to_string(),
     );
     abbrs
+}
+
+pub async fn get_messages_later_than(
+    date: i64,
+    messages: Vec<ConversationMessage>,
+) -> Result<Vec<ConversationMessage>> {
+    let mut messages_later_than_date = Vec::new();
+    for msg in messages {
+        let timestamp = match &msg {
+            ConversationMessage::AI { timestamp, .. } => timestamp,
+            ConversationMessage::User { timestamp, .. } => timestamp,
+        };
+        if let Ok(timestamp) = DateTime::parse_from_rfc3339(timestamp)
+            .with_context(|| format!("Failed to parse timestamp: {}", timestamp))
+        {
+            if timestamp.timestamp_millis() >= date {
+                messages_later_than_date.push(msg);
+            }
+        }
+    }
+
+    Ok(messages_later_than_date)
 }
 
 pub async fn get_claude_code_stats() -> Result<AgenticCodingToolStats> {
@@ -527,5 +552,6 @@ pub async fn get_claude_code_stats() -> Result<AgenticCodingToolStats> {
         daily_stats,
         num_conversations,
         model_abbrs: model_abbrs(),
+        messages: all_msgs,
     })
 }
