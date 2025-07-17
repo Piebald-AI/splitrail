@@ -17,7 +17,7 @@ pub fn run_tui(stats: &AgenticCodingToolStats, format_options: &NumberFormatOpti
         for day_stats in stats.daily_stats.values() {
             if day_stats
                 .models
-                .contains_key(stats.model_abbrs.abbr_to_model[k])
+                .contains_key(&stats.model_abbrs.abbr_to_model[k])
             {
                 println!("{}", format!("  {}: {}", k, v).dimmed());
                 break;
@@ -113,17 +113,20 @@ pub fn run_tui(stats: &AgenticCodingToolStats, format_options: &NumberFormatOpti
         // total_ai_msgs += day_stats.ai_messages;
         total_tool_calls += day_stats.tool_calls;
 
+        // Collects model abbreviations from day_stats, falling back to model names if no
+        // abbreviation is found
         let models = day_stats
             .models
             .keys()
             .map(|k| {
-                *stats
+                stats
                     .model_abbrs
                     .model_to_abbr
-                    .get(k.as_str())
-                    .unwrap_or(&k.as_str())
+                    .get(k)
+                    .unwrap_or(&k.clone())
+                    .clone()
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<String>>()
             .join(", ");
 
         let cached_tokens = format_number(day_stats.cached_tokens, format_options);

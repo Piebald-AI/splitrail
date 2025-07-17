@@ -8,6 +8,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub upload: UploadConfig,
     pub formatting: FormattingConfig,
+    pub last_date_uploaded: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -51,6 +52,7 @@ impl Default for Config {
                 locale: "en".to_string(),
                 decimal_places: 2,
             },
+            last_date_uploaded: 0,  
         }
     }
 }
@@ -101,6 +103,10 @@ impl Config {
 
     pub fn is_configured(&self) -> bool {
         !self.server.api_token.is_empty() && !self.server.url.is_empty()
+    }
+
+    pub fn set_last_date_uploaded(&mut self, date: i64) {
+        self.last_date_uploaded = date;
     }
 }
 

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use chrono::Datelike;
 use num_format::{Locale, ToFormattedString};
+use serde::{Deserialize, Serialize};
 
 use crate::types::{ConversationMessage, DailyStats};
 
@@ -337,7 +338,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 stats.file_operations.files_read += file_operations.files_read;
                 stats.file_operations.files_edited += file_operations.files_edited;
                 stats.file_operations.files_written += file_operations.files_written;
-                stats.file_operations.bash_commands += file_operations.bash_commands;
+                stats.file_operations.terminal_commands += file_operations.terminal_commands;
                 stats.file_operations.glob_searches += file_operations.glob_searches;
                 stats.file_operations.grep_searches += file_operations.grep_searches;
                 stats.file_operations.lines_read += file_operations.lines_read;
@@ -436,10 +437,11 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
     daily_stats
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelAbbreviations {
-    pub abbr_to_desc: BTreeMap<&'static str, &'static str>,
-    pub model_to_abbr: BTreeMap<&'static str, &'static str>,
-    pub abbr_to_model: BTreeMap<&'static str, &'static str>,
+    pub abbr_to_desc: BTreeMap<String, String>,
+    pub model_to_abbr: BTreeMap<String, String>,
+    pub abbr_to_model: BTreeMap<String, String>,
 }
 
 impl ModelAbbreviations {
@@ -451,9 +453,9 @@ impl ModelAbbreviations {
         }
     }
 
-    pub fn add(&mut self, model: &'static str, abbr: &'static str, desc: &'static str) {
-        self.abbr_to_desc.insert(abbr, desc);
-        self.model_to_abbr.insert(model, abbr);
-        self.abbr_to_model.insert(abbr, model);
+    pub fn add(&mut self, model: String, abbr: String, desc: String) {
+        self.abbr_to_desc.insert(abbr.clone(), desc.clone());
+        self.model_to_abbr.insert(model.clone(), abbr.clone());
+        self.abbr_to_model.insert(abbr.clone(), model.clone());
     }
 }

@@ -69,14 +69,18 @@ async fn main() {
     let cli = Cli::parse();
 
     // Load config file to get defaults
-    let config = config::Config::load().unwrap_or_else(|_| None).unwrap_or_default();
+    let config = config::Config::load()
+        .unwrap_or_else(|_| None)
+        .unwrap_or_default();
 
     // Create format options merging config defaults with CLI overrides
     let format_options = utils::NumberFormatOptions {
         use_comma: cli.number_comma || config.formatting.number_comma,
         use_human: cli.number_human || config.formatting.number_human,
         locale: cli.locale.unwrap_or(config.formatting.locale),
-        decimal_places: cli.decimal_places.unwrap_or(config.formatting.decimal_places),
+        decimal_places: cli
+            .decimal_places
+            .unwrap_or(config.formatting.decimal_places),
     };
 
     match cli.command {
@@ -85,7 +89,7 @@ async fn main() {
             run_default(format_options).await;
         }
         Some(Commands::Upload) => {
-            run_upload().await;
+            run_upload(None).await;
         }
         Some(Commands::Config(config_args)) => {
             handle_config_subcommand(config_args).await;
@@ -110,54 +114,40 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         eprintln!("❌ Error displaying TUI: {}", e);
     }
 
-    // Check if auto-upload is enabled
-    match config::Config::load() {
-        Ok(Some(config)) if config.upload.auto_upload && config.is_configured() => {
-            println!();
-            println!("📡 Auto-upload enabled, uploading stats...");
-
-            if let Err(e) = upload::upload_daily_stats(&stats.daily_stats, &config).await {
-                eprintln!("⚠️  Upload failed: {}", e);
-                eprintln!("   💡 Tip: Check your configuration with 'splitrail config show'");
-            }
-        }
-        Ok(Some(config)) if config.upload.auto_upload => {
-            println!();
-            println!("⚠️  Auto-upload enabled but configuration incomplete");
-            upload::show_upload_help();
-        }
-        Ok(Some(_)) => {
-            // Config exists but auto-upload disabled
-            println!();
-            println!("💡 Tip: Enable auto-upload with 'splitrail config set auto-upload true'");
-        }
-        Ok(None) => {
-            // No config file
-            println!();
-            println!("💡 Tip: Configure splitrail to upload to the Splitrail Leaderboard:");
-            upload::show_upload_help();
-        }
-        Err(e) => {
-            eprintln!("⚠️  Config error: {}", e);
-        }
-    }
+    run_upload(Some(stats)).await;
 }
 
-async fn run_upload() {
+async fn run_upload(stats: Option<AgenticCodingToolStats>) {
     println!("🔍 Analyzing Claude Code usage for upload...");
 
-    let stats = match claude_code::get_claude_code_stats().await {
-        Ok(stats) => stats,
-        Err(e) => {
-            eprintln!("❌ Error analyzing Claude Code data: {}", e);
-            std::process::exit(1);
-        }
+    let stats = match stats {
+        Some(stats) => stats,
+        None => match claude_code::get_claude_code_stats().await {
+            Ok(stats) => stats,
+            Err(e) => {
+                eprintln!("❌ Error analyzing Claude Code data: {}", e);
+                std::process::exit(1);
+            }
+        },
     };
 
     match config::Config::load() {
-        Ok(Some(config)) if config.is_configured() => {
-            if let Err(e) = upload::upload_daily_stats(&stats.daily_stats, &config).await {
-                eprintln!("❌ Upload failed: {}", e);
+        Ok(Some(mut config)) if config.is_configured() => {
+            let messages = match claude_code::get_messages_later_than(
+                config.last_date_uploaded,
+                stats.messages,
+            )
+            .await
+            {
+                Ok(messages) => messages,
+                Err(e) => {
+                    eprintln!("❌ Error getting messages: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            if let Err(e) = upload::upload_message_stats(&messages, &mut config).await {
+                eprintln!("❌ Upload failed: {:#}", e);
+                eprintln!("💡 Tip: Check your configuration with 'splitrail config show'");
                 std::process::exit(1);
             }
         }
@@ -200,4 +190,3 @@ async fn handle_config_subcommand(config_args: ConfigArgs) {
         }
     }
 }
-
