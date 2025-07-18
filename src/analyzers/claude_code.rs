@@ -121,6 +121,7 @@ impl Analyzer for ClaudeCodeAnalyzer {
             num_conversations,
             model_abbrs: self.get_model_abbreviations(),
             messages,
+            analyzer_name: self.display_name().to_string(),
         })
     }
     
