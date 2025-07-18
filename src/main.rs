@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 
 use analyzer::AnalyzerRegistry;
 use analyzers::ClaudeCodeAnalyzer;
+use types::AgenticCodingToolStats;
 
 mod analyzer;
 mod analyzers;
