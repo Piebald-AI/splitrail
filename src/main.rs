@@ -3,8 +3,8 @@
 use clap::{Args, Parser, Subcommand};
 
 use analyzer::AnalyzerRegistry;
-use analyzers::ClaudeCodeAnalyzer;
-use types::AgenticCodingToolStats;
+use analyzers::{ClaudeCodeAnalyzer, CodexAnalyzer};
+use types::{AgenticCodingToolStats, MultiAnalyzerStats};
 
 mod analyzer;
 mod analyzers;
@@ -107,6 +107,7 @@ fn create_analyzer_registry() -> AnalyzerRegistry {
     
     // Register available analyzers
     registry.register(ClaudeCodeAnalyzer::new());
+    registry.register(CodexAnalyzer::new());
     
     registry
 }
@@ -114,33 +115,48 @@ fn create_analyzer_registry() -> AnalyzerRegistry {
 async fn run_default(format_options: utils::NumberFormatOptions) {
     let registry = create_analyzer_registry();
     
-    // Get the primary (first available) analyzer
-    let analyzer = match registry.get_primary_analyzer() {
-        Some(analyzer) => analyzer,
-        None => {
-            eprintln!("❌ No supported AI coding tools found on this system");
-            eprintln!("   💡 Supported tools: Claude Code, Codex (coming soon)");
-            std::process::exit(1);
-        }
-    };
+    // Get all available analyzers
+    let available_analyzers = registry.available_analyzers();
+    if available_analyzers.is_empty() {
+        eprintln!("❌ No supported AI coding tools found on this system");
+        eprintln!("   💡 Supported tools: Claude Code, Codex");
+        std::process::exit(1);
+    }
 
-    println!("🔍 Analyzing {} usage...", analyzer.display_name());
+    println!("🔍 Analyzing AI coding tool usage...");
 
-    // Get stats from the analyzer
-    let stats = match analyzer.get_stats().await {
-        Ok(stats) => stats,
-        Err(e) => {
-            eprintln!("❌ Error analyzing {} data: {}", analyzer.display_name(), e);
-            std::process::exit(1);
+    // Get stats from all available analyzers
+    let mut all_stats = Vec::new();
+    for analyzer in available_analyzers {
+        println!("   📊 Processing {} data...", analyzer.display_name());
+        
+        match analyzer.get_stats().await {
+            Ok(stats) => all_stats.push(stats),
+            Err(e) => {
+                eprintln!("⚠️  Error analyzing {} data: {}", analyzer.display_name(), e);
+                // Continue with other analyzers instead of exiting
+            }
         }
+    }
+
+    if all_stats.is_empty() {
+        eprintln!("❌ No data could be analyzed from any supported tools");
+        std::process::exit(1);
+    }
+
+    let multi_stats = MultiAnalyzerStats {
+        analyzer_stats: all_stats,
     };
 
     // Show TUI
-    if let Err(e) = tui::run_tui(&stats, &format_options) {
+    if let Err(e) = tui::run_multi_tui(&multi_stats, &format_options) {
         eprintln!("❌ Error displaying TUI: {}", e);
     }
 
-    run_upload(Some(stats)).await;
+    // For upload, use the analyzer with the most data
+    if let Some(primary_stats) = multi_stats.analyzer_stats.iter().max_by_key(|s| s.num_conversations) {
+        run_upload(Some(primary_stats.clone())).await;
+    }
 }
 
 async fn run_upload(stats: Option<AgenticCodingToolStats>) {
@@ -152,12 +168,12 @@ async fn run_upload(stats: Option<AgenticCodingToolStats>) {
         None => {
             let registry = create_analyzer_registry();
             
-            // Get the primary (first available) analyzer
-            let analyzer = match registry.get_primary_analyzer() {
+            // Get the primary analyzer (prioritized by data volume)
+            let analyzer = match registry.get_primary_analyzer_by_volume().await {
                 Some(analyzer) => analyzer,
                 None => {
                     eprintln!("❌ No supported AI coding tools found on this system");
-                    eprintln!("   💡 Supported tools: Claude Code, Codex (coming soon)");
+                    eprintln!("   💡 Supported tools: Claude Code, Codex");
                     std::process::exit(1);
                 }
             };

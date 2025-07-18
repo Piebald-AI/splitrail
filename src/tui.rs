@@ -1,14 +1,34 @@
-use crate::types::AgenticCodingToolStats;
+use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats};
 use crate::utils::{format_date_for_display, format_number, NumberFormatOptions};
 use anyhow::Result;
 use colored::*;
 
 // TODO: We really need to use a libary for this.
 pub fn run_tui(stats: &AgenticCodingToolStats, format_options: &NumberFormatOptions) -> Result<()> {
+    display_single_analyzer_stats(stats, format_options)
+}
+
+pub fn run_multi_tui(multi_stats: &MultiAnalyzerStats, format_options: &NumberFormatOptions) -> Result<()> {
     println!();
     println!("{}", "AGENTIC CODING TOOL ACTIVITY ANALYSIS".cyan().bold());
     println!("{}", "=====================================".cyan().bold());
     println!();
+    
+    // Display each analyzer separately
+    for (i, stats) in multi_stats.analyzer_stats.iter().enumerate() {
+        if i > 0 {
+            println!();
+            println!("{}", "─".repeat(80).dimmed());
+            println!();
+        }
+        
+        display_single_analyzer_stats(stats, format_options)?;
+    }
+    
+    Ok(())
+}
+
+fn display_single_analyzer_stats(stats: &AgenticCodingToolStats, format_options: &NumberFormatOptions) -> Result<()> {
     println!("{} ({} chats)", stats.analyzer_name, stats.num_conversations);
     println!();
     println!("{}", "*Models:".dimmed());
