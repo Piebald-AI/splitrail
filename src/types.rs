@@ -13,13 +13,7 @@ pub enum ConversationMessage {
         input_tokens: u64,
         output_tokens: u64,
         
-        // Legacy fields for backward compatibility
-        #[serde(default)]
-        cache_creation_tokens: u64,
-        #[serde(default)]
-        cache_read_tokens: u64,
-        
-        // New flexible caching structure
+        // Flexible caching structure - different tools implement differently
         #[serde(skip_serializing_if = "Option::is_none")]
         caching_info: Option<CachingInfo>,
         
@@ -30,7 +24,10 @@ pub enum ConversationMessage {
         hash: Option<String>,
         conversation_file: String,
         file_operations: FileOperationStats,
-        todo_stats: TodoStats,
+        
+        // Optional features (not all tools support these)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        todo_stats: Option<TodoStats>,
         
         // Tool-specific data
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -40,7 +37,10 @@ pub enum ConversationMessage {
     User {
         timestamp: String,
         conversation_file: String,
-        todo_stats: TodoStats,
+        
+        // Optional features (not all tools support these)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        todo_stats: Option<TodoStats>,
         
         // Tool-specific data
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -62,7 +62,8 @@ pub struct DailyStats {
     pub conversations: u32,
     pub models: BTreeMap<String, u32>,
     pub file_operations: FileOperationStats,
-    pub todo_stats: TodoStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub todo_stats: Option<TodoStats>,
     pub max_flow_length_seconds: u64, // Longest autonomous AI operation in seconds
 }
 

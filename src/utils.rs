@@ -317,8 +317,6 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
         match entry {
             ConversationMessage::AI {
                 cost,
-                cache_creation_tokens,
-                cache_read_tokens,
                 caching_info,
                 input_tokens,
                 output_tokens,
@@ -330,13 +328,10 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
             } => {
                 stats.cost += cost;
                 
-                // Handle both legacy caching fields and new flexible caching
-                let cached_tokens = if let Some(caching_info) = caching_info {
-                    caching_info.total_cached_tokens()
-                } else {
-                    cache_creation_tokens + cache_read_tokens
-                };
-                stats.cached_tokens += cached_tokens;
+                // Handle flexible caching info
+                if let Some(caching_info) = caching_info {
+                    stats.cached_tokens += caching_info.total_cached_tokens();
+                }
                 
                 stats.input_tokens += input_tokens;
                 stats.output_tokens += output_tokens;
@@ -365,22 +360,34 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                         .or_insert(0) += count;
                 }
 
-                // Aggregate todo stats for this day
-                stats.todo_stats.todos_created += todo_stats.todos_created;
-                stats.todo_stats.todos_completed += todo_stats.todos_completed;
-                stats.todo_stats.todos_in_progress += todo_stats.todos_in_progress;
-                stats.todo_stats.todo_writes += todo_stats.todo_writes;
-                stats.todo_stats.todo_reads += todo_stats.todo_reads;
+                // Aggregate todo stats for this day (if available)
+                if let Some(todo_stats) = todo_stats {
+                    if let Some(ref mut daily_todos) = stats.todo_stats {
+                        daily_todos.todos_created += todo_stats.todos_created;
+                        daily_todos.todos_completed += todo_stats.todos_completed;
+                        daily_todos.todos_in_progress += todo_stats.todos_in_progress;
+                        daily_todos.todo_writes += todo_stats.todo_writes;
+                        daily_todos.todo_reads += todo_stats.todo_reads;
+                    } else {
+                        stats.todo_stats = Some(todo_stats.clone());
+                    }
+                }
             }
             ConversationMessage::User { todo_stats, .. } => {
                 stats.user_messages += 1;
 
-                // Aggregate todo stats from user messages too
-                stats.todo_stats.todos_created += todo_stats.todos_created;
-                stats.todo_stats.todos_completed += todo_stats.todos_completed;
-                stats.todo_stats.todos_in_progress += todo_stats.todos_in_progress;
-                stats.todo_stats.todo_writes += todo_stats.todo_writes;
-                stats.todo_stats.todo_reads += todo_stats.todo_reads;
+                // Aggregate todo stats from user messages too (if available)
+                if let Some(todo_stats) = todo_stats {
+                    if let Some(ref mut daily_todos) = stats.todo_stats {
+                        daily_todos.todos_created += todo_stats.todos_created;
+                        daily_todos.todos_completed += todo_stats.todos_completed;
+                        daily_todos.todos_in_progress += todo_stats.todos_in_progress;
+                        daily_todos.todo_writes += todo_stats.todo_writes;
+                        daily_todos.todo_reads += todo_stats.todo_reads;
+                    } else {
+                        stats.todo_stats = Some(todo_stats.clone());
+                    }
+                }
             }
         };
     }

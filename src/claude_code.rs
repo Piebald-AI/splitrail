@@ -393,7 +393,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
             entries.push(ConversationMessage::User {
                 timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
                 conversation_file: conversation_file.clone(),
-                todo_stats,
+                todo_stats: Some(todo_stats),
                 analyzer_specific: std::collections::HashMap::new(),
             });
             continue;
@@ -411,11 +411,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
                     
-                    // Legacy fields for backward compatibility
-                    cache_creation_tokens: usage.cache_creation_tokens,
-                    cache_read_tokens: usage.cache_read_tokens,
-                    
-                    // New flexible caching structure
+                    // Claude Code uses creation and read tokens
                     caching_info: if usage.cache_creation_tokens > 0 || usage.cache_read_tokens > 0 {
                         Some(CachingInfo::CreationAndRead {
                             cache_creation_tokens: usage.cache_creation_tokens,
@@ -440,7 +436,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                     hash,
                     conversation_file: conversation_file.clone(),
                     file_operations: file_ops,
-                    todo_stats,
+                    todo_stats: Some(todo_stats),
                     analyzer_specific: std::collections::HashMap::new(),
                 });
             }
@@ -448,7 +444,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
             None => entries.push(ConversationMessage::User {
                 timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
                 conversation_file: conversation_file.clone(),
-                todo_stats,
+                todo_stats: Some(todo_stats),
                 analyzer_specific: std::collections::HashMap::new(),
             }),
         }
