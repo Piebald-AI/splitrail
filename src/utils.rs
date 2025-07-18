@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use chrono::Datelike;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Datelike};
 use num_format::{Locale, ToFormattedString};
 use serde::{Deserialize, Serialize};
 
@@ -475,4 +476,35 @@ impl ModelAbbreviations {
         self.model_to_abbr.insert(model.clone(), abbr.clone());
         self.abbr_to_model.insert(abbr.clone(), model.clone());
     }
+}
+
+/// Filters messages to only include those created after a specific date
+pub async fn get_messages_later_than(
+    date: i64,
+    messages: Vec<ConversationMessage>,
+) -> Result<Vec<ConversationMessage>> {
+    let mut messages_later_than_date = Vec::new();
+    for msg in messages {
+        let timestamp = match &msg {
+            ConversationMessage::AI { timestamp, .. } => timestamp,
+            ConversationMessage::User { timestamp, .. } => timestamp,
+        };
+        if let Ok(timestamp) = DateTime::parse_from_rfc3339(timestamp)
+            .with_context(|| format!("Failed to parse timestamp: {}", timestamp))
+        {
+            if timestamp.timestamp_millis() >= date {
+                messages_later_than_date.push(msg);
+            }
+        }
+    }
+
+    Ok(messages_later_than_date)
+}
+
+/// Filters messages to only include those created after a specific date (alternative implementation)
+pub async fn filter_messages_after_date(
+    date: i64,
+    messages: Vec<ConversationMessage>,
+) -> Result<Vec<ConversationMessage>> {
+    get_messages_later_than(date, messages).await
 }
