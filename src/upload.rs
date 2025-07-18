@@ -68,12 +68,12 @@ pub async fn upload_message_stats(
     }
 }
 
-fn estimate_lines_added(file_ops: &FileOperationStats) -> u64 {
+pub fn estimate_lines_added(file_ops: &FileOperationStats) -> u64 {
     // Estimate that written files are mostly new content
     file_ops.lines_written + (file_ops.lines_edited / 3)
 }
 
-fn estimate_lines_deleted(file_ops: &FileOperationStats) -> u64 {
+pub fn estimate_lines_deleted(file_ops: &FileOperationStats) -> u64 {
     // Estimate that some edited content was deleted
     file_ops.lines_edited / 4
 }
