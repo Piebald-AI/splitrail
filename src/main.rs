@@ -7,7 +7,6 @@ use analyzers::ClaudeCodeAnalyzer;
 
 mod analyzer;
 mod analyzers;
-mod claude_code;
 mod config;
 mod models;
 mod tui;
@@ -176,7 +175,7 @@ async fn run_upload(stats: Option<AgenticCodingToolStats>) {
 
     match config::Config::load() {
         Ok(Some(mut config)) if config.is_configured() => {
-            let messages = match claude_code::get_messages_later_than(
+            let messages = match utils::get_messages_later_than(
                 config.last_date_uploaded,
                 stats.messages,
             )
