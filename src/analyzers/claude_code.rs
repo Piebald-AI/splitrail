@@ -1,6 +1,5 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -12,6 +11,7 @@ use crate::models::MODEL_PRICING;
 use crate::types::{
     AgenticCodingToolStats, ConversationMessage, FileCategory, FileOperationStats, TodoStats,
 };
+use crate::upload::{estimate_lines_added, estimate_lines_deleted};
 use crate::utils::ModelAbbreviations;
 
 pub struct ClaudeCodeAnalyzer;
@@ -350,6 +350,9 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
             }
         }
     }
+
+    file_ops.lines_added = estimate_lines_added(&file_ops);
+    file_ops.lines_deleted = estimate_lines_deleted(&file_ops);
 
     (file_ops, if has_todo_activity { Some(todo_stats) } else { None })
 }

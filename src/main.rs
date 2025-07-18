@@ -1,4 +1,4 @@
-#![feature(if_let_guard, let_chains)]
+#![feature(if_let_guard)]
 
 use clap::{Args, Parser, Subcommand};
 
