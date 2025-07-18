@@ -154,6 +154,11 @@ pub struct AgenticCodingToolStats {
     pub analyzer_name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiAnalyzerStats {
+    pub analyzer_stats: Vec<AgenticCodingToolStats>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct UploadStatsRequest {
     pub date: String,

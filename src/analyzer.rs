@@ -153,4 +153,22 @@ impl AnalyzerRegistry {
     pub fn get_primary_analyzer(&self) -> Option<&dyn Analyzer> {
         self.available_analyzers().into_iter().next()
     }
+    
+    /// Get the analyzer with the most data sources (prioritizes by volume)
+    pub async fn get_primary_analyzer_by_volume(&self) -> Option<&dyn Analyzer> {
+        let mut best_analyzer: Option<&dyn Analyzer> = None;
+        let mut best_count: usize = 0;
+        
+        for analyzer in self.available_analyzers() {
+            if let Ok(sources) = analyzer.discover_data_sources().await {
+                let count = sources.len();
+                if count > best_count {
+                    best_count = count;
+                    best_analyzer = Some(analyzer);
+                }
+            }
+        }
+        
+        best_analyzer
+    }
 }
