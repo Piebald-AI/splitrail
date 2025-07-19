@@ -718,7 +718,7 @@ fn draw_daily_stats_table(
         .values()
         .map(|s| s.file_operations.lines_edited)
         .sum::<u64>();
-    let total_lines_w = stats
+    let total_lines_a = stats
         .daily_stats
         .values()
         .map(|s| s.file_operations.lines_added)
@@ -781,7 +781,7 @@ fn draw_daily_stats_table(
                 "{}/{}/{}",
                 format_number(total_lines_r, format_options),
                 format_number(total_lines_e, format_options),
-                format_number(total_lines_w, format_options)
+                format_number(total_lines_a, format_options)
             ),
             Style::default()
                 .fg(Color::Blue)

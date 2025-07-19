@@ -140,12 +140,6 @@ pub fn estimate_lines_deleted(file_ops: &FileOperationStats) -> u64 {
     file_ops.lines_edited / 4
 }
 
-fn determine_language_from_files(_count: &u32) -> Option<String> {
-    // This is a simplified implementation
-    // In a real implementation, we'd track file extensions and map them to languages
-    Some("typescript".to_string())
-}
-
 pub fn show_upload_help() {
     println!();
     println!("To enable automatic uploads to the Splitrail Leaderboard:");
