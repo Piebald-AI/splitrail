@@ -75,6 +75,7 @@ pub struct ModelPricing {
     pub output_cost_per_token: f64,
     pub cache_creation_input_token_cost: f64,
     pub cache_read_input_token_cost: f64,
+    pub model_rules: crate::models::ModelSpecificRules,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

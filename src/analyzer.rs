@@ -40,6 +40,7 @@ pub enum CachingType {
     CreationAndRead,  // Claude Code: separate creation/read tokens
     InputOnly,        // Codex: only cached input tokens
     Generic,          // For tools with simple cached tokens
+    ContextCaching,   // Gemini: context caching with volume-based pricing
 }
 
 /// Flexible caching information that can represent different tool implementations
@@ -62,6 +63,13 @@ pub enum CachingInfo {
     Generic {
         cached_tokens: u64,
     },
+    /// Gemini style: context caching with volume-based pricing
+    #[serde(rename = "contextCaching")]
+    ContextCaching {
+        cached_tokens: u64,
+        /// Whether these tokens are in the high-volume tier (>200k)
+        high_volume: bool,
+    },
 }
 
 impl CachingInfo {
@@ -73,6 +81,7 @@ impl CachingInfo {
             }
             CachingInfo::InputOnly { cached_input_tokens } => *cached_input_tokens,
             CachingInfo::Generic { cached_tokens } => *cached_tokens,
+            CachingInfo::ContextCaching { cached_tokens, .. } => *cached_tokens,
         }
     }
 }
