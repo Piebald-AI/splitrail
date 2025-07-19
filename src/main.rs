@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use analyzer::AnalyzerRegistry;
-use analyzers::{ClaudeCodeAnalyzer, CodexAnalyzer};
+use analyzers::{ClaudeCodeAnalyzer, CodexAnalyzer, GeminiAnalyzer};
 use types::{AgenticCodingToolStats, MultiAnalyzerStats};
 
 mod analyzer;
@@ -110,6 +110,7 @@ fn create_analyzer_registry() -> AnalyzerRegistry {
     // Register available analyzers
     registry.register(ClaudeCodeAnalyzer::new());
     registry.register(CodexAnalyzer::new());
+    registry.register(GeminiAnalyzer::new());
     
     registry
 }
@@ -121,7 +122,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let available_analyzers = registry.available_analyzers();
     if available_analyzers.is_empty() {
         eprintln!("❌ No supported AI coding tools found on this system");
-        eprintln!("   💡 Supported tools: Claude Code, Codex");
+        eprintln!("   💡 Supported tools: Claude Code, Codex, Gemini CLI");
         std::process::exit(1);
     }
 
@@ -265,7 +266,7 @@ async fn run_upload(stats: Option<AgenticCodingToolStats>) {
                 Some(analyzer) => analyzer,
                 None => {
                     eprintln!("❌ No supported AI coding tools found on this system");
-                    eprintln!("   💡 Supported tools: Claude Code, Codex");
+                    eprintln!("   💡 Supported tools: Claude Code, Codex, Gemini CLI");
                     std::process::exit(1);
                 }
             };

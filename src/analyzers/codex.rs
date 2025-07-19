@@ -89,10 +89,6 @@ impl Analyzer for CodexAnalyzer {
         // Codex models
         abbrs.add("codex-mini-latest".to_string(), "CXm".to_string(), "Codex Mini Latest".to_string());
         
-        // Special models
-        abbrs.add("computer-use-preview-2025-03-11".to_string(), "CUP".to_string(), "Computer Use Preview".to_string());
-        abbrs.add("gpt-image-1".to_string(), "GPTImg".to_string(), "GPT Image 1".to_string());
-        
         abbrs
     }
     
