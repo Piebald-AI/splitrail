@@ -485,7 +485,7 @@ fn draw_daily_stats_table(
             "{}/{}/{}",
             format_number(day_stats.file_operations.lines_read, format_options),
             format_number(day_stats.file_operations.lines_edited, format_options),
-            format_number(day_stats.file_operations.lines_written, format_options)
+            format_number(day_stats.file_operations.lines_added, format_options)
         );
 
         // Check if this is an empty row
@@ -721,7 +721,7 @@ fn draw_daily_stats_table(
     let total_lines_w = stats
         .daily_stats
         .values()
-        .map(|s| s.file_operations.lines_written)
+        .map(|s| s.file_operations.lines_added)
         .sum::<u64>();
 
     let totals_row = Row::new(vec![

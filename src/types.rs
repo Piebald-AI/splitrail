@@ -28,6 +28,7 @@ pub enum ConversationMessage {
         // Optional features (not all tools support these)
         #[serde(skip_serializing_if = "Option::is_none")]
         todo_stats: Option<TodoStats>,
+        composition_stats: CompositionStats,
         
         // Tool-specific data
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -64,6 +65,7 @@ pub struct DailyStats {
     pub file_operations: FileOperationStats,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub todo_stats: Option<TodoStats>,
+    pub composition_stats: CompositionStats,
     pub max_flow_length_seconds: u64, // Longest autonomous AI operation in seconds
 }
 
@@ -78,31 +80,43 @@ pub struct ModelPricing {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileOperationStats {
-    pub files_read: u32,
-    pub files_edited: u32,
-    pub files_written: u32,
-    pub file_types: BTreeMap<String, u32>, // grouped by category
-    pub terminal_commands: u32,
-    pub glob_searches: u32,
-    pub grep_searches: u32,
+    pub file_types: BTreeMap<String, u64>, // grouped by category
+    pub terminal_commands: u64,
+    pub file_searches: u64,
+    pub file_content_searches: u64,
+    pub files_read: u64,
+    pub files_added: u64,
+    pub files_edited: u64,
+    pub files_deleted: u64,
     pub lines_read: u64,
     pub lines_added: u64,
     pub lines_edited: u64,
     pub lines_deleted: u64,
-    pub lines_written: u64,
     pub bytes_read: u64,
+    pub bytes_added: u64,
     pub bytes_edited: u64,
-    pub bytes_written: u64,
+    pub bytes_deleted: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoStats {
-    pub todos_created: u32,
-    pub todos_completed: u32,
-    pub todos_in_progress: u32,
-    pub todo_writes: u32,
-    pub todo_reads: u32,
+    pub todos_created: u64,
+    pub todos_completed: u64,
+    pub todos_in_progress: u64,
+    pub todo_writes: u64,
+    pub todo_reads: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositionStats {
+    pub code_lines: u64,
+    pub docs_lines: u64,
+    pub data_lines: u64,
+    pub media_lines: u64,
+    pub config_lines: u64,
+    pub other_lines: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
