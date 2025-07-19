@@ -55,12 +55,16 @@ pub fn format_number(n: u64, options: &NumberFormatOptions) -> String {
     }
 }
 
-fn extract_date_from_timestamp(timestamp: &str) -> String {
+pub fn extract_date_from_timestamp(timestamp: &str) -> Option<String> {
+    if timestamp.is_empty() {
+        return None;
+    }
+    
     if let Ok(datetime_utc) = chrono::DateTime::parse_from_rfc3339(timestamp) {
         let datetime_local = datetime_utc.with_timezone(&chrono::Local);
-        datetime_local.format("%Y-%m-%d").to_string()
+        Some(datetime_local.format("%Y-%m-%d").to_string())
     } else {
-        "unknown".to_string()
+        None
     }
 }
 
@@ -120,7 +124,10 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
                     // User message ends the current flow
                     if let (Some(start), Some(end)) = (flow_start, last_ai_timestamp) {
                         let flow_duration = (end - start) as u64;
-                        let date = extract_date_from_timestamp(timestamp);
+                        let date = match extract_date_from_timestamp(timestamp) {
+                            Some(d) => d,
+                            None => continue,
+                        };
 
                         // Debug long flows to understand the issue
                         if flow_duration > 7200 {
@@ -184,7 +191,10 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
                 .find(|msg| matches!(msg, ConversationMessage::AI { .. }))
             {
                 if let ConversationMessage::AI { timestamp, .. } = last_ai_msg {
-                    let date = extract_date_from_timestamp(timestamp);
+                    let date = match extract_date_from_timestamp(timestamp) {
+                        Some(d) => d,
+                        None => continue,
+                    };
 
                     // Debug long flows to understand the issue
                     if flow_duration > 7200 {
@@ -281,7 +291,10 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 ..
             } => (timestamp, conversation_file),
         };
-        let date = extract_date_from_timestamp(timestamp);
+        let date = match extract_date_from_timestamp(timestamp) {
+            Some(d) => d,
+            None => continue, // Skip entries with invalid timestamps
+        };
 
         // Only update if this is earlier than what we've seen, or if we haven't seen this conversation
         conversation_start_dates
@@ -306,6 +319,11 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
         let date = match entry {
             ConversationMessage::AI { timestamp, .. } => extract_date_from_timestamp(timestamp),
             ConversationMessage::User { timestamp, .. } => extract_date_from_timestamp(timestamp),
+        };
+        
+        let date = match date {
+            Some(d) => d,
+            None => continue, // Skip entries with invalid timestamps
         };
 
         let stats = daily_stats
