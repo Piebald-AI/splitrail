@@ -343,16 +343,16 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 // Aggregate file operations for this day
                 stats.file_operations.files_read += file_operations.files_read;
                 stats.file_operations.files_edited += file_operations.files_edited;
-                stats.file_operations.files_written += file_operations.files_written;
+                stats.file_operations.files_added += file_operations.files_added;
                 stats.file_operations.terminal_commands += file_operations.terminal_commands;
-                stats.file_operations.glob_searches += file_operations.glob_searches;
-                stats.file_operations.grep_searches += file_operations.grep_searches;
+                stats.file_operations.file_content_searches += file_operations.file_content_searches;
+                stats.file_operations.file_searches += file_operations.file_searches;
                 stats.file_operations.lines_read += file_operations.lines_read;
                 stats.file_operations.lines_edited += file_operations.lines_edited;
-                stats.file_operations.lines_written += file_operations.lines_written;
+                stats.file_operations.lines_added += file_operations.lines_added;
                 stats.file_operations.bytes_read += file_operations.bytes_read;
                 stats.file_operations.bytes_edited += file_operations.bytes_edited;
-                stats.file_operations.bytes_written += file_operations.bytes_written;
+                stats.file_operations.bytes_added += file_operations.bytes_added;
                 for (file_type, count) in &file_operations.file_types {
                     *stats
                         .file_operations
