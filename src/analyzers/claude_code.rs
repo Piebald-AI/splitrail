@@ -269,7 +269,7 @@ fn is_synthetic_entry(data: &ClaudeCodeEntry) -> bool {
             // No model specified could indicate synthetic content
             return true;
         }
-        
+
         // Check if content contains synthetic markers
         if let Some(Content::String(content_str)) = &message.content {
             if content_str.contains("<synthetic>") {
@@ -277,7 +277,7 @@ fn is_synthetic_entry(data: &ClaudeCodeEntry) -> bool {
             }
         }
     }
-    
+
     false
 }
 
@@ -615,14 +615,96 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
             ConversationMessage::AI { timestamp, .. } => timestamp,
             ConversationMessage::User { timestamp, .. } => timestamp,
         };
-        
+
         // Skip messages with unknown dates
         if crate::utils::extract_date_from_timestamp(timestamp).is_none() {
             continue;
         }
-        
+
         entries.push(message);
     }
 
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_extract_date_from_timestamp_valid() {
+        let timestamp = "2023-12-01T10:30:00Z";
+        let result = crate::utils::extract_date_from_timestamp(timestamp);
+        assert!(result.is_some());
+        assert!(result.unwrap().starts_with("2023-12-01"));
+    }
+
+    #[test]
+    fn test_extract_date_from_timestamp_empty() {
+        let timestamp = "";
+        let result = crate::utils::extract_date_from_timestamp(timestamp);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_date_from_timestamp_invalid() {
+        let timestamp = "invalid-timestamp";
+        let result = crate::utils::extract_date_from_timestamp(timestamp);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_summary_only_conversation_filtered() {
+        // Create a temporary file with summary-only content
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_summary_only.jsonl");
+
+        let jsonl_content = r#"{"type":"summary","summary":"Test Summary","leafUuid":"test-uuid"}"#;
+        std::fs::write(&temp_file, jsonl_content).unwrap();
+
+        let messages = parse_jsonl_file(&temp_file);
+
+        // Clean up
+        std::fs::remove_file(&temp_file).ok();
+
+        // Should be empty since it only contains summaries
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_invalid_timestamp_filtered() {
+        // Create a temporary file with invalid timestamp
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_invalid_timestamp.jsonl");
+
+        let jsonl_content = r#"{"type":"ai","content":"test","timestamp":"invalid","message":{"model":"test","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        std::fs::write(&temp_file, jsonl_content).unwrap();
+
+        let messages = parse_jsonl_file(&temp_file);
+
+        // Clean up
+        std::fs::remove_file(&temp_file).ok();
+
+        // Should be empty since timestamp is invalid
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_valid_conversation_preserved() {
+        // Create a temporary file with valid content
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_valid.jsonl");
+
+        let jsonl_content = r#"{"type":"ai","content":"test","timestamp":"2023-12-01T10:30:00Z","message":{"model":"test","usage":{"input_tokens":1,"output_tokens":1}}}"#;
+        std::fs::write(&temp_file, jsonl_content).unwrap();
+
+        let messages = parse_jsonl_file(&temp_file);
+
+        // Clean up
+        std::fs::remove_file(&temp_file).ok();
+
+        // Should contain the valid message
+        assert_eq!(messages.len(), 1);
+    }
 }
