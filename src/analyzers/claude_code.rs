@@ -133,7 +133,10 @@ impl Analyzer for ClaudeCodeAnalyzer {
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
         let sources = self.discover_data_sources().await?;
         let messages = self.parse_conversations(sources).await?;
-        let daily_stats = crate::utils::aggregate_by_date(&messages);
+        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
+
+        // Remove any remaining "unknown" entries from daily_stats
+        daily_stats.retain(|date, _| date != "unknown");
 
         let num_conversations = daily_stats
             .values()
@@ -472,6 +475,8 @@ fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
 fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
     let conversation_file = file_path.to_string_lossy().to_string();
     let mut entries = Vec::new();
+    let mut has_non_summary_messages = false;
+    let mut temp_messages = Vec::new();
 
     let file = match File::open(file_path) {
         Ok(f) => f,
@@ -527,11 +532,16 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
             continue;
         }
 
+        // Track if we find any non-summary messages
+        if data.r#type.as_deref() != Some("summary") {
+            has_non_summary_messages = true;
+        }
+
         let hash = hash_cc_entry(&data);
         let (file_ops, todo_stats) = extract_tool_stats(&data);
 
         if data.message.is_none() {
-            entries.push(ConversationMessage::User {
+            temp_messages.push(ConversationMessage::User {
                 timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
                 conversation_file: conversation_file.clone(),
                 todo_stats,
@@ -546,7 +556,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
 
         match message.usage {
             Some(usage) => {
-                entries.push(ConversationMessage::AI {
+                temp_messages.push(ConversationMessage::AI {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
                     caching_info: if usage.cache_creation_tokens > 0 || usage.cache_read_tokens > 0
@@ -585,13 +595,33 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                     analyzer_specific: HashMap::new(),
                 });
             }
-            None => entries.push(ConversationMessage::User {
+            None => temp_messages.push(ConversationMessage::User {
                 timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
                 conversation_file: conversation_file.clone(),
                 todo_stats,
                 analyzer_specific: HashMap::new(),
             }),
         }
+    }
+
+    // Skip conversations that only contain summaries or have no valid timestamps
+    if !has_non_summary_messages && !temp_messages.is_empty() {
+        return entries; // Return empty vector for summary-only conversations
+    }
+
+    // Filter out messages with invalid timestamps and only add valid ones
+    for message in temp_messages {
+        let timestamp = match &message {
+            ConversationMessage::AI { timestamp, .. } => timestamp,
+            ConversationMessage::User { timestamp, .. } => timestamp,
+        };
+        
+        // Skip messages with unknown dates
+        if crate::utils::extract_date_from_timestamp(timestamp).is_none() {
+            continue;
+        }
+        
+        entries.push(message);
     }
 
     entries
