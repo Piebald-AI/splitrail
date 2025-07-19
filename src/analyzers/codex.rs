@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::analyzer::{Analyzer, AnalyzerCapabilities, CachingInfo, CachingType, DataFormat, DataSource};
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, ConversationMessage, FileCategory, FileOperationStats, TodoStats,
+    AgenticCodingToolStats, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, TodoStats
 };
 use crate::utils::ModelAbbreviations;
 
@@ -319,6 +319,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                                         conversation_file: conversation_file.clone(),
                                         file_operations: FileOperationStats::default(),
                                         todo_stats: None,
+                                        composition_stats: CompositionStats::default(),
                                         analyzer_specific: HashMap::new(),
                                     });
                                 }
@@ -356,7 +357,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                     });
                 }
             }
-            CodexEntry::FunctionOutput(output) => {
+            CodexEntry::FunctionOutput(_) => {
                 // We can track function outputs if needed, but for now just skip
                 // Could be used to track command success/failure status
             }
@@ -391,11 +392,11 @@ fn parse_shell_command_for_file_operations(command: &[String]) -> FileOperationS
     
     // Detect file operations based on command patterns
     if actual_command.contains("rg ") || actual_command.contains("grep ") {
-        file_ops.grep_searches += 1;
+        file_ops.file_content_searches += 1;
     }
     
     if actual_command.contains("--files") || actual_command.contains("find ") {
-        file_ops.glob_searches += 1;
+        file_ops.file_searches += 1;
     }
     
     // Detect file reads
@@ -423,9 +424,9 @@ fn parse_shell_command_for_file_operations(command: &[String]) -> FileOperationS
     // Detect file writes
     if actual_command.contains(" > ") || actual_command.contains(" >> ") || 
        actual_command.contains("tee ") || actual_command.contains("echo ") {
-        file_ops.files_written += 1;
-        file_ops.lines_written += 10; // Rough estimate
-        file_ops.bytes_written += 800; // Rough estimate
+        file_ops.files_edited += 1;
+        file_ops.lines_edited += 10; // Rough estimate
+        file_ops.bytes_edited += 800; // Rough estimate
     }
     
     // Detect file edits
