@@ -52,7 +52,7 @@ impl Default for Config {
                 locale: "en".to_string(),
                 decimal_places: 2,
             },
-            last_date_uploaded: 0,  
+            last_date_uploaded: 0,
         }
     }
 }
@@ -78,14 +78,16 @@ impl Config {
         Ok(Some(config))
     }
 
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&self, silent: bool) -> Result<()> {
         let config_path = Self::config_path()?;
-
         let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
 
         fs::write(&config_path, content).context("Failed to write config file")?;
 
-        println!("✅ Configuration saved to: {}", config_path.display());
+        if !silent {
+            println!("✅ Configuration saved to: {}", config_path.display());
+        }
+
         Ok(())
     }
 
@@ -105,6 +107,14 @@ impl Config {
         !self.server.api_token.is_empty() && !self.server.url.is_empty()
     }
 
+    pub fn is_api_token_missing(&self) -> bool {
+        self.server.api_token.is_empty()
+    }
+
+    pub fn is_server_url_missing(&self) -> bool {
+        self.server.url.is_empty()
+    }
+
     pub fn set_last_date_uploaded(&mut self, date: i64) {
         self.last_date_uploaded = date;
     }
@@ -113,7 +123,7 @@ impl Config {
 // CLI helper functions
 pub fn create_default_config() -> Result<()> {
     let config = Config::default();
-    config.save()?;
+    config.save(true)?;
 
     println!("📝 Created default configuration file.");
     println!("📍 Edit it with your server URL and API token:");
@@ -182,15 +192,12 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
             config.formatting.locale = value.to_string();
         }
         "decimal-places" => {
-            let places = value
-                .parse::<usize>()
-                .context("Invalid number value")?;
+            let places = value.parse::<usize>().context("Invalid number value")?;
             config.formatting.decimal_places = places;
         }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }
 
-    config.save()?;
-    println!("✅ Updated {} to: {}", key, value);
+    config.save(false)?;
     Ok(())
 }

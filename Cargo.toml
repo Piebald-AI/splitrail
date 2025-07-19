@@ -20,8 +20,8 @@ tokio = { version = "1", features = ["full"] }
 rayon = "1.8"
 dashmap = "5.5"
 num-format = "0.4"
-ratatui = "0.26"
-crossterm = "0.27"
+ratatui = "0.29"
+crossterm = "0.29"
 reqwest = { version = "0.11", features = ["json"] }
 toml = "0.8"
 clap = { version = "4.5.41", features = ["derive"] }

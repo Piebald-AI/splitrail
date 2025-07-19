@@ -1,6 +1,8 @@
 #![feature(if_let_guard)]
 
 use clap::{Args, Parser, Subcommand};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use analyzer::AnalyzerRegistry;
 use analyzers::{ClaudeCodeAnalyzer, CodexAnalyzer};
@@ -123,13 +125,9 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         std::process::exit(1);
     }
 
-    println!("🔍 Analyzing AI coding tool usage...");
-
     // Get stats from all available analyzers
     let mut all_stats = Vec::new();
     for analyzer in available_analyzers {
-        println!("   📊 Processing {} data...", analyzer.display_name());
-        
         match analyzer.get_stats().await {
             Ok(stats) => all_stats.push(stats),
             Err(e) => {
@@ -148,14 +146,108 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         analyzer_stats: all_stats,
     };
 
-    // Show TUI
-    if let Err(e) = tui::run_multi_tui(&multi_stats, &format_options) {
-        eprintln!("❌ Error displaying TUI: {}", e);
+    // Create upload status for TUI
+    let upload_status = Arc::new(Mutex::new(tui::UploadStatus::None));
+
+    // Check if auto-upload is enabled and start background upload
+    let config = config::Config::load().unwrap_or_else(|_| None).unwrap_or_default();
+    if config.upload.auto_upload {
+        if config.is_configured() {
+            let primary_stats = multi_stats.analyzer_stats.iter().max_by_key(|s| s.num_conversations).cloned();
+            if let Some(stats) = primary_stats {
+                let upload_status_clone = upload_status.clone();
+                tokio::spawn(async move {
+                    run_background_upload(stats, upload_status_clone).await;
+                });
+            }
+        } else {
+            // Auto-upload is enabled but configuration is incomplete
+            if let Ok(mut status) = upload_status.lock() {
+                if config.is_api_token_missing() && config.is_server_url_missing() {
+                    *status = tui::UploadStatus::MissingConfig;
+                } else if config.is_api_token_missing() {
+                    *status = tui::UploadStatus::MissingApiToken;
+                } else if config.is_server_url_missing() {
+                    *status = tui::UploadStatus::MissingServerUrl;
+                } else {
+                    // Shouldn't happen since is_configured() returned false
+                    *status = tui::UploadStatus::MissingConfig;
+                }
+            }
+        }
     }
 
-    // For upload, use the analyzer with the most data
-    if let Some(primary_stats) = multi_stats.analyzer_stats.iter().max_by_key(|s| s.num_conversations) {
-        run_upload(Some(primary_stats.clone())).await;
+    // Show TUI
+    if let Err(e) = tui::run_tui(&multi_stats, &format_options, upload_status.clone()) {
+        eprintln!("❌ Error displaying TUI: {}", e);
+    }
+}
+
+fn extract_user_friendly_error(error: &anyhow::Error) -> String {
+    let error_str = error.to_string();
+    let error_lower = error_str.to_lowercase();
+    
+    // Check for network/connection issues
+    if error_lower.contains("network") || error_lower.contains("connection") || error_lower.contains("timeout") {
+        "Network error".to_string()
+    } else if error_lower.contains("dns") || error_lower.contains("name resolution") {
+        "DNS error".to_string()
+    } else if error_lower.contains("server returned error:") {
+        // Extract server error message from upload response
+        if let Some(server_msg) = error_str.split("Server returned error: ").nth(1) {
+            format!("Server: {}", server_msg.trim())
+        } else {
+            "Server error".to_string()
+        }
+    } else {
+        // For other errors, return the first line of the error message
+        // (upload.rs now provides user-friendly error messages directly)
+        error.to_string().lines().next().unwrap_or("Upload failed").to_string()
+    }
+}
+
+async fn run_background_upload(stats: AgenticCodingToolStats, upload_status: Arc<Mutex<tui::UploadStatus>>) {
+    // Set status to uploading
+    if let Ok(mut status) = upload_status.lock() {
+        *status = tui::UploadStatus::Uploading;
+    }
+
+    // Small delay to show the "Uploading..." status
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let result = match config::Config::load() {
+        Ok(Some(mut config)) if config.is_configured() => {
+            match utils::get_messages_later_than(config.last_date_uploaded, stats.messages).await {
+                Ok(messages) => {
+                    upload::upload_message_stats(&messages, &mut config).await
+                }
+                Err(e) => Err(e.into())
+            }
+        }
+        _ => {
+            // Config not available or not configured - silently skip upload
+            return;
+        }
+    };
+
+    // Update status based on result
+    if let Ok(mut status) = upload_status.lock() {
+        *status = match result {
+            Ok(_) => tui::UploadStatus::Uploaded,
+            Err(e) => {
+                // Extract a user-friendly error message
+                let error_msg = extract_user_friendly_error(&e);
+                tui::UploadStatus::Failed(error_msg)
+            },
+        };
+    }
+
+    // Keep the status visible for a few seconds
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    
+    // Clear the status after delay
+    if let Ok(mut status) = upload_status.lock() {
+        *status = tui::UploadStatus::None;
     }
 }
 
