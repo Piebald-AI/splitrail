@@ -1,15 +1,20 @@
-use crate::analyzer::{Analyzer, AnalyzerCapabilities, CachingType, DataSource, DataFormat, CachingInfo};
-use crate::types::{AgenticCodingToolStats, ConversationMessage, FileOperationStats, FileCategory, DailyStats, CompositionStats};
+use crate::analyzer::{
+    Analyzer, AnalyzerCapabilities, CachingInfo, CachingType, DataFormat, DataSource,
+};
 use crate::models::MODEL_PRICING;
+use crate::types::{
+    AgenticCodingToolStats, CompositionStats, ConversationMessage, DailyStats, FileCategory,
+    FileOperationStats, GeneralStats,
+};
 use crate::utils::ModelAbbreviations;
-use async_trait::async_trait;
-use std::collections::{HashMap, HashSet, BTreeMap};
-use std::path::{Path, PathBuf};
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use async_trait::async_trait;
 use chrono::DateTime;
 use glob::glob;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 pub struct GeminiAnalyzer;
 
@@ -87,7 +92,7 @@ impl Default for GeminiTokens {
 // Data discovery functions
 fn find_gemini_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    
+
     // Try home directory first
     if let Some(home_dir) = home::home_dir() {
         let gemini_dir = home_dir.join(".gemini").join("tmp");
@@ -105,7 +110,7 @@ fn find_gemini_dirs() -> Vec<PathBuf> {
             }
         }
     }
-    
+
     // Try current directory as fallback
     if let Ok(current_dir) = std::env::current_dir() {
         let gemini_current = current_dir.join(".gemini").join("tmp");
@@ -122,23 +127,25 @@ fn find_gemini_dirs() -> Vec<PathBuf> {
             }
         }
     }
-    
+
     dirs
 }
 
 // Tool extraction and file operation mapping
 fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> FileOperationStats {
     let mut file_ops = FileOperationStats::default();
-    
+
     for tool_call in tool_calls {
         if let Some(tool_name) = tool_call.get("name").and_then(|v| v.as_str()) {
             match tool_name {
                 "read_many_files" => {
-                    if let Some(paths) = tool_call.get("args")
+                    if let Some(paths) = tool_call
+                        .get("args")
                         .and_then(|v| v.get("paths"))
-                        .and_then(|v| v.as_array()) {
+                        .and_then(|v| v.as_array())
+                    {
                         file_ops.files_read += paths.len() as u64;
-                        
+
                         // Simple file categorization using existing FileCategory
                         for path in paths {
                             if let Some(path_str) = path.as_str() {
@@ -147,39 +154,40 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> FileOperationStats {
                                     .and_then(|e| e.to_str())
                                     .unwrap_or("");
                                 let category = FileCategory::from_extension(ext);
-                                *file_ops.file_types
+                                *file_ops
+                                    .file_types
                                     .entry(category.as_str().to_string())
                                     .or_insert(0) += 1;
                             }
                         }
-                        
+
                         // Simple estimation without complex heuristics
                         file_ops.lines_read += (paths.len() as u64) * 100;
                         file_ops.bytes_read += (paths.len() as u64) * 8000;
                     }
-                },
+                }
                 "replace" => {
                     file_ops.files_edited += 1;
                     // Simple counting without complex content analysis
                     file_ops.lines_edited += 10; // Conservative estimate
                     file_ops.bytes_edited += 800;
-                },
+                }
                 "run_shell_command" => {
                     file_ops.terminal_commands += 1;
-                },
+                }
                 "list_directory" => {
                     // Treat as a lightweight read operation
                     file_ops.files_read += 1;
-                },
+                }
                 _ => {} // Unknown tools - just skip
             }
         }
     }
-    
+
     // Use existing utility functions for line estimation
     file_ops.lines_added = (file_ops.lines_edited / 2).max(1); // Simple estimate
     file_ops.lines_deleted = (file_ops.lines_edited / 3).max(1); // Simple estimate
-    
+
     file_ops
 }
 
@@ -189,7 +197,7 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
         Some(pricing) => {
             let total_input_tokens = tokens.input + tokens.thoughts + tokens.tool;
             let total_output_tokens = tokens.output;
-            
+
             // Check if this model has Gemini-specific tiered pricing rules
             let input_cost = match &pricing.model_rules {
                 crate::models::ModelSpecificRules::Gemini {
@@ -200,8 +208,9 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
                     if total_input_tokens > *high_volume_threshold {
                         if let Some(high_volume_rate) = high_volume_input_cost_per_token {
                             // First threshold amount at normal rate, rest at high volume rate
-                            (*high_volume_threshold as f64 * pricing.input_cost_per_token) +
-                            ((total_input_tokens - *high_volume_threshold) as f64 * high_volume_rate)
+                            (*high_volume_threshold as f64 * pricing.input_cost_per_token)
+                                + ((total_input_tokens - *high_volume_threshold) as f64
+                                    * high_volume_rate)
                         } else {
                             // No tiered pricing, use normal rate for all tokens
                             total_input_tokens as f64 * pricing.input_cost_per_token
@@ -210,14 +219,14 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
                         // Under threshold, use normal rate
                         total_input_tokens as f64 * pricing.input_cost_per_token
                     }
-                },
-                crate::models::ModelSpecificRules::OpenAI { .. } |
-                crate::models::ModelSpecificRules::None => {
+                }
+                crate::models::ModelSpecificRules::OpenAI { .. }
+                | crate::models::ModelSpecificRules::None => {
                     // No tiered pricing, use normal rate for all tokens
                     total_input_tokens as f64 * pricing.input_cost_per_token
                 }
             };
-            
+
             // Calculate output cost with tiered pricing
             let output_cost = match &pricing.model_rules {
                 crate::models::ModelSpecificRules::Gemini {
@@ -228,8 +237,9 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
                     if total_output_tokens > *high_volume_threshold {
                         if let Some(high_volume_rate) = high_volume_output_cost_per_token {
                             // First threshold amount at normal rate, rest at high volume rate
-                            (*high_volume_threshold as f64 * pricing.output_cost_per_token) +
-                            ((total_output_tokens - *high_volume_threshold) as f64 * high_volume_rate)
+                            (*high_volume_threshold as f64 * pricing.output_cost_per_token)
+                                + ((total_output_tokens - *high_volume_threshold) as f64
+                                    * high_volume_rate)
                         } else {
                             // No tiered pricing, use normal rate for all tokens
                             total_output_tokens as f64 * pricing.output_cost_per_token
@@ -238,21 +248,24 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
                         // Under threshold, use normal rate
                         total_output_tokens as f64 * pricing.output_cost_per_token
                     }
-                },
-                crate::models::ModelSpecificRules::OpenAI { .. } |
-                crate::models::ModelSpecificRules::None => {
+                }
+                crate::models::ModelSpecificRules::OpenAI { .. }
+                | crate::models::ModelSpecificRules::None => {
                     // No tiered pricing, use normal rate for all tokens
                     total_output_tokens as f64 * pricing.output_cost_per_token
                 }
             };
-            
+
             // Cache cost (always at cache read rate)
             let cache_cost = tokens.cached as f64 * pricing.cache_read_input_token_cost;
-            
+
             input_cost + output_cost + cache_cost
-        },
+        }
         None => {
-            eprintln!("WARNING: Unknown Gemini model: {}. Using default pricing.", model_name);
+            eprintln!(
+                "WARNING: Unknown Gemini model: {}. Using default pricing.",
+                model_name
+            );
             // Fallback to default Gemini 2.5 Flash pricing (more conservative)
             calculate_gemini_cost(tokens, "gemini-2.5-flash")
         }
@@ -268,29 +281,41 @@ fn generate_gemini_hash(session_id: &str, message_id: &str) -> String {
 fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
     let conversation_file = file_path.to_string_lossy().to_string();
     let mut entries = Vec::new();
-    
+
     // Read entire file (not line-by-line like JSONL)
     let file_content = match std::fs::read_to_string(file_path) {
         Ok(content) => content,
         Err(e) => {
-            eprintln!("Failed to read Gemini session file {}: {}", file_path.display(), e);
+            eprintln!(
+                "Failed to read Gemini session file {}: {}",
+                file_path.display(),
+                e
+            );
             return entries;
         }
     };
-    
+
     // Parse the complete session JSON
     let session: GeminiSession = match serde_json::from_str(&file_content) {
         Ok(session) => session,
         Err(e) => {
-            eprintln!("Failed to parse Gemini session JSON {}: {}", file_path.display(), e);
+            eprintln!(
+                "Failed to parse Gemini session JSON {}: {}",
+                file_path.display(),
+                e
+            );
             return entries;
         }
     };
-    
+
     // Process each message in the session
     for message in session.messages {
         match message {
-            GeminiMessage::User { id, timestamp, content: _ } => {
+            GeminiMessage::User {
+                id,
+                timestamp,
+                content: _,
+            } => {
                 entries.push(ConversationMessage::User {
                     timestamp,
                     conversation_file: conversation_file.clone(),
@@ -298,31 +323,35 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                     analyzer_specific: {
                         let mut map = HashMap::new();
                         map.insert("user_id".to_string(), serde_json::Value::String(id));
-                        map.insert("session_id".to_string(), serde_json::Value::String(session.session_id.clone()));
-                        map.insert("project_hash".to_string(), serde_json::Value::String(session.project_hash.clone()));
+                        map.insert(
+                            "session_id".to_string(),
+                            serde_json::Value::String(session.session_id.clone()),
+                        );
+                        map.insert(
+                            "project_hash".to_string(),
+                            serde_json::Value::String(session.project_hash.clone()),
+                        );
                         map
                     },
                 });
-            },
-            GeminiMessage::Gemini { id, timestamp, content: _, thoughts, tokens, tool_calls } => {
+            }
+            GeminiMessage::Gemini {
+                id,
+                timestamp,
+                content: _,
+                thoughts,
+                tokens,
+                tool_calls,
+            } => {
                 let file_ops = extract_tool_stats(&tool_calls);
                 let hash = generate_gemini_hash(&session.session_id, &id);
-                
+
                 // Use a reasonable fallback model - Gemini 2.5 Flash is most common and cost-effective
                 let fallback_model = "gemini-2.5-flash";
-                
+
                 entries.push(ConversationMessage::AI {
-                    input_tokens: tokens.input,
-                    output_tokens: tokens.output,
-                    caching_info: if tokens.cached > 0 {
-                        Some(CachingInfo::Generic { cached_tokens: tokens.cached })
-                    } else {
-                        None
-                    },
-                    cost: calculate_gemini_cost(&tokens, fallback_model),
                     model: fallback_model.to_string(), // TODO: Extract actual model from session
                     timestamp,
-                    tool_calls: tool_calls.len() as u32,
                     hash: Some(hash),
                     conversation_file: conversation_file.clone(),
                     file_operations: file_ops,
@@ -331,19 +360,46 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                     analyzer_specific: {
                         let mut map = HashMap::new();
                         map.insert("gemini_id".to_string(), serde_json::Value::String(id));
-                        map.insert("session_id".to_string(), serde_json::Value::String(session.session_id.clone()));
-                        map.insert("project_hash".to_string(), serde_json::Value::String(session.project_hash.clone()));
-                        map.insert("thoughts_tokens".to_string(), serde_json::Value::Number(tokens.thoughts.into()));
-                        map.insert("tool_tokens".to_string(), serde_json::Value::Number(tokens.tool.into()));
-                        map.insert("thoughts".to_string(), serde_json::to_value(thoughts).unwrap_or_default());
-                        map.insert("tool_calls".to_string(), serde_json::to_value(tool_calls).unwrap_or_default());
+                        map.insert(
+                            "session_id".to_string(),
+                            serde_json::Value::String(session.session_id.clone()),
+                        );
+                        map.insert(
+                            "project_hash".to_string(),
+                            serde_json::Value::String(session.project_hash.clone()),
+                        );
+                        map.insert(
+                            "thoughts_tokens".to_string(),
+                            serde_json::Value::Number(tokens.thoughts.into()),
+                        );
+                        map.insert(
+                            "tool_tokens".to_string(),
+                            serde_json::Value::Number(tokens.tool.into()),
+                        );
+                        map.insert(
+                            "thoughts".to_string(),
+                            serde_json::to_value(thoughts).unwrap_or_default(),
+                        );
+                        map.insert(
+                            "tool_calls".to_string(),
+                            serde_json::to_value(&tool_calls).unwrap_or_default(),
+                        );
                         map
+                    },
+                    general_stats: GeneralStats {
+                        input_tokens: tokens.input,
+                        output_tokens: tokens.output,
+                        cache_creation_tokens: 0,
+                        cache_read_tokens: 0,
+                        cached_tokens: tokens.cached,
+                        cost: calculate_gemini_cost(&tokens, fallback_model),
+                        tool_calls: tool_calls.len() as u32,
                     },
                 });
             }
         }
     }
-    
+
     entries
 }
 
@@ -352,11 +408,11 @@ impl Analyzer for GeminiAnalyzer {
     fn name(&self) -> &'static str {
         "gemini_cli"
     }
-    
+
     fn display_name(&self) -> &'static str {
         "Gemini CLI"
     }
-    
+
     fn get_capabilities(&self) -> AnalyzerCapabilities {
         AnalyzerCapabilities {
             supports_todos: false, // Gemini CLI doesn't have TodoWrite/TodoRead equivalent
@@ -374,24 +430,40 @@ impl Analyzer for GeminiAnalyzer {
             ],
         }
     }
-    
+
     fn get_model_abbreviations(&self) -> ModelAbbreviations {
         let mut abbreviations = ModelAbbreviations::new();
-        abbreviations.add("gemini-2.5-pro".to_string(), "G2.5P".to_string(), "Gemini 2.5 Pro".to_string());
-        abbreviations.add("gemini-2.5-flash".to_string(), "G2.5F".to_string(), "Gemini 2.5 Flash".to_string());
-        abbreviations.add("gemini-1.5-pro".to_string(), "G1.5P".to_string(), "Gemini 1.5 Pro".to_string());
-        abbreviations.add("gemini-1.5-flash".to_string(), "G1.5F".to_string(), "Gemini 1.5 Flash".to_string());
+        abbreviations.add(
+            "gemini-2.5-pro".to_string(),
+            "G2.5P".to_string(),
+            "Gemini 2.5 Pro".to_string(),
+        );
+        abbreviations.add(
+            "gemini-2.5-flash".to_string(),
+            "G2.5F".to_string(),
+            "Gemini 2.5 Flash".to_string(),
+        );
+        abbreviations.add(
+            "gemini-1.5-pro".to_string(),
+            "G1.5P".to_string(),
+            "Gemini 1.5 Pro".to_string(),
+        );
+        abbreviations.add(
+            "gemini-1.5-flash".to_string(),
+            "G1.5F".to_string(),
+            "Gemini 1.5 Flash".to_string(),
+        );
         abbreviations
     }
-    
+
     fn get_data_directory_pattern(&self) -> &str {
         "~/.gemini/tmp/*/chats/*.json"
     }
-    
+
     async fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
         let gemini_dirs = find_gemini_dirs();
         let mut sources = Vec::new();
-        
+
         for gemini_dir in gemini_dirs {
             // Use glob to find all session JSON files
             let pattern = format!("{}/**/session-*.json", gemini_dir.display());
@@ -404,17 +476,20 @@ impl Analyzer for GeminiAnalyzer {
                 });
             }
         }
-        
+
         Ok(sources)
     }
-    
-    async fn parse_conversations(&self, sources: Vec<DataSource>) -> Result<Vec<ConversationMessage>> {
+
+    async fn parse_conversations(
+        &self,
+        sources: Vec<DataSource>,
+    ) -> Result<Vec<ConversationMessage>> {
         // Parse all session files in parallel
         let all_entries: Vec<ConversationMessage> = sources
             .into_par_iter()
             .flat_map(|source| parse_json_session_file(&source.path))
             .collect();
-        
+
         // Deduplicate based on hash
         let mut seen_hashes = HashSet::new();
         let deduplicated_entries: Vec<ConversationMessage> = all_entries
@@ -436,21 +511,21 @@ impl Analyzer for GeminiAnalyzer {
                 }
             })
             .collect();
-        
+
         Ok(deduplicated_entries)
     }
-    
+
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
         let sources = self.discover_data_sources().await?;
         let messages = self.parse_conversations(sources).await?;
-        
+
         // Group messages by date and calculate daily stats (reusing existing logic)
         let mut daily_stats: BTreeMap<String, DailyStats> = BTreeMap::new();
-        
+
         for message in &messages {
             let date = match message {
-                ConversationMessage::AI { timestamp, .. } | 
-                ConversationMessage::User { timestamp, .. } => {
+                ConversationMessage::AI { timestamp, .. }
+                | ConversationMessage::User { timestamp, .. } => {
                     // Extract date from timestamp
                     if let Ok(parsed_time) = DateTime::parse_from_rfc3339(timestamp) {
                         parsed_time.format("%Y-%m-%d").to_string()
@@ -460,33 +535,20 @@ impl Analyzer for GeminiAnalyzer {
                     }
                 }
             };
-            
+
             let stats = daily_stats.entry(date).or_insert_with(DailyStats::default);
-            
+
             match message {
-                ConversationMessage::AI { 
-                    input_tokens, 
-                    output_tokens, 
-                    cost, 
-                    tool_calls,
+                ConversationMessage::AI {
+                    general_stats,
                     file_operations,
-                    caching_info,
-                    .. 
+                    ..
                 } => {
-                    stats.cost += cost;
-                    stats.input_tokens += input_tokens;
-                    stats.output_tokens += output_tokens;
-                    stats.tool_calls += *tool_calls;
-                    
-                    if let Some(caching) = caching_info {
-                        match caching {
-                            CachingInfo::Generic { cached_tokens } => {
-                                stats.cached_tokens += cached_tokens;
-                            }
-                            _ => {} // Other caching types
-                        }
-                    }
-                    
+                    stats.cost += general_stats.cost;
+                    stats.input_tokens += general_stats.input_tokens;
+                    stats.output_tokens += general_stats.output_tokens;
+                    stats.tool_calls += general_stats.tool_calls;
+
                     // Aggregate file operations
                     stats.file_operations.files_read += file_operations.files_read;
                     stats.file_operations.files_edited += file_operations.files_edited;
@@ -494,7 +556,8 @@ impl Analyzer for GeminiAnalyzer {
                     stats.file_operations.files_deleted += file_operations.files_deleted;
                     stats.file_operations.terminal_commands += file_operations.terminal_commands;
                     stats.file_operations.file_searches += file_operations.file_searches;
-                    stats.file_operations.file_content_searches += file_operations.file_content_searches;
+                    stats.file_operations.file_content_searches +=
+                        file_operations.file_content_searches;
                     stats.file_operations.lines_read += file_operations.lines_read;
                     stats.file_operations.lines_added += file_operations.lines_added;
                     stats.file_operations.lines_edited += file_operations.lines_edited;
@@ -503,10 +566,14 @@ impl Analyzer for GeminiAnalyzer {
                     stats.file_operations.bytes_added += file_operations.bytes_added;
                     stats.file_operations.bytes_edited += file_operations.bytes_edited;
                     stats.file_operations.bytes_deleted += file_operations.bytes_deleted;
-                    
+
                     // Aggregate file types
                     for (file_type, count) in &file_operations.file_types {
-                        *stats.file_operations.file_types.entry(file_type.clone()).or_insert(0) += count;
+                        *stats
+                            .file_operations
+                            .file_types
+                            .entry(file_type.clone())
+                            .or_insert(0) += count;
                     }
                 }
                 ConversationMessage::User { .. } => {
@@ -514,9 +581,12 @@ impl Analyzer for GeminiAnalyzer {
                 }
             }
         }
-        
-        let num_conversations = messages.iter().filter(|m| matches!(m, ConversationMessage::User { .. })).count() as u64;
-        
+
+        let num_conversations = messages
+            .iter()
+            .filter(|m| matches!(m, ConversationMessage::User { .. }))
+            .count() as u64;
+
         Ok(AgenticCodingToolStats {
             analyzer_name: self.display_name().to_string(),
             daily_stats,
@@ -525,7 +595,7 @@ impl Analyzer for GeminiAnalyzer {
             model_abbrs: self.get_model_abbreviations(),
         })
     }
-    
+
     fn is_available(&self) -> bool {
         // Check if any Gemini CLI directories exist
         !find_gemini_dirs().is_empty()

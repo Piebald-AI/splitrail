@@ -335,26 +335,21 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
 
         match entry {
             ConversationMessage::AI {
-                cost,
-                caching_info,
-                input_tokens,
-                output_tokens,
-                tool_calls,
                 model,
+                general_stats,
                 file_operations,
                 todo_stats,
                 ..
             } => {
-                stats.cost += cost;
+                stats.cost += general_stats.cost;
                 
-                // Handle flexible caching info
-                if let Some(caching_info) = caching_info {
-                    stats.cached_tokens += caching_info.total_cached_tokens();
-                }
-                
-                stats.input_tokens += input_tokens;
-                stats.output_tokens += output_tokens;
-                stats.tool_calls += tool_calls;
+                stats.cached_tokens += general_stats.cache_read_tokens;
+                stats.cached_tokens += general_stats.cache_creation_tokens;
+                stats.cached_tokens += general_stats.cached_tokens;
+
+                stats.input_tokens += general_stats.input_tokens;
+                stats.output_tokens += general_stats.output_tokens;
+                stats.tool_calls += general_stats.tool_calls;
                 stats.ai_messages += 1;
                 *stats.models.entry(model.to_string()).or_insert(0) += 1;
 

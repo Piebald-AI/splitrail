@@ -2,15 +2,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use crate::analyzer::{Analyzer, AnalyzerCapabilities, CachingInfo, CachingType, DataFormat, DataSource};
+use crate::analyzer::{
+    Analyzer, AnalyzerCapabilities, CachingType, DataFormat, DataSource,
+};
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, TodoStats
+    AgenticCodingToolStats, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, GeneralStats
 };
 use crate::utils::ModelAbbreviations;
 
@@ -27,11 +29,11 @@ impl Analyzer for CodexAnalyzer {
     fn name(&self) -> &'static str {
         "codex"
     }
-    
+
     fn display_name(&self) -> &'static str {
         "Codex"
     }
-    
+
     fn get_capabilities(&self) -> AnalyzerCapabilities {
         AnalyzerCapabilities {
             supports_todos: false, // Codex doesn't have TodoWrite/TodoRead
@@ -49,7 +51,8 @@ impl Analyzer for CodexAnalyzer {
             ],
         }
     }
-    
+
+    #[rustfmt::skip]
     fn get_model_abbreviations(&self) -> ModelAbbreviations {
         let mut abbrs = ModelAbbreviations::new();
         
@@ -91,15 +94,15 @@ impl Analyzer for CodexAnalyzer {
         
         abbrs
     }
-    
+
     fn get_data_directory_pattern(&self) -> &str {
         "~/.codex/sessions/*.jsonl"
     }
-    
+
     async fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
         let codex_dirs = find_codex_dirs();
         let mut sources = Vec::new();
-        
+
         for codex_dir in codex_dirs {
             for entry in glob::glob(&format!("{}/*.jsonl", codex_dir.display()))? {
                 let path = entry?;
@@ -110,11 +113,14 @@ impl Analyzer for CodexAnalyzer {
                 });
             }
         }
-        
+
         Ok(sources)
     }
-    
-    async fn parse_conversations(&self, sources: Vec<DataSource>) -> Result<Vec<ConversationMessage>> {
+
+    async fn parse_conversations(
+        &self,
+        sources: Vec<DataSource>,
+    ) -> Result<Vec<ConversationMessage>> {
         // Parse all the files in parallel
         let all_entries: Vec<ConversationMessage> = sources
             .into_par_iter()
@@ -125,7 +131,7 @@ impl Analyzer for CodexAnalyzer {
         // But we could deduplicate by session ID if needed in the future
         Ok(all_entries)
     }
-    
+
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
         let sources = self.discover_data_sources().await?;
         let messages = self.parse_conversations(sources).await?;
@@ -144,7 +150,7 @@ impl Analyzer for CodexAnalyzer {
             analyzer_name: self.display_name().to_string(),
         })
     }
-    
+
     fn is_available(&self) -> bool {
         !find_codex_dirs().is_empty()
     }
@@ -292,25 +298,26 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                                 });
                             }
                             "assistant" => {
-                                let model_name = session_model.clone().unwrap_or_else(|| "unknown".to_string());
-                                
+                                let model_name = session_model
+                                    .clone()
+                                    .unwrap_or_else(|| "unknown".to_string());
+
                                 if let Some(usage) = message.token_usage {
-                                    let total_output_tokens = usage.output_tokens + usage.reasoning_output_tokens;
-                                    
+                                    let total_output_tokens =
+                                        usage.output_tokens + usage.reasoning_output_tokens;
+
                                     entries.push(ConversationMessage::AI {
-                                        input_tokens: usage.input_tokens,
-                                        output_tokens: total_output_tokens,
-                                        caching_info: if usage.cached_input_tokens > 0 {
-                                            Some(CachingInfo::InputOnly {
-                                                cached_input_tokens: usage.cached_input_tokens,
-                                            })
-                                        } else {
-                                            None
+                                        general_stats: GeneralStats {
+                                            input_tokens: usage.input_tokens,
+                                            output_tokens: total_output_tokens,
+                                            cache_creation_tokens: 0,
+                                            cache_read_tokens: 0,
+                                            cached_tokens: usage.cached_input_tokens,
+                                            cost: calculate_cost_from_tokens(&usage, &model_name),
+                                            tool_calls: 0, // We'll count shell calls separately
                                         },
-                                        cost: calculate_cost_from_tokens(&usage, &model_name),
                                         model: model_name,
                                         timestamp: message.timestamp,
-                                        tool_calls: 0, // We'll count shell calls separately
                                         hash: None,
                                         conversation_file: conversation_file.clone(),
                                         file_operations: FileOperationStats::default(),
@@ -330,24 +337,33 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                     if let Some(call_id) = &shell_call.call_id {
                         pending_shell_calls.insert(call_id.clone(), shell_call.clone());
                     }
-                    
+
                     // Count as a tool call and create a user message to represent the shell call
                     let file_ops = if let Some(action) = &shell_call.action {
                         parse_shell_command_for_file_operations(&action.command)
                     } else {
                         FileOperationStats::default()
                     };
-                    
-                    let timestamp = shell_call.timestamp.clone().unwrap_or_else(|| "".to_string());
-                    
+
+                    let timestamp = shell_call
+                        .timestamp
+                        .clone()
+                        .unwrap_or_else(|| "".to_string());
+
                     entries.push(ConversationMessage::User {
                         timestamp,
                         conversation_file: conversation_file.clone(),
                         todo_stats: None,
                         analyzer_specific: {
                             let mut map = HashMap::new();
-                            map.insert("shell_call".to_string(), serde_json::to_value(&shell_call).unwrap_or_default());
-                            map.insert("file_operations".to_string(), serde_json::to_value(&file_ops).unwrap_or_default());
+                            map.insert(
+                                "shell_call".to_string(),
+                                serde_json::to_value(&shell_call).unwrap_or_default(),
+                            );
+                            map.insert(
+                                "file_operations".to_string(),
+                                serde_json::to_value(&file_ops).unwrap_or_default(),
+                            );
                             map
                         },
                     });
@@ -368,42 +384,46 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
 
 fn parse_shell_command_for_file_operations(command: &[String]) -> FileOperationStats {
     let mut file_ops = FileOperationStats::default();
-    
+
     if command.is_empty() {
         return file_ops;
     }
-    
+
     // Join the command for easier parsing
     let full_command = command.join(" ");
-    
+
     // Count basic shell operations
     file_ops.terminal_commands += 1;
-    
+
     // Parse the actual command (usually after "bash -lc")
     let actual_command = if command.len() >= 3 && command[0] == "bash" && command[1] == "-lc" {
         &command[2]
     } else {
         &full_command
     };
-    
+
     // Detect file operations based on command patterns
     if actual_command.contains("rg ") || actual_command.contains("grep ") {
         file_ops.file_content_searches += 1;
     }
-    
+
     if actual_command.contains("--files") || actual_command.contains("find ") {
         file_ops.file_searches += 1;
     }
-    
+
     // Detect file reads
-    if actual_command.contains("cat ") || actual_command.contains("head ") || 
-       actual_command.contains("tail ") || actual_command.contains("less ") ||
-       actual_command.contains("more ") || actual_command.contains("sed -n") {
+    if actual_command.contains("cat ")
+        || actual_command.contains("head ")
+        || actual_command.contains("tail ")
+        || actual_command.contains("less ")
+        || actual_command.contains("more ")
+        || actual_command.contains("sed -n")
+    {
         file_ops.files_read += 1;
-        
+
         // Try to extract file paths and categorize
         extract_file_paths_from_command(actual_command, &mut file_ops);
-        
+
         // Estimate lines read (rough approximation)
         if actual_command.contains("sed -n") {
             // Try to extract line numbers from sed command
@@ -416,41 +436,47 @@ fn parse_shell_command_for_file_operations(command: &[String]) -> FileOperationS
             file_ops.bytes_read += 8000; // Default estimate
         }
     }
-    
+
     // Detect file writes
-    if actual_command.contains(" > ") || actual_command.contains(" >> ") || 
-       actual_command.contains("tee ") || actual_command.contains("echo ") {
+    if actual_command.contains(" > ")
+        || actual_command.contains(" >> ")
+        || actual_command.contains("tee ")
+        || actual_command.contains("echo ")
+    {
         file_ops.files_edited += 1;
         file_ops.lines_edited += 10; // Rough estimate
         file_ops.bytes_edited += 800; // Rough estimate
     }
-    
+
     // Detect file edits
     if actual_command.contains("sed -i") || actual_command.contains("awk") {
         file_ops.files_edited += 1;
         file_ops.lines_edited += 5; // Rough estimate
         file_ops.bytes_edited += 400; // Rough estimate
     }
-    
+
     file_ops
 }
 
 fn extract_file_paths_from_command(command: &str, file_ops: &mut FileOperationStats) {
     // This is a rough implementation - it tries to find file paths in the command
     let words: Vec<&str> = command.split_whitespace().collect();
-    
+
     for word in words {
         // Skip flags and common non-file words
         if word.starts_with('-') || word.starts_with('/') && word.len() < 3 {
             continue;
         }
-        
+
         // Look for file extensions
         if let Some(dot_pos) = word.rfind('.') {
             let ext = &word[dot_pos + 1..];
             if ext.len() <= 5 && ext.chars().all(|c| c.is_alphabetic()) {
                 let category = FileCategory::from_extension(ext);
-                *file_ops.file_types.entry(category.as_str().to_string()).or_insert(0) += 1;
+                *file_ops
+                    .file_types
+                    .entry(category.as_str().to_string())
+                    .or_insert(0) += 1;
             }
         }
     }
@@ -467,7 +493,8 @@ fn extract_line_count_from_sed(command: &str) -> Option<u64> {
                 if let Some(comma) = range_part.find(',') {
                     let start_str = &range_part[..comma];
                     let end_str = &range_part[comma + 1..];
-                    if let (Ok(start), Ok(end)) = (start_str.parse::<u64>(), end_str.parse::<u64>()) {
+                    if let (Ok(start), Ok(end)) = (start_str.parse::<u64>(), end_str.parse::<u64>())
+                    {
                         return Some(end - start + 1);
                     }
                 }
@@ -482,18 +509,24 @@ fn calculate_cost_from_tokens(usage: &CodexTokenUsage, model_name: &str) -> f64 
         Some(pricing) => {
             // For Codex, we have cached_input_tokens instead of separate creation/read
             let regular_input_cost = usage.input_tokens as f64 * pricing.input_cost_per_token;
-            let output_cost = (usage.output_tokens + usage.reasoning_output_tokens) as f64 * pricing.output_cost_per_token;
-            let cached_input_cost = usage.cached_input_tokens as f64 * pricing.cache_read_input_token_cost;
-            
+            let output_cost = (usage.output_tokens + usage.reasoning_output_tokens) as f64
+                * pricing.output_cost_per_token;
+            let cached_input_cost =
+                usage.cached_input_tokens as f64 * pricing.cache_read_input_token_cost;
+
             regular_input_cost + output_cost + cached_input_cost
         }
         None => {
-            println!("WARNING: Unknown model name: {}. Using fallback pricing.", model_name);
+            println!(
+                "WARNING: Unknown model name: {}. Using fallback pricing.",
+                model_name
+            );
             // Fallback pricing - use reasonable estimates
             let input_cost = usage.input_tokens as f64 * 0.0000015; // $1.50 per 1M tokens
-            let output_cost = (usage.output_tokens + usage.reasoning_output_tokens) as f64 * 0.000006; // $6.00 per 1M tokens
+            let output_cost =
+                (usage.output_tokens + usage.reasoning_output_tokens) as f64 * 0.000006; // $6.00 per 1M tokens
             let cached_cost = usage.cached_input_tokens as f64 * 0.000000375; // $0.375 per 1M tokens
-            
+
             input_cost + output_cost + cached_cost
         }
     }
