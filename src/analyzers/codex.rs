@@ -12,7 +12,7 @@ use crate::analyzer::{
 };
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, GeneralStats
+    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, GeneralStats
 };
 use crate::utils::ModelAbbreviations;
 
@@ -307,6 +307,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                                         usage.output_tokens + usage.reasoning_output_tokens;
 
                                     entries.push(ConversationMessage::AI {
+                                        application: Application::CodexCLI,
                                         general_stats: GeneralStats {
                                             input_tokens: usage.input_tokens,
                                             output_tokens: total_output_tokens,

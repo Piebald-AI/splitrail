@@ -6,12 +6,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use crate::analyzer::{
-    Analyzer, AnalyzerCapabilities, CachingType, DataFormat, DataSource,
-};
+use crate::analyzer::{Analyzer, AnalyzerCapabilities, CachingType, DataFormat, DataSource};
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, GeneralStats, TodoStats
+    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, GeneralStats, TodoStats
 };
 use crate::upload::{estimate_lines_added, estimate_lines_deleted};
 use crate::utils::ModelAbbreviations;
@@ -556,6 +554,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
         match message.usage {
             Some(usage) => {
                 temp_messages.push(ConversationMessage::AI {
+                    application: Application::ClaudeCode,
                     general_stats: GeneralStats {
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,

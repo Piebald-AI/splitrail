@@ -2,14 +2,21 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::analyzer::CachingInfo;
 use crate::utils::ModelAbbreviations;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Application {
+    ClaudeCode,
+    GeminiCLI,
+    CodexCLI,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConversationMessage {
     #[serde(rename_all = "camelCase")]
     #[serde(rename = "AI")]
     AI {
+        application: Application,
         model: String,
         timestamp: String,
         #[serde(skip)]
