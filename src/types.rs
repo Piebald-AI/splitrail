@@ -10,27 +10,16 @@ pub enum ConversationMessage {
     #[serde(rename_all = "camelCase")]
     #[serde(rename = "AI")]
     AI {
-        input_tokens: u64,
-        output_tokens: u64,
-        
-        // Flexible caching structure - different tools implement differently
-        #[serde(skip_serializing_if = "Option::is_none")]
-        caching_info: Option<CachingInfo>,
-        
-        cost: f64,
         model: String,
         timestamp: String,
-        tool_calls: u32,
+        #[serde(skip)]
         hash: Option<String>,
         conversation_file: String,
         file_operations: FileOperationStats,
-        
-        // Optional features (not all tools support these)
+        general_stats: GeneralStats,
         #[serde(skip_serializing_if = "Option::is_none")]
         todo_stats: Option<TodoStats>,
         composition_stats: CompositionStats,
-        
-        // Tool-specific data
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
         analyzer_specific: std::collections::HashMap<String, serde_json::Value>,
     },
@@ -38,12 +27,8 @@ pub enum ConversationMessage {
     User {
         timestamp: String,
         conversation_file: String,
-        
-        // Optional features (not all tools support these)
         #[serde(skip_serializing_if = "Option::is_none")]
         todo_stats: Option<TodoStats>,
-        
-        // Tool-specific data
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
         analyzer_specific: std::collections::HashMap<String, serde_json::Value>,
     },
@@ -118,6 +103,18 @@ pub struct CompositionStats {
     pub media_lines: u64,
     pub config_lines: u64,
     pub other_lines: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneralStats {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cached_tokens: u64,
+    pub cost: f64,
+    pub tool_calls: u32,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -7,12 +7,11 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::analyzer::{
-    Analyzer, AnalyzerCapabilities, CachingInfo, CachingType, DataFormat, DataSource,
+    Analyzer, AnalyzerCapabilities, CachingType, DataFormat, DataSource,
 };
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, CompositionStats, ConversationMessage, FileCategory,
-    FileOperationStats, TodoStats,
+    AgenticCodingToolStats, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, GeneralStats, TodoStats
 };
 use crate::upload::{estimate_lines_added, estimate_lines_deleted};
 use crate::utils::ModelAbbreviations;
@@ -557,33 +556,30 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
         match message.usage {
             Some(usage) => {
                 temp_messages.push(ConversationMessage::AI {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    caching_info: if usage.cache_creation_tokens > 0 || usage.cache_read_tokens > 0
-                    {
-                        Some(CachingInfo::CreationAndRead {
-                            cache_creation_tokens: usage.cache_creation_tokens,
-                            cache_read_tokens: usage.cache_read_tokens,
-                        })
-                    } else {
-                        None
-                    },
-                    cost: match data.cost_usd {
-                        Some(precalc_cost) => precalc_cost,
-                        None => calculate_cost_from_tokens(&usage, &model_name),
+                    general_stats: GeneralStats {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        cache_creation_tokens: usage.cache_creation_tokens,
+                        cache_read_tokens: usage.cache_read_tokens,
+                        cached_tokens: 0,
+                        cost: match data.cost_usd {
+                            Some(precalc_cost) => precalc_cost,
+                            None => calculate_cost_from_tokens(&usage, &model_name),
+                        },
+                        tool_calls: match message.content {
+                            Some(Content::Blocks(blocks)) => {
+                                blocks.iter().filter(|c| c.r#type == "tool_use").count() as u32
+                            }
+                            _ => 0,
+                        },
                     },
                     model: model_name,
                     timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
-                    tool_calls: match message.content {
-                        Some(Content::Blocks(blocks)) => {
-                            blocks.iter().filter(|c| c.r#type == "tool_use").count() as u32
-                        }
-                        _ => 0,
-                    },
                     hash,
                     conversation_file: conversation_file.clone(),
                     file_operations: file_ops,
                     todo_stats,
+                    analyzer_specific: HashMap::new(),
                     composition_stats: CompositionStats {
                         code_lines: *file_types.get("source_code").unwrap_or(&0),
                         docs_lines: *file_types.get("documentation").unwrap_or(&0),
@@ -592,7 +588,6 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                         config_lines: *file_types.get("config").unwrap_or(&0),
                         other_lines: *file_types.get("other").unwrap_or(&0),
                     },
-                    analyzer_specific: HashMap::new(),
                 });
             }
             None => temp_messages.push(ConversationMessage::User {
@@ -630,7 +625,6 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn test_extract_date_from_timestamp_valid() {
