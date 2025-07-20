@@ -1,10 +1,9 @@
 use crate::analyzer::{
-    Analyzer, AnalyzerCapabilities, CachingInfo, CachingType, DataFormat, DataSource,
+    Analyzer, AnalyzerCapabilities, CachingType, DataFormat, DataSource,
 };
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, CompositionStats, ConversationMessage, DailyStats, FileCategory,
-    FileOperationStats, GeneralStats,
+    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, DailyStats, FileCategory, FileOperationStats, GeneralStats
 };
 use crate::utils::ModelAbbreviations;
 use anyhow::Result;
@@ -350,6 +349,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                 let fallback_model = "gemini-2.5-flash";
 
                 entries.push(ConversationMessage::AI {
+                    application: Application::GeminiCLI,
                     model: fallback_model.to_string(), // TODO: Extract actual model from session
                     timestamp,
                     hash: Some(hash),
