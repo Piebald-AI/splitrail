@@ -68,22 +68,31 @@ impl Analyzer for ClaudeCodeAnalyzer {
         abbrs
     }
 
-    fn get_data_directory_pattern(&self) -> &str {
-        "~/.claude/projects/**/*.jsonl"
+    fn get_data_glob_patterns(&self) -> Vec<String> {
+        let mut patterns = Vec::new();
+        
+        if let Some(home_dir) = std::env::home_dir() {
+            let home_str = home_dir.to_string_lossy();
+            patterns.push(format!("{}/.claude/projects/*/*.jsonl", home_str));
+        }
+        
+        patterns
     }
 
-    async fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let claude_dirs = find_claude_dirs();
+    fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
+        let patterns = self.get_data_glob_patterns();
         let mut sources = Vec::new();
 
-        for claude_dir in claude_dirs {
-            for entry in glob::glob(&format!("{}/**/*.jsonl", claude_dir.display()))? {
+        for pattern in patterns {
+            for entry in glob::glob(&pattern)? {
                 let path = entry?;
-                sources.push(DataSource {
-                    path,
-                    format: DataFormat::JsonL,
-                    metadata: std::collections::HashMap::new(),
-                });
+                if path.is_file() {
+                    sources.push(DataSource {
+                        path,
+                        format: DataFormat::JsonL,
+                        metadata: std::collections::HashMap::new(),
+                    });
+                }
             }
         }
 
@@ -128,7 +137,7 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources().await?;
+        let sources = self.discover_data_sources()?;
         let messages = self.parse_conversations(sources).await?;
         let mut daily_stats = crate::utils::aggregate_by_date(&messages);
 
@@ -150,31 +159,11 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     fn is_available(&self) -> bool {
-        !find_claude_dirs().is_empty()
+        self.discover_data_sources().map_or(false, |sources| !sources.is_empty())
     }
 }
 
 // Claude Code specific implementation functions
-fn find_claude_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    // Try the most likely place, the home dir.
-    if let Some(home_dir) = home::home_dir() {
-        let claude_home_dir = home_dir.join(".claude");
-        if claude_home_dir.exists() {
-            dirs.push(claude_home_dir.join("projects"));
-        }
-    }
-
-    // Then see if there could be one in the current directory.
-    let current_dir = std::env::current_dir().unwrap();
-    let claude_current_dir = current_dir.join(".claude");
-    if claude_current_dir.exists() {
-        dirs.push(claude_current_dir.join("projects"));
-    }
-
-    dirs
-}
 
 // CLAUDE CODE JSONL FILES SCHEMA
 

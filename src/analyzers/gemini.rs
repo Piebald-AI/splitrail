@@ -25,14 +25,11 @@ impl GeminiAnalyzer {
 
 // Gemini-specific data structures following the plan's simplified flat approach
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiSession {
-    #[serde(rename = "sessionId")]
     session_id: String,
-    #[serde(rename = "projectHash")]
     project_hash: String,
-    #[serde(rename = "startTime")]
     start_time: String,
-    #[serde(rename = "lastUpdated")]
     last_updated: String,
     messages: Vec<GeminiMessage>,
 }
@@ -53,7 +50,7 @@ enum GeminiMessage {
         content: String,
         #[serde(default)]
         thoughts: Vec<serde_json::Value>,
-        tokens: GeminiTokens,
+        tokens: Option<GeminiTokens>,
         #[serde(rename = "toolCalls", default)]
         tool_calls: Vec<serde_json::Value>,
     },
@@ -73,61 +70,6 @@ struct GeminiTokens {
     tool: u64,
     #[serde(default)]
     total: u64,
-}
-
-impl Default for GeminiTokens {
-    fn default() -> Self {
-        Self {
-            input: 0,
-            output: 0,
-            cached: 0,
-            thoughts: 0,
-            tool: 0,
-            total: 0,
-        }
-    }
-}
-
-// Data discovery functions
-fn find_gemini_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    // Try home directory first
-    if let Some(home_dir) = home::home_dir() {
-        let gemini_dir = home_dir.join(".gemini").join("tmp");
-        if gemini_dir.exists() {
-            // Find all project hash directories
-            if let Ok(entries) = std::fs::read_dir(&gemini_dir) {
-                for entry in entries.flatten() {
-                    if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                        let chats_dir = entry.path().join("chats");
-                        if chats_dir.exists() {
-                            dirs.push(chats_dir);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Try current directory as fallback
-    if let Ok(current_dir) = std::env::current_dir() {
-        let gemini_current = current_dir.join(".gemini").join("tmp");
-        if gemini_current.exists() {
-            if let Ok(entries) = std::fs::read_dir(&gemini_current) {
-                for entry in entries.flatten() {
-                    if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                        let chats_dir = entry.path().join("chats");
-                        if chats_dir.exists() {
-                            dirs.push(chats_dir);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    dirs
 }
 
 // Tool extraction and file operation mapping
@@ -342,60 +284,62 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                 tokens,
                 tool_calls,
             } => {
-                let file_ops = extract_tool_stats(&tool_calls);
-                let hash = generate_gemini_hash(&session.session_id, &id);
+                if let Some(tokens) = tokens {
+                    let file_ops = extract_tool_stats(&tool_calls);
+                    let hash = generate_gemini_hash(&session.session_id, &id);
 
-                // Use a reasonable fallback model - Gemini 2.5 Flash is most common and cost-effective
-                let fallback_model = "gemini-2.5-flash";
+                    // Use a reasonable fallback model - Gemini 2.5 Flash is most common and cost-effective
+                    let fallback_model = "gemini-2.5-flash";
 
-                entries.push(ConversationMessage::AI {
-                    application: Application::GeminiCLI,
-                    model: fallback_model.to_string(), // TODO: Extract actual model from session
-                    timestamp,
-                    hash: Some(hash),
-                    conversation_file: conversation_file.clone(),
-                    file_operations: file_ops,
-                    todo_stats: None, // Gemini CLI doesn't have todos
-                    composition_stats: CompositionStats::default(),
-                    analyzer_specific: {
-                        let mut map = HashMap::new();
-                        map.insert("gemini_id".to_string(), serde_json::Value::String(id));
-                        map.insert(
-                            "session_id".to_string(),
-                            serde_json::Value::String(session.session_id.clone()),
-                        );
-                        map.insert(
-                            "project_hash".to_string(),
-                            serde_json::Value::String(session.project_hash.clone()),
-                        );
-                        map.insert(
-                            "thoughts_tokens".to_string(),
-                            serde_json::Value::Number(tokens.thoughts.into()),
-                        );
-                        map.insert(
-                            "tool_tokens".to_string(),
-                            serde_json::Value::Number(tokens.tool.into()),
-                        );
-                        map.insert(
-                            "thoughts".to_string(),
-                            serde_json::to_value(thoughts).unwrap_or_default(),
-                        );
-                        map.insert(
-                            "tool_calls".to_string(),
-                            serde_json::to_value(&tool_calls).unwrap_or_default(),
-                        );
-                        map
-                    },
-                    general_stats: GeneralStats {
-                        input_tokens: tokens.input,
-                        output_tokens: tokens.output,
-                        cache_creation_tokens: 0,
-                        cache_read_tokens: 0,
-                        cached_tokens: tokens.cached,
-                        cost: calculate_gemini_cost(&tokens, fallback_model),
-                        tool_calls: tool_calls.len() as u32,
-                    },
-                });
+                    entries.push(ConversationMessage::AI {
+                        application: Application::GeminiCLI,
+                        model: fallback_model.to_string(), // TODO: Extract actual model from session
+                        timestamp,
+                        hash: Some(hash),
+                        conversation_file: conversation_file.clone(),
+                        file_operations: file_ops,
+                        todo_stats: None, // Gemini CLI doesn't have todos
+                        composition_stats: CompositionStats::default(),
+                        analyzer_specific: {
+                            let mut map = HashMap::new();
+                            map.insert("gemini_id".to_string(), serde_json::Value::String(id));
+                            map.insert(
+                                "session_id".to_string(),
+                                serde_json::Value::String(session.session_id.clone()),
+                            );
+                            map.insert(
+                                "project_hash".to_string(),
+                                serde_json::Value::String(session.project_hash.clone()),
+                            );
+                            map.insert(
+                                "thoughts_tokens".to_string(),
+                                serde_json::Value::Number(tokens.thoughts.into()),
+                            );
+                            map.insert(
+                                "tool_tokens".to_string(),
+                                serde_json::Value::Number(tokens.tool.into()),
+                            );
+                            map.insert(
+                                "thoughts".to_string(),
+                                serde_json::to_value(thoughts).unwrap_or_default(),
+                            );
+                            map.insert(
+                                "tool_calls".to_string(),
+                                serde_json::to_value(&tool_calls).unwrap_or_default(),
+                            );
+                            map
+                        },
+                        general_stats: GeneralStats {
+                            input_tokens: tokens.input,
+                            output_tokens: tokens.output,
+                            cache_creation_tokens: 0,
+                            cache_read_tokens: 0,
+                            cached_tokens: tokens.cached,
+                            cost: calculate_gemini_cost(&tokens, fallback_model),
+                            tool_calls: tool_calls.len() as u32,
+                        },
+                    });
+                }
             }
         }
     }
@@ -456,24 +400,31 @@ impl Analyzer for GeminiAnalyzer {
         abbreviations
     }
 
-    fn get_data_directory_pattern(&self) -> &str {
-        "~/.gemini/tmp/*/chats/*.json"
+    fn get_data_glob_patterns(&self) -> Vec<String> {
+        let mut patterns = Vec::new();
+
+        if let Some(home_dir) = std::env::home_dir() {
+            let home_str = home_dir.to_string_lossy();
+            patterns.push(format!("{}/.gemini/tmp/*/chats/*.json", home_str));
+        }
+
+        patterns
     }
 
-    async fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let gemini_dirs = find_gemini_dirs();
+    fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
+        let patterns = self.get_data_glob_patterns();
         let mut sources = Vec::new();
 
-        for gemini_dir in gemini_dirs {
-            // Use glob to find all session JSON files
-            let pattern = format!("{}/**/session-*.json", gemini_dir.display());
+        for pattern in patterns {
             for entry in glob(&pattern)? {
                 let path = entry?;
-                sources.push(DataSource {
-                    path,
-                    format: DataFormat::Json, // Single JSON files, not JSONL
-                    metadata: HashMap::new(),
-                });
+                if path.is_file() {
+                    sources.push(DataSource {
+                        path,
+                        format: DataFormat::Json, // Single JSON files, not JSONL
+                        metadata: HashMap::new(),
+                    });
+                }
             }
         }
 
@@ -516,7 +467,7 @@ impl Analyzer for GeminiAnalyzer {
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources().await?;
+        let sources = self.discover_data_sources()?;
         let messages = self.parse_conversations(sources).await?;
 
         // Group messages by date and calculate daily stats (reusing existing logic)
@@ -597,7 +548,7 @@ impl Analyzer for GeminiAnalyzer {
     }
 
     fn is_available(&self) -> bool {
-        // Check if any Gemini CLI directories exist
-        !find_gemini_dirs().is_empty()
+        self.discover_data_sources()
+            .map_or(false, |sources| !sources.is_empty())
     }
 }
