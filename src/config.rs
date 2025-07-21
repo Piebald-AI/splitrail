@@ -59,7 +59,7 @@ impl Default for Config {
 
 impl Config {
     pub fn config_path() -> Result<PathBuf> {
-        Ok(home::home_dir()
+        Ok(std::env::home_dir()
             .context("Could not find home directory")?
             .join(".splitrail.toml"))
     }

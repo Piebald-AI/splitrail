@@ -1,5 +1,6 @@
 use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
+use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
 use anyhow::Result;
 use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -15,6 +16,7 @@ use ratatui::{Frame, Terminal};
 use std::io::stdout;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::watch;
 
 #[derive(Debug, Clone)]
 pub enum UploadStatus {
@@ -35,69 +37,113 @@ fn has_data(stats: &AgenticCodingToolStats) -> bool {
 }
 
 pub fn run_tui(
-    multi_stats: &MultiAnalyzerStats,
+    stats_receiver: watch::Receiver<MultiAnalyzerStats>,
     format_options: &NumberFormatOptions,
     upload_status: Arc<Mutex<UploadStatus>>,
+    file_watcher: FileWatcher,
+    mut stats_manager: RealtimeStatsManager,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    // Filter analyzer stats to only include those with data
-    let filtered_stats: Vec<&AgenticCodingToolStats> = multi_stats
-        .analyzer_stats
-        .iter()
-        .filter(|stats| has_data(stats))
-        .collect();
-
-    let mut table_states: Vec<TableState> = filtered_stats
-        .iter()
-        .map(|_| {
-            let mut state = TableState::default();
-            state.select(Some(0));
-            state
-        })
-        .collect();
-    let mut scroll_offset = 0;
     let mut selected_tab = 0;
+    let mut scroll_offset = 0;
 
-    let result = run_app(
-        &mut terminal,
-        &filtered_stats,
-        format_options,
-        &mut table_states,
-        &mut scroll_offset,
-        &mut selected_tab,
-        upload_status,
-    );
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(run_app(
+            &mut terminal,
+            stats_receiver,
+            format_options,
+            &mut selected_tab,
+            &mut scroll_offset,
+            upload_status,
+            file_watcher,
+            &mut stats_manager,
+        ))
+    });
 
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     result
 }
 
-fn run_app(
+async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    filtered_stats: &[&AgenticCodingToolStats],
+    mut stats_receiver: watch::Receiver<MultiAnalyzerStats>,
     format_options: &NumberFormatOptions,
-    table_states: &mut Vec<TableState>,
-    scroll_offset: &mut usize,
     selected_tab: &mut usize,
+    scroll_offset: &mut usize,
     upload_status: Arc<Mutex<UploadStatus>>,
+    file_watcher: FileWatcher,
+    stats_manager: &mut RealtimeStatsManager,
 ) -> Result<()> {
+    let mut table_states: Vec<TableState> = Vec::new();
+    let mut current_stats = stats_receiver.borrow().clone();
+
+    // Initialize table states for current stats
+    update_table_states(&mut table_states, &current_stats, selected_tab);
+
+    let mut needs_redraw = true;
+    let mut last_upload_status = {
+        let status = upload_status.lock().unwrap();
+        format!("{:?}", *status)
+    };
+    
+    // Filter analyzer stats to only include those with data - calculate once and update when stats change
+    let mut filtered_stats: Vec<&AgenticCodingToolStats> = current_stats
+        .analyzer_stats
+        .iter()
+        .filter(|stats| has_data(stats))
+        .collect();
+
     loop {
-        terminal.draw(|frame| {
-            draw_ui(
-                frame,
-                filtered_stats,
-                format_options,
-                table_states,
-                *scroll_offset,
-                *selected_tab,
-                upload_status.clone(),
-            );
-        })?;
+        // Check for stats updates
+        if stats_receiver.has_changed()? {
+            current_stats = stats_receiver.borrow_and_update().clone();
+            update_table_states(&mut table_states, &current_stats, selected_tab);
+            // Recalculate filtered stats only when stats change
+            filtered_stats = current_stats
+                .analyzer_stats
+                .iter()
+                .filter(|stats| has_data(stats))
+                .collect();
+            needs_redraw = true;
+        }
+
+        // Check for file watcher events
+        while let Some(watcher_event) = file_watcher.try_recv() {
+            if let Err(e) = stats_manager.handle_watcher_event(watcher_event).await {
+                eprintln!("Error handling watcher event: {}", e);
+            }
+        }
+
+        // Check if upload status has changed
+        let current_upload_status = {
+            let status = upload_status.lock().unwrap();
+            format!("{:?}", *status)
+        };
+        if current_upload_status != last_upload_status {
+            last_upload_status = current_upload_status;
+            needs_redraw = true;
+        }
+
+        // Only redraw if something has changed
+        if needs_redraw {
+            terminal.draw(|frame| {
+                draw_ui(
+                    frame,
+                    &filtered_stats,
+                    format_options,
+                    &mut table_states,
+                    *scroll_offset,
+                    *selected_tab,
+                    upload_status.clone(),
+                );
+            })?;
+            needs_redraw = false;
+        }
 
         // Use a timeout to allow periodic refreshes for upload status updates
         if let Ok(event_available) = event::poll(Duration::from_millis(100)) {
@@ -105,10 +151,15 @@ fn run_app(
                 continue;
             }
 
-            // Read a key event.  No other event types for now.
+            // Handle different event types
             let key = match event::read()? {
                 Event::Key(key) if key.is_press() => key,
-                _ => continue
+                Event::Resize(_, _) => {
+                    // Terminal was resized, trigger redraw
+                    needs_redraw = true;
+                    continue;
+                }
+                _ => continue,
             };
 
             // Handle quitting.
@@ -125,11 +176,13 @@ fn run_app(
                 KeyCode::Left | KeyCode::Char('h') => {
                     if *selected_tab > 0 {
                         *selected_tab -= 1;
+                        needs_redraw = true;
                     }
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
                     if *selected_tab < filtered_stats.len() - 1 {
                         *selected_tab += 1;
+                        needs_redraw = true;
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
@@ -148,6 +201,7 @@ fn run_app(
                                             selected + 1
                                         },
                                     ));
+                                    needs_redraw = true;
                                 }
                             }
                         }
@@ -172,6 +226,7 @@ fn run_app(
                                             },
                                         ),
                                     ));
+                                    needs_redraw = true;
                                 }
                             }
                         }
@@ -180,6 +235,7 @@ fn run_app(
                 KeyCode::Home => {
                     if let Some(table_state) = table_states.get_mut(*selected_tab) {
                         table_state.select(Some(0));
+                        needs_redraw = true;
                     }
                 }
                 KeyCode::End => {
@@ -189,6 +245,7 @@ fn run_app(
                             table_states.get_mut(*selected_tab)
                         {
                             table_state.select(Some(total_rows.saturating_sub(1)));
+                            needs_redraw = true;
                         }
                     }
                 }
@@ -202,6 +259,7 @@ fn run_app(
                                 let new_selected = (selected + 10)
                                     .min(total_rows.saturating_sub(1));
                                 table_state.select(Some(new_selected));
+                                needs_redraw = true;
                             }
                         }
                     }
@@ -211,6 +269,7 @@ fn run_app(
                         if let Some(selected) = table_state.selected() {
                             let new_selected = selected.saturating_sub(10);
                             table_state.select(Some(new_selected));
+                            needs_redraw = true;
                         }
                     }
                 }
@@ -662,6 +721,27 @@ fn draw_daily_stats_table(
         rows.push(row);
     }
 
+    // Collect all unique models for the totals row
+    let mut all_models = std::collections::HashSet::new();
+    for day_stats in stats.daily_stats.values() {
+        for model in day_stats.models.keys() {
+            all_models.insert(model);
+        }
+    }
+    let mut all_models_vec = all_models
+        .iter()
+        .map(|k| {
+            stats
+                .model_abbrs
+                .model_to_abbr
+                .get(*k)
+                .unwrap_or(k)
+                .clone()
+        })
+        .collect::<Vec<String>>();
+    all_models_vec.sort();
+    let all_models_text = all_models_vec.join(", ");
+
     // Add separator row before totals
     let separator_row = Row::new(vec![
         Line::from(Span::styled(
@@ -697,11 +777,11 @@ fn draw_daily_stats_table(
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            "───────────────",
+            "─────────────────────────",
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            "──────────",
+            "─".repeat(all_models_text.len().max(18)),
             Style::default().add_modifier(Modifier::DIM),
         )),
     ]);
@@ -788,7 +868,10 @@ fn draw_daily_stats_table(
                 .add_modifier(Modifier::BOLD),
         ))
             .right_aligned(),
-        Line::from(Span::raw("")),
+        Line::from(Span::styled(
+            all_models_text,
+            Style::default().add_modifier(Modifier::DIM),
+        )),
     ]);
 
     rows.push(totals_row);
@@ -807,7 +890,7 @@ fn draw_daily_stats_table(
             Constraint::Length(9),  // Output
             Constraint::Length(6),  // Convs
             Constraint::Length(6),  // Tools
-            Constraint::Length(15), // Lines
+            Constraint::Length(25), // Lines
             Constraint::Min(10),    // Models
         ],
     )
@@ -875,7 +958,7 @@ fn draw_summary_stats(
                 Span::raw("      "), // 6 spaces between label and value
                 Span::styled(
                     value,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    Style::new().fg(color).bold(),
                 ),
             ])
         })
@@ -884,4 +967,38 @@ fn draw_summary_stats(
     let summary_widget =
         Paragraph::new(Text::from(summary_lines)).block(Block::default().title(""));
     frame.render_widget(summary_widget, area);
+}
+
+fn update_table_states(
+    table_states: &mut Vec<TableState>,
+    current_stats: &MultiAnalyzerStats,
+    selected_tab: &mut usize,
+) {
+    let filtered_count = current_stats
+        .analyzer_stats
+        .iter()
+        .filter(|stats| has_data(stats))
+        .count();
+
+    // Preserve existing table states when resizing
+    let old_states = table_states.clone();
+    table_states.clear();
+    
+    for i in 0..filtered_count {
+        let state = if i < old_states.len() {
+            // Preserve existing state if available
+            old_states[i].clone()
+        } else {
+            // Create new state for new analyzers
+            let mut new_state = TableState::default();
+            new_state.select(Some(0));
+            new_state
+        };
+        table_states.push(state);
+    }
+
+    // Ensure selected tab is within bounds
+    if *selected_tab >= filtered_count && filtered_count > 0 {
+        *selected_tab = filtered_count - 1;
+    }
 }

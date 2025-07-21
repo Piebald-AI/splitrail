@@ -16,6 +16,7 @@ mod tui;
 mod types;
 mod upload;
 mod utils;
+mod watcher;
 
 #[derive(Parser)]
 #[command(name = "splitrail")]
@@ -118,34 +119,37 @@ fn create_analyzer_registry() -> AnalyzerRegistry {
 async fn run_default(format_options: utils::NumberFormatOptions) {
     let registry = create_analyzer_registry();
     
-    // Get all available analyzers
-    let available_analyzers = registry.available_analyzers();
-    if available_analyzers.is_empty() {
+    // Check if any analyzers are available
+    if registry.available_analyzers().is_empty() {
         eprintln!("❌ No supported AI coding tools found on this system");
         eprintln!("   💡 Supported tools: Claude Code, Codex, Gemini CLI");
         std::process::exit(1);
     }
 
-    // Get stats from all available analyzers
-    let mut all_stats = Vec::new();
-    for analyzer in available_analyzers {
-        match analyzer.get_stats().await {
-            Ok(stats) => all_stats.push(stats),
-            Err(e) => {
-                eprintln!("⚠️  Error analyzing {} data: {}", analyzer.display_name(), e);
-                // Continue with other analyzers instead of exiting
-            }
+    // Create file watcher
+    let file_watcher = match watcher::FileWatcher::new(&registry) {
+        Ok(watcher) => watcher,
+        Err(e) => {
+            eprintln!("❌ Error setting up file watcher: {}", e);
+            std::process::exit(1);
         }
-    }
+    };
 
-    if all_stats.is_empty() {
+    // Create real-time stats manager
+    let stats_manager = match watcher::RealtimeStatsManager::new(registry).await {
+        Ok(manager) => manager,
+        Err(e) => {
+            eprintln!("❌ Error loading analyzer stats: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Get the initial stats to check if we have data
+    let initial_stats = stats_manager.get_stats_receiver().borrow().clone();
+    if initial_stats.analyzer_stats.is_empty() {
         eprintln!("❌ No data could be analyzed from any supported tools");
         std::process::exit(1);
     }
-
-    let multi_stats = MultiAnalyzerStats {
-        analyzer_stats: all_stats,
-    };
 
     // Create upload status for TUI
     let upload_status = Arc::new(Mutex::new(tui::UploadStatus::None));
@@ -154,7 +158,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let config = config::Config::load().unwrap_or_else(|_| None).unwrap_or_default();
     if config.upload.auto_upload {
         if config.is_configured() {
-            let primary_stats = multi_stats.analyzer_stats.iter().max_by_key(|s| s.num_conversations).cloned();
+            let primary_stats = initial_stats.analyzer_stats.iter().max_by_key(|s| s.num_conversations).cloned();
             if let Some(stats) = primary_stats {
                 let upload_status_clone = upload_status.clone();
                 tokio::spawn(async move {
@@ -178,8 +182,14 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         }
     }
 
-    // Show TUI
-    if let Err(e) = tui::run_tui(&multi_stats, &format_options, upload_status.clone()) {
+    // Start real-time TUI with file watcher
+    if let Err(e) = tui::run_tui(
+        stats_manager.get_stats_receiver(),
+        &format_options, 
+        upload_status.clone(),
+        file_watcher,
+        stats_manager
+    ) {
         eprintln!("❌ Error displaying TUI: {}", e);
     }
 }
@@ -262,7 +272,7 @@ async fn run_upload(stats: Option<AgenticCodingToolStats>) {
             let registry = create_analyzer_registry();
             
             // Get the primary analyzer (prioritized by data volume)
-            let analyzer = match registry.get_primary_analyzer_by_volume().await {
+            let analyzer = match registry.get_primary_analyzer_by_volume() {
                 Some(analyzer) => analyzer,
                 None => {
                     eprintln!("❌ No supported AI coding tools found on this system");

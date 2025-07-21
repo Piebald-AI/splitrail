@@ -95,22 +95,31 @@ impl Analyzer for CodexAnalyzer {
         abbrs
     }
 
-    fn get_data_directory_pattern(&self) -> &str {
-        "~/.codex/sessions/*.jsonl"
+    fn get_data_glob_patterns(&self) -> Vec<String> {
+        let mut patterns = Vec::new();
+
+        if let Some(home_dir) = std::env::home_dir() {
+            let home_str = home_dir.to_string_lossy();
+            patterns.push(format!("{}/.codex/sessions/**/*.jsonl", home_str));
+        }
+
+        patterns
     }
 
-    async fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let codex_dirs = find_codex_dirs();
+    fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
+        let patterns = self.get_data_glob_patterns();
         let mut sources = Vec::new();
 
-        for codex_dir in codex_dirs {
-            for entry in glob::glob(&format!("{}/*.jsonl", codex_dir.display()))? {
+        for pattern in patterns {
+            for entry in glob::glob(&pattern)? {
                 let path = entry?;
-                sources.push(DataSource {
-                    path,
-                    format: DataFormat::JsonL,
-                    metadata: std::collections::HashMap::new(),
-                });
+                if path.is_file() {
+                    sources.push(DataSource {
+                        path,
+                        format: DataFormat::JsonL,
+                        metadata: std::collections::HashMap::new(),
+                    });
+                }
             }
         }
 
@@ -121,19 +130,31 @@ impl Analyzer for CodexAnalyzer {
         &self,
         sources: Vec<DataSource>,
     ) -> Result<Vec<ConversationMessage>> {
-        // Parse all the files in parallel
-        let all_entries: Vec<ConversationMessage> = sources
+        // Parse all data sources in parallel while properly propagating any
+        // error that occurs while processing an individual file.  Rayon’s
+        // `try_reduce` utility allows us to aggregate `Result` values coming
+        // from each parallel worker without having to fall back to
+        // sequential processing.
+
+        use rayon::prelude::*;
+
+        let aggregated: Result<Vec<ConversationMessage>> = sources
             .into_par_iter()
-            .flat_map(|source| parse_codex_jsonl_file(&source.path))
-            .collect();
+            .map(|source| parse_codex_jsonl_file(&source.path))
+            // Start the reduction with an empty vector and extend it with the
+            // entries coming from each successfully-parsed file.
+            .try_reduce(Vec::new, |mut acc, mut entries| {
+                acc.append(&mut entries);
+                Ok(acc)
+            });
 
         // For Codex, we don't need to deduplicate since each session is separate
-        // But we could deduplicate by session ID if needed in the future
-        Ok(all_entries)
+        // but we keep the logic encapsulated for future changes.
+        aggregated
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources().await?;
+        let sources = self.discover_data_sources()?;
         let messages = self.parse_conversations(sources).await?;
         let daily_stats = crate::utils::aggregate_by_date(&messages);
 
@@ -152,31 +173,11 @@ impl Analyzer for CodexAnalyzer {
     }
 
     fn is_available(&self) -> bool {
-        !find_codex_dirs().is_empty()
+        self.discover_data_sources().map_or(false, |sources| !sources.is_empty())
     }
 }
 
 // Codex specific implementation functions
-fn find_codex_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-
-    // Try the home directory
-    if let Some(home_dir) = home::home_dir() {
-        let codex_home_dir = home_dir.join(".codex");
-        if codex_home_dir.exists() {
-            dirs.push(codex_home_dir.join("sessions"));
-        }
-    }
-
-    // Try the current directory
-    let current_dir = std::env::current_dir().unwrap();
-    let codex_current_dir = current_dir.join(".codex");
-    if codex_current_dir.exists() {
-        dirs.push(codex_current_dir.join("sessions"));
-    }
-
-    dirs
-}
 
 // CODEX JSONL FILES SCHEMA
 
@@ -253,14 +254,11 @@ enum CodexEntry {
     Unknown(serde_json::Value),
 }
 
-fn parse_codex_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
+fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
     let conversation_file = file_path.to_string_lossy().to_string();
     let mut entries = Vec::new();
 
-    let file = match File::open(file_path) {
-        Ok(f) => f,
-        Err(_) => return entries,
-    };
+    let file = File::open(file_path)?;
 
     let reader = BufReader::with_capacity(64 * 1024, file);
     let mut session_model: Option<String> = None;
@@ -380,7 +378,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
         }
     }
 
-    entries
+    Ok(entries)
 }
 
 fn parse_shell_command_for_file_operations(command: &[String]) -> FileOperationStats {

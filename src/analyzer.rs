@@ -100,12 +100,12 @@ pub trait Analyzer: Send + Sync {
     
     /// Get model abbreviations for this analyzer
     fn get_model_abbreviations(&self) -> ModelAbbreviations;
-    
-    /// Get the data directory pattern for this analyzer
-    fn get_data_directory_pattern(&self) -> &str;
+
+    /// Get glob patterns for discovering data sources
+    fn get_data_glob_patterns(&self) -> Vec<String>;
     
     /// Discover data sources for this analyzer
-    async fn discover_data_sources(&self) -> Result<Vec<DataSource>>;
+    fn discover_data_sources(&self) -> Result<Vec<DataSource>>;
     
     /// Parse conversations from data sources into normalized messages
     async fn parse_conversations(&self, sources: Vec<DataSource>) -> Result<Vec<ConversationMessage>>;
@@ -158,18 +158,26 @@ impl AnalyzerRegistry {
             .map(|a| a.as_ref())
     }
     
+    /// Get analyzer by display name  
+    pub fn get_analyzer_by_display_name(&self, display_name: &str) -> Option<&dyn Analyzer> {
+        self.analyzers
+            .iter()
+            .find(|a| a.display_name() == display_name)
+            .map(|a| a.as_ref())
+    }
+    
     /// Get the first available analyzer
     pub fn get_primary_analyzer(&self) -> Option<&dyn Analyzer> {
         self.available_analyzers().into_iter().next()
     }
     
     /// Get the analyzer with the most data sources (prioritizes by volume)
-    pub async fn get_primary_analyzer_by_volume(&self) -> Option<&dyn Analyzer> {
+    pub fn get_primary_analyzer_by_volume(&self) -> Option<&dyn Analyzer> {
         let mut best_analyzer: Option<&dyn Analyzer> = None;
         let mut best_count: usize = 0;
         
         for analyzer in self.available_analyzers() {
-            if let Ok(sources) = analyzer.discover_data_sources().await {
+            if let Ok(sources) = analyzer.discover_data_sources() {
                 let count = sources.len();
                 if count > best_count {
                     best_count = count;
@@ -179,5 +187,43 @@ impl AnalyzerRegistry {
         }
         
         best_analyzer
+    }
+
+    /// Load stats from all available analyzers
+    pub async fn load_all_stats(&self) -> Result<crate::types::MultiAnalyzerStats> {
+        let available_analyzers = self.available_analyzers();
+        let mut all_stats = Vec::new();
+        
+        for analyzer in available_analyzers {
+            match analyzer.get_stats().await {
+                Ok(stats) => all_stats.push(stats),
+                Err(e) => {
+                    eprintln!("⚠️  Error analyzing {} data: {}", analyzer.display_name(), e);
+                }
+            }
+        }
+
+        Ok(crate::types::MultiAnalyzerStats {
+            analyzer_stats: all_stats,
+        })
+    }
+
+    /// Get a mapping of data directories to analyzer names for file watching
+    pub fn get_directory_to_analyzer_mapping(&self) -> std::collections::HashMap<PathBuf, String> {
+        let mut dir_to_analyzer = std::collections::HashMap::new();
+        
+        for analyzer in self.available_analyzers() {
+            if let Ok(sources) = analyzer.discover_data_sources() {
+                for source in sources {
+                    if let Some(parent) = source.path.parent() {
+                        if parent.exists() {
+                            dir_to_analyzer.insert(parent.to_path_buf(), analyzer.display_name().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        
+        dir_to_analyzer
     }
 }
