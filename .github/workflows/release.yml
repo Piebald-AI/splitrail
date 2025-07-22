@@ -1,0 +1,314 @@
+# Originally derived from https://github.com/sharkdp/bat/blob/872d0baafbc575a80618ec847dee6d63dad3e6e3/.github/workflows/CICD.yml.
+name: release
+
+env:
+  CICD_INTERMEDIATES_DIR: "_cicd-intermediates"
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  all-jobs:
+    # If we don't do this, the job will be skipped if the matrix job fails.
+    if: always()
+    name: all-jobs
+    runs-on: ubuntu-latest
+    needs:
+      - crate_metadata
+      - build
+    steps:
+      - run: jq --exit-status 'all(.result == "success")' <<< '${{ toJson(needs) }}'
+
+  crate_metadata:
+    name: Extract crate metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract crate information
+        id: crate_metadata
+        run: |
+          cargo metadata --no-deps --format-version 1 | jq -r '"name=" + .packages[0].name' | tee -a $GITHUB_OUTPUT
+          cargo metadata --no-deps --format-version 1 | jq -r '"version=" + .packages[0].version' | tee -a $GITHUB_OUTPUT
+          cargo metadata --no-deps --format-version 1 | jq -r '"maintainer=" + .packages[0].authors[0]' | tee -a $GITHUB_OUTPUT
+          cargo metadata --no-deps --format-version 1 | jq -r '"homepage=" + .packages[0].homepage' | tee -a $GITHUB_OUTPUT
+    outputs:
+      name: ${{ steps.crate_metadata.outputs.name }}
+      version: ${{ steps.crate_metadata.outputs.version }}
+      maintainer: ${{ steps.crate_metadata.outputs.maintainer }}
+      homepage: ${{ steps.crate_metadata.outputs.homepage }}
+
+  build:
+    name: ${{ matrix.job.target }} (${{ matrix.job.os }})
+    runs-on: ${{ matrix.job.os }}
+    needs: crate_metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            dpkg_arch: arm64
+            use-cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            dpkg_arch: arm64
+            use-cross: true
+          # For now, skip 32-bit targets (`i686` and `arm`).  ARM64 (e.g. Apple Silicon) is still built (above and below).
+          #
+          # - target: arm-unknown-linux-gnueabihf
+          # os: ubuntu-latest
+          # dpkg_arch: armhf
+          # use-cross: true
+          # - target: arm-unknown-linux-musleabihf
+          # os: ubuntu-latest
+          # dpkg_arch: musl-linux-armhf
+          # use-cross: true
+          # - target: i686-pc-windows-msvc
+          # os: windows-2025
+          # - target: i686-unknown-linux-gnu
+          # os: ubuntu-latest
+          # dpkg_arch: i686
+          # use-cross: true
+          # - target: i686-unknown-linux-musl
+          # os: ubuntu-latest
+          # dpkg_arch: musl-linux-i686
+          # use-cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            dpkg_arch: amd64
+            use-cross: true
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            dpkg_arch: musl-linux-amd64
+            use-cross: true
+    env:
+      BUILD_CMD: cargo
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install prerequisites
+        shell: bash
+        run: |
+          # Install cross-compiler toolchains on for ARM.
+          case ${{ matrix.job.target }} in
+            arm-unknown-linux-*) sudo apt-get -y update ; sudo apt-get -y install gcc-arm-linux-gnueabihf ;;
+            aarch64-unknown-linux-gnu) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu ;;
+          esac
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rustc-codegen-cranelift-preview
+          targets: ${{ matrix.job.target }}
+
+      - name: Install cross
+        if: matrix.job.use-cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Overwrite build command env variable
+        if: matrix.job.use-cross
+        shell: bash
+        run: echo "BUILD_CMD=cross" >> $GITHUB_ENV
+
+      - name: Show version information (Rust, cargo, GCC)
+        shell: bash
+        run: |
+          gcc --version || true
+          rustup -V
+          rustup toolchain list
+          rustup default
+          cargo -V
+          rustc -V
+
+      - name: Build
+        shell: bash
+        run: $BUILD_CMD build --locked --release --target=${{ matrix.job.target }}
+
+      - name: Set binary name & path
+        id: bin
+        shell: bash
+        run: |
+          # Figure out suffix of binary
+          EXE_suffix=""
+          case ${{ matrix.job.target }} in
+            *-pc-windows-*) EXE_suffix=".exe" ;;
+          esac;
+
+          # Setup paths
+          BIN_NAME="${{ needs.crate_metadata.outputs.name }}${EXE_suffix}"
+          BIN_PATH="target/${{ matrix.job.target }}/release/${BIN_NAME}"
+
+          # Let subsequent steps know where to find the binary
+          echo "BIN_PATH=${BIN_PATH}" >> $GITHUB_OUTPUT
+          echo "BIN_NAME=${BIN_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Create tarball
+        id: package
+        shell: bash
+        run: |
+          PKG_suffix=".tar.gz" ; case ${{ matrix.job.target }} in *-pc-windows-*) PKG_suffix=".zip" ;; esac;
+          PKG_BASENAME=${{ needs.crate_metadata.outputs.name }}-v${{ needs.crate_metadata.outputs.version }}-${{ matrix.job.target }}
+          PKG_NAME=${PKG_BASENAME}${PKG_suffix}
+          echo "PKG_NAME=${PKG_NAME}" >> $GITHUB_OUTPUT
+
+          PKG_STAGING="${{ env.CICD_INTERMEDIATES_DIR }}/package"
+          ARCHIVE_DIR="${PKG_STAGING}/${PKG_BASENAME}/"
+          mkdir -p "${ARCHIVE_DIR}"
+
+          # Binary
+          cp "${{ steps.bin.outputs.BIN_PATH }}" "$ARCHIVE_DIR"
+
+          # README and LICENSE
+          cp "README.md" "LICENSE" "$ARCHIVE_DIR"
+
+          # base compressed package
+          pushd "${PKG_STAGING}/" >/dev/null
+          case ${{ matrix.job.target }} in
+            *-pc-windows-*) 7z -y a "${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2 ;;
+            *) tar czf "${PKG_NAME}" "${PKG_BASENAME}"/* ;;
+          esac;
+          popd >/dev/null
+
+          # Let subsequent steps know where to find the compressed package
+          echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Create Debian package
+        id: debian-package
+        shell: bash
+        if: startsWith(matrix.job.os, 'ubuntu')
+        run: |
+          DPKG_STAGING="${{ env.CICD_INTERMEDIATES_DIR }}/debian-package"
+          DPKG_DIR="${DPKG_STAGING}/dpkg"
+          mkdir -p "${DPKG_DIR}"
+
+          DPKG_BASENAME=${{ needs.crate_metadata.outputs.name }}
+          DPKG_CONFLICTS=${{ needs.crate_metadata.outputs.name }}-musl
+          case ${{ matrix.job.target }} in *-musl) DPKG_BASENAME=${{ needs.crate_metadata.outputs.name }}-musl ; DPKG_CONFLICTS=${{ needs.crate_metadata.outputs.name }} ;; esac;
+          DPKG_VERSION=${{ needs.crate_metadata.outputs.version }}
+          DPKG_ARCH="${{ matrix.job.dpkg_arch }}"
+          DPKG_NAME="${DPKG_BASENAME}_${DPKG_VERSION}_${DPKG_ARCH}.deb"
+          echo "DPKG_NAME=${DPKG_NAME}" >> $GITHUB_OUTPUT
+
+          # Binary
+          install -Dm755 "${{ steps.bin.outputs.BIN_PATH }}" "${DPKG_DIR}/usr/bin/${{ steps.bin.outputs.BIN_NAME }}"
+
+          # README and LICENSE
+          install -Dm644 "README.md" "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/README.md"
+          install -Dm644 "LICENSE" "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/LICENSE"
+
+          cat > "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/copyright" <<EOF
+          Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+          Upstream-Name: ${{ needs.crate_metadata.outputs.name }}
+          Source: ${{ needs.crate_metadata.outputs.homepage }}
+
+          Files: *
+          Copyright: ${{ needs.crate_metadata.outputs.maintainer }}
+          Copyright: 2025 ${{ needs.crate_metadata.outputs.maintainer }}
+
+          License: MIT
+            Permission is hereby granted, free of charge, to any
+            person obtaining a copy of this software and associated
+            documentation files (the "Software"), to deal in the
+            Software without restriction, including without
+            limitation the rights to use, copy, modify, merge,
+            publish, distribute, sublicense, and/or sell copies of
+            the Software, and to permit persons to whom the Software
+            is furnished to do so, subject to the following
+            conditions:
+            .
+            The above copyright notice and this permission notice
+            shall be included in all copies or substantial portions
+            of the Software.
+            .
+            THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+            ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+            TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+            PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+            SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+            CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+            OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+            IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+            DEALINGS IN THE SOFTWARE.
+          EOF
+
+          chmod 644 "${DPKG_DIR}/usr/share/doc/${DPKG_BASENAME}/copyright"
+
+          # control file
+          mkdir -p "${DPKG_DIR}/DEBIAN"
+          cat > "${DPKG_DIR}/DEBIAN/control" <<EOF
+          Package: ${DPKG_BASENAME}
+          Version: ${DPKG_VERSION}
+          Section: utils
+          Priority: optional
+          Maintainer: ${{ needs.crate_metadata.outputs.maintainer }}
+          Homepage: ${{ needs.crate_metadata.outputs.homepage }}
+          Architecture: ${DPKG_ARCH}
+          Provides: ${{ needs.crate_metadata.outputs.name }}
+          Conflicts: ${DPKG_CONFLICTS}
+          Description: Analyzer for agentic AI coding tool usage.
+          EOF
+
+          DPKG_PATH="${DPKG_STAGING}/${DPKG_NAME}"
+          echo "DPKG_PATH=${DPKG_PATH}" >> $GITHUB_OUTPUT
+
+          # build dpkg
+          fakeroot dpkg-deb --build "${DPKG_DIR}" "${DPKG_PATH}"
+
+      - name: "Artifact upload: tarball"
+        uses: actions/upload-artifact@master
+        with:
+          name: ${{ steps.package.outputs.PKG_NAME }}
+          path: ${{ steps.package.outputs.PKG_PATH }}
+
+      - name: "Artifact upload: Debian package"
+        uses: actions/upload-artifact@master
+        if: steps.debian-package.outputs.DPKG_NAME
+        with:
+          name: ${{ steps.debian-package.outputs.DPKG_NAME }}
+          path: ${{ steps.debian-package.outputs.DPKG_PATH }}
+
+      - name: Check for release
+        id: is-release
+        shell: bash
+        run: |
+          unset IS_RELEASE ; if [[ $GITHUB_REF =~ ^refs/tags/v[0-9].* ]]; then IS_RELEASE='true' ; fi
+          echo "IS_RELEASE=${IS_RELEASE}" >> $GITHUB_OUTPUT
+
+      - name: Publish archives and packages
+        uses: softprops/action-gh-release@v2
+        if: steps.is-release.outputs.IS_RELEASE
+        with:
+          generate_release_notes: true
+          make_latest: "true"
+          files: |
+            ${{ steps.package.outputs.PKG_PATH }}
+            ${{ steps.debian-package.outputs.DPKG_PATH }}
+
+  # TODO: Enable after initial release.
+  # winget:
+  #   name: Publish to Winget
+  #   runs-on: ubuntu-latest
+  #   needs: build
+  #   if: startsWith(github.ref, 'refs/tags/v')
+  #   steps:
+  #     - uses: vedantmgoyal9/winget-releaser@main
+  #       with:
+  #         identifier: piebald.splitrail
+  #         installers-regex: '-pc-windows-msvc\.zip$'
+  #         token: ${{ secrets.WINGET_TOKEN }}
