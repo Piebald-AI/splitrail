@@ -42,9 +42,17 @@ pub fn format_number(n: u64, options: &NumberFormatOptions) -> String {
                 prec = options.decimal_places
             )
         } else if n >= 1_000_000 {
-            format!("{:.prec$}m", n as f64 / 1_000_000.0, prec = options.decimal_places)
+            format!(
+                "{:.prec$}m",
+                n as f64 / 1_000_000.0,
+                prec = options.decimal_places
+            )
         } else if n >= 1_000 {
-            format!("{:.prec$}k", n as f64 / 1_000.0, prec = options.decimal_places)
+            format!(
+                "{:.prec$}k",
+                n as f64 / 1_000.0,
+                prec = options.decimal_places
+            )
         } else {
             n.to_string()
         }
@@ -59,7 +67,7 @@ pub fn extract_date_from_timestamp(timestamp: &str) -> Option<String> {
     if timestamp.is_empty() {
         return None;
     }
-    
+
     if let Ok(datetime_utc) = chrono::DateTime::parse_from_rfc3339(timestamp) {
         let datetime_local = datetime_utc.with_timezone(&chrono::Local);
         Some(datetime_local.format("%Y-%m-%d").to_string())
@@ -129,42 +137,6 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
                             None => continue,
                         };
 
-                        // Debug long flows to understand the issue
-                        if flow_duration > 7200 {
-                            // More than 2 hours
-                            if let Some(start_time) = chrono::DateTime::from_timestamp(start, 0) {
-                                if let Some(end_time) = chrono::DateTime::from_timestamp(end, 0) {
-                                    println!(
-                                        "DEBUG: Long flow {}s ({}h{}m) from {} to {} in {}",
-                                        flow_duration,
-                                        flow_duration / 3600,
-                                        (flow_duration % 3600) / 60,
-                                        start_time.format("%Y-%m-%d %H:%M:%S UTC"),
-                                        end_time.format("%Y-%m-%d %H:%M:%S UTC"),
-                                        messages
-                                            .get(0)
-                                            .map(|m| match m {
-                                                ConversationMessage::AI {
-                                                    conversation_file,
-                                                    ..
-                                                } => conversation_file
-                                                    .split('/')
-                                                    .last()
-                                                    .unwrap_or("unknown"),
-                                                ConversationMessage::User {
-                                                    conversation_file,
-                                                    ..
-                                                } => conversation_file
-                                                    .split('/')
-                                                    .last()
-                                                    .unwrap_or("unknown"),
-                                            })
-                                            .unwrap_or("unknown")
-                                    );
-                                }
-                            }
-                        }
-
                         // Cap flows at 4 hours (14400 seconds) to filter out data artifacts
                         // Anything longer likely represents conversations left open rather than active work
                         let capped_duration = flow_duration.min(14400);
@@ -195,40 +167,6 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
                         Some(d) => d,
                         None => continue,
                     };
-
-                    // Debug long flows to understand the issue
-                    if flow_duration > 7200 {
-                        // More than 2 hours
-                        if let Some(start_time) = chrono::DateTime::from_timestamp(start, 0) {
-                            if let Some(end_time) = chrono::DateTime::from_timestamp(end, 0) {
-                                println!(
-                                    "DEBUG: Long final flow {}s ({}h{}m) from {} to {} in {}",
-                                    flow_duration,
-                                    flow_duration / 3600,
-                                    (flow_duration % 3600) / 60,
-                                    start_time.format("%Y-%m-%d %H:%M:%S UTC"),
-                                    end_time.format("%Y-%m-%d %H:%M:%S UTC"),
-                                    messages
-                                        .get(0)
-                                        .map(|m| match m {
-                                            ConversationMessage::AI {
-                                                conversation_file, ..
-                                            } => conversation_file
-                                                .split('/')
-                                                .last()
-                                                .unwrap_or("unknown"),
-                                            ConversationMessage::User {
-                                                conversation_file, ..
-                                            } => conversation_file
-                                                .split('/')
-                                                .last()
-                                                .unwrap_or("unknown"),
-                                        })
-                                        .unwrap_or("unknown")
-                                );
-                            }
-                        }
-                    }
 
                     // Cap flows at 4 hours (14400 seconds) to filter out data artifacts
                     // Anything longer likely represents conversations left open rather than active work
@@ -320,7 +258,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
             ConversationMessage::AI { timestamp, .. } => extract_date_from_timestamp(timestamp),
             ConversationMessage::User { timestamp, .. } => extract_date_from_timestamp(timestamp),
         };
-        
+
         let date = match date {
             Some(d) => d,
             None => continue, // Skip entries with invalid timestamps
@@ -342,7 +280,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 ..
             } => {
                 stats.cost += general_stats.cost;
-                
+
                 stats.cached_tokens += general_stats.cache_read_tokens;
                 stats.cached_tokens += general_stats.cache_creation_tokens;
                 stats.cached_tokens += general_stats.cached_tokens;
@@ -358,7 +296,8 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 stats.file_operations.files_edited += file_operations.files_edited;
                 stats.file_operations.files_added += file_operations.files_added;
                 stats.file_operations.terminal_commands += file_operations.terminal_commands;
-                stats.file_operations.file_content_searches += file_operations.file_content_searches;
+                stats.file_operations.file_content_searches +=
+                    file_operations.file_content_searches;
                 stats.file_operations.file_searches += file_operations.file_searches;
                 stats.file_operations.lines_read += file_operations.lines_read;
                 stats.file_operations.lines_edited += file_operations.lines_edited;

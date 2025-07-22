@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::utils::ModelAbbreviations;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Application {
     ClaudeCode,
     GeminiCLI,
@@ -33,6 +34,7 @@ pub enum ConversationMessage {
     #[serde(rename = "User")]
     User {
         timestamp: String,
+        application: Application,
         conversation_file: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         todo_stats: Option<TodoStats>,

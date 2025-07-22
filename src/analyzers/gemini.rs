@@ -259,6 +259,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
             } => {
                 entries.push(ConversationMessage::User {
                     timestamp,
+                    application: Application::GeminiCLI,
                     conversation_file: conversation_file.clone(),
                     todo_stats: None,
                     analyzer_specific: {

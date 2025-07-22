@@ -121,8 +121,8 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     
     // Check if any analyzers are available
     if registry.available_analyzers().is_empty() {
-        eprintln!("❌ No supported AI coding tools found on this system");
-        eprintln!("   💡 Supported tools: Claude Code, Codex, Gemini CLI");
+        eprintln!("No supported AI coding tools found on this system");
+        eprintln!("Supported tools: Claude Code, Codex CLI, Gemini CLI");
         std::process::exit(1);
     }
 
@@ -130,7 +130,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let file_watcher = match watcher::FileWatcher::new(&registry) {
         Ok(watcher) => watcher,
         Err(e) => {
-            eprintln!("❌ Error setting up file watcher: {}", e);
+            eprintln!("Error setting up file watcher: {}", e);
             std::process::exit(1);
         }
     };
@@ -139,7 +139,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let stats_manager = match watcher::RealtimeStatsManager::new(registry).await {
         Ok(manager) => manager,
         Err(e) => {
-            eprintln!("❌ Error loading analyzer stats: {}", e);
+            eprintln!("Error loading analyzer stats: {}", e);
             std::process::exit(1);
         }
     };
@@ -147,7 +147,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     // Get the initial stats to check if we have data
     let initial_stats = stats_manager.get_stats_receiver().borrow().clone();
     if initial_stats.analyzer_stats.is_empty() {
-        eprintln!("❌ No data could be analyzed from any supported tools");
+        eprintln!("No data could be analyzed from any supported tools");
         std::process::exit(1);
     }
 
@@ -190,7 +190,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         file_watcher,
         stats_manager
     ) {
-        eprintln!("❌ Error displaying TUI: {}", e);
+        eprintln!("Error displaying TUI: {}", e);
     }
 }
 
@@ -265,7 +265,7 @@ async fn run_background_upload(stats: AgenticCodingToolStats, upload_status: Arc
 async fn run_upload(stats: Option<AgenticCodingToolStats>) {
     let stats = match stats {
         Some(stats) => {
-            println!("🔍 Uploading {} usage...", stats.analyzer_name);
+            println!("Uploading {} usage...", stats.analyzer_name);
             stats
         }
         None => {
@@ -275,18 +275,15 @@ async fn run_upload(stats: Option<AgenticCodingToolStats>) {
             let analyzer = match registry.get_primary_analyzer_by_volume() {
                 Some(analyzer) => analyzer,
                 None => {
-                    eprintln!("❌ No supported AI coding tools found on this system");
-                    eprintln!("   💡 Supported tools: Claude Code, Codex, Gemini CLI");
+                    eprintln!("No supported agentic development tools found on this system.");
+                    eprintln!("Supported tools: Claude Code, Codex CLI, Gemini CLI.");
                     std::process::exit(1);
                 }
             };
-
-            println!("🔍 Analyzing {} usage for upload...", analyzer.display_name());
-
             match analyzer.get_stats().await {
                 Ok(stats) => stats,
                 Err(e) => {
-                    eprintln!("❌ Error analyzing {} data: {}", analyzer.display_name(), e);
+                    eprintln!("Error analyzing {} data: {}", analyzer.display_name(), e);
                     std::process::exit(1);
                 }
             }
@@ -303,28 +300,28 @@ async fn run_upload(stats: Option<AgenticCodingToolStats>) {
             {
                 Ok(messages) => messages,
                 Err(e) => {
-                    eprintln!("❌ Error getting messages: {}", e);
+                    eprintln!("Error getting messages: {}", e);
                     std::process::exit(1);
                 }
             };
             if let Err(e) = upload::upload_message_stats(&messages, &mut config).await {
-                eprintln!("❌ Upload failed: {:#}", e);
-                eprintln!("💡 Tip: Check your configuration with 'splitrail config show'");
+                eprintln!("Upload failed: {:#}", e);
+                eprintln!("Tip: Check your configuration with 'splitrail config show'");
                 std::process::exit(1);
             }
         }
         Ok(Some(_)) => {
-            eprintln!("❌ Configuration incomplete");
+            eprintln!("Configuration incomplete");
             upload::show_upload_help();
             std::process::exit(1);
         }
         Ok(None) => {
-            eprintln!("❌ No configuration found");
+            eprintln!("No configuration found");
             upload::show_upload_help();
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("❌ Config error: {}", e);
+            eprintln!("Config error: {}", e);
             std::process::exit(1);
         }
     }
@@ -334,19 +331,19 @@ async fn handle_config_subcommand(config_args: ConfigArgs) {
     match config_args.subcommand {
         ConfigSubcommands::Init => {
             if let Err(e) = config::create_default_config() {
-                eprintln!("❌ Error creating config: {}", e);
+                eprintln!("Error creating config: {}", e);
                 std::process::exit(1);
             }
         }
         ConfigSubcommands::Show => {
             if let Err(e) = config::show_config() {
-                eprintln!("❌ Error showing config: {}", e);
+                eprintln!("Error showing config: {}", e);
                 std::process::exit(1);
             }
         }
         ConfigSubcommands::Set { key, value } => {
             if let Err(e) = config::set_config_value(&key, &value) {
-                eprintln!("❌ Error setting config: {}", e);
+                eprintln!("Error setting config: {}", e);
                 std::process::exit(1);
             }
         }
