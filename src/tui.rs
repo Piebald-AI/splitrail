@@ -32,8 +32,8 @@ pub enum UploadStatus {
 fn has_data(stats: &AgenticCodingToolStats) -> bool {
     stats.num_conversations > 0
         || stats.daily_stats.values().any(|day| {
-        day.cost > 0.0 || day.input_tokens > 0 || day.output_tokens > 0 || day.tool_calls > 0
-    })
+            day.cost > 0.0 || day.input_tokens > 0 || day.output_tokens > 0 || day.tool_calls > 0
+        })
 }
 
 pub fn run_tui(
@@ -69,6 +69,7 @@ pub fn run_tui(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut stats_receiver: watch::Receiver<MultiAnalyzerStats>,
@@ -90,7 +91,7 @@ async fn run_app(
         let status = upload_status.lock().unwrap();
         format!("{:?}", *status)
     };
-    
+
     // Filter analyzer stats to only include those with data - calculate once and update when stats change
     let mut filtered_stats: Vec<&AgenticCodingToolStats> = current_stats
         .analyzer_stats
@@ -115,7 +116,7 @@ async fn run_app(
         // Check for file watcher events
         while let Some(watcher_event) = file_watcher.try_recv() {
             if let Err(e) = stats_manager.handle_watcher_event(watcher_event).await {
-                eprintln!("Error handling watcher event: {}", e);
+                eprintln!("Error handling watcher event: {e}");
             }
         }
 
@@ -188,48 +189,33 @@ async fn run_app(
                 KeyCode::Down | KeyCode::Char('j') => {
                     if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                         let total_rows = current_stats.daily_stats.len();
-                        if let Some(table_state) =
-                            table_states.get_mut(*selected_tab)
+                        if let Some(table_state) = table_states.get_mut(*selected_tab)
+                            && let Some(selected) = table_state.selected()
+                            && selected < total_rows.saturating_add(1)
                         {
-                            if let Some(selected) = table_state.selected() {
-                                if selected < total_rows.saturating_add(1) {
-                                    table_state.select(Some(
-                                        if selected == total_rows.saturating_sub(1)
-                                        {
-                                            selected + 2
-                                        } else {
-                                            selected + 1
-                                        },
-                                    ));
-                                    needs_redraw = true;
-                                }
-                            }
+                            table_state.select(Some(if selected == total_rows.saturating_sub(1) {
+                                selected + 2
+                            } else {
+                                selected + 1
+                            }));
+                            needs_redraw = true;
                         }
                     }
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if let Some(current_stats) = filtered_stats.get(*selected_tab) {
-                        if let Some(table_state) =
-                            table_states.get_mut(*selected_tab)
-                        {
-                            if let Some(selected) = table_state.selected() {
-                                if selected > 0 {
-                                    table_state.select(Some(
-                                        selected.saturating_sub(
-                                            if selected
-                                                == current_stats.daily_stats.len()
-                                                + 1
-                                            {
-                                                2
-                                            } else {
-                                                1
-                                            },
-                                        ),
-                                    ));
-                                    needs_redraw = true;
-                                }
-                            }
-                        }
+                    if let Some(current_stats) = filtered_stats.get(*selected_tab)
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected) = table_state.selected()
+                        && selected > 0
+                    {
+                        table_state.select(Some(selected.saturating_sub(
+                            if selected == current_stats.daily_stats.len() + 1 {
+                                2
+                            } else {
+                                1
+                            },
+                        )));
+                        needs_redraw = true;
                     }
                 }
                 KeyCode::Home => {
@@ -241,9 +227,7 @@ async fn run_app(
                 KeyCode::End => {
                     if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                         let total_rows = current_stats.daily_stats.len() + 2;
-                        if let Some(table_state) =
-                            table_states.get_mut(*selected_tab)
-                        {
+                        if let Some(table_state) = table_states.get_mut(*selected_tab) {
                             table_state.select(Some(total_rows.saturating_sub(1)));
                             needs_redraw = true;
                         }
@@ -252,25 +236,22 @@ async fn run_app(
                 KeyCode::PageDown => {
                     if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                         let total_rows = current_stats.daily_stats.len() + 2;
-                        if let Some(table_state) =
-                            table_states.get_mut(*selected_tab)
+                        if let Some(table_state) = table_states.get_mut(*selected_tab)
+                            && let Some(selected) = table_state.selected()
                         {
-                            if let Some(selected) = table_state.selected() {
-                                let new_selected = (selected + 10)
-                                    .min(total_rows.saturating_sub(1));
-                                table_state.select(Some(new_selected));
-                                needs_redraw = true;
-                            }
+                            let new_selected = (selected + 10).min(total_rows.saturating_sub(1));
+                            table_state.select(Some(new_selected));
+                            needs_redraw = true;
                         }
                     }
                 }
                 KeyCode::PageUp => {
-                    if let Some(table_state) = table_states.get_mut(*selected_tab) {
-                        if let Some(selected) = table_state.selected() {
-                            let new_selected = selected.saturating_sub(10);
-                            table_state.select(Some(new_selected));
-                            needs_redraw = true;
-                        }
+                    if let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected) = table_state.selected()
+                    {
+                        let new_selected = selected.saturating_sub(10);
+                        table_state.select(Some(new_selected));
+                        needs_redraw = true;
                     }
                 }
                 _ => {}
@@ -285,7 +266,7 @@ fn draw_ui(
     frame: &mut Frame,
     filtered_stats: &[&AgenticCodingToolStats],
     format_options: &NumberFormatOptions,
-    table_states: &mut Vec<TableState>,
+    table_states: &mut [TableState],
     _scroll_offset: usize,
     selected_tab: usize,
     upload_status: Arc<Mutex<UploadStatus>>,
@@ -303,14 +284,14 @@ fn draw_ui(
             Constraint::Length(6), // Summary stats
             Constraint::Length(2), // Help text
         ])
-            .split(frame.area())
+        .split(frame.area())
     } else {
         Layout::vertical([
             Constraint::Length(3), // Header
             Constraint::Min(3),    // No-data message
             Constraint::Length(2), // Help text
         ])
-            .split(frame.area())
+        .split(frame.area())
     };
 
     // Header
@@ -348,44 +329,44 @@ fn draw_ui(
         frame.render_widget(tabs, chunks[1]);
 
         // Get current analyzer stats
-        if let Some(current_stats) = filtered_stats.get(selected_tab) {
-            if let Some(current_table_state) = table_states.get_mut(selected_tab) {
-                // Models info
-                let mut model_lines = vec![Line::styled(
-                    "Models:",
-                    Style::default().add_modifier(Modifier::DIM),
-                )];
-                for (k, v) in &current_stats.model_abbrs.abbr_to_desc {
-                    // Only show the abbreviation if this model is used
-                    for day_stats in current_stats.daily_stats.values() {
-                        if day_stats
-                            .models
-                            .contains_key(&current_stats.model_abbrs.abbr_to_model[k])
-                        {
-                            model_lines.push(Line::from(Span::styled(
-                                format!("  {}: {}", k, v),
-                                Style::default().add_modifier(Modifier::DIM),
-                            )));
-                            break;
-                        }
+        if let Some(current_stats) = filtered_stats.get(selected_tab)
+            && let Some(current_table_state) = table_states.get_mut(selected_tab)
+        {
+            // Models info
+            let mut model_lines = vec![Line::styled(
+                "Models:",
+                Style::default().add_modifier(Modifier::DIM),
+            )];
+            for (k, v) in &current_stats.model_abbrs.abbr_to_desc {
+                // Only show the abbreviation if this model is used
+                for day_stats in current_stats.daily_stats.values() {
+                    if day_stats
+                        .models
+                        .contains_key(&current_stats.model_abbrs.abbr_to_model[k])
+                    {
+                        model_lines.push(Line::from(Span::styled(
+                            format!("  {k}: {v}"),
+                            Style::default().add_modifier(Modifier::DIM),
+                        )));
+                        break;
                     }
                 }
-                let models_widget =
-                    Paragraph::new(Text::from(model_lines)).block(Block::default().title(""));
-                frame.render_widget(models_widget, chunks[2]);
-
-                // Main table
-                draw_daily_stats_table(
-                    frame,
-                    chunks[3],
-                    current_stats,
-                    format_options,
-                    current_table_state,
-                );
-
-                // Summary stats
-                draw_summary_stats(frame, chunks[4], current_stats, format_options);
             }
+            let models_widget =
+                Paragraph::new(Text::from(model_lines)).block(Block::default().title(""));
+            frame.render_widget(models_widget, chunks[2]);
+
+            // Main table
+            draw_daily_stats_table(
+                frame,
+                chunks[3],
+                current_stats,
+                format_options,
+                current_table_state,
+            );
+
+            // Summary stats
+            draw_summary_stats(frame, chunks[4], current_stats, format_options);
         }
 
         // Help text for data view with upload status
@@ -395,7 +376,8 @@ fn draw_ui(
         let help_chunks = Layout::horizontal([
             Constraint::Min(0),
             Constraint::Length(50), // Increased space for longer error messages
-        ]).split(help_area);
+        ])
+        .split(help_area);
 
         let help =
             Paragraph::new("Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, q/Esc to quit")
@@ -406,20 +388,35 @@ fn draw_ui(
         if let Ok(status) = upload_status.lock() {
             let (status_text, status_style) = match &*status {
                 UploadStatus::None => (String::new(), Style::default()),
-                UploadStatus::Uploading => ("Uploading...".to_string(), Style::default().add_modifier(Modifier::DIM)),
-                UploadStatus::Uploaded => ("✓ Uploaded successfully".to_string(), Style::default().fg(Color::Green)),
+                UploadStatus::Uploading => (
+                    "Uploading...".to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+                UploadStatus::Uploaded => (
+                    "✓ Uploaded successfully".to_string(),
+                    Style::default().fg(Color::Green),
+                ),
                 UploadStatus::Failed(error) => {
                     // Show error message directly, truncating only if necessary
                     let error_text = if error.len() <= 47 {
-                        format!("✕ {}", error)
+                        format!("✕ {error}")
                     } else {
-                        format!("✕ {:.44}...", error)
+                        format!("✕ {error:.44}...")
                     };
                     (error_text, Style::default().fg(Color::Red))
                 }
-                UploadStatus::MissingApiToken => ("No API token for uploading".to_string(), Style::default().fg(Color::Yellow)),
-                UploadStatus::MissingServerUrl => ("No server URL for uploading".to_string(), Style::default().fg(Color::Yellow)),
-                UploadStatus::MissingConfig => ("Upload config incomplete".to_string(), Style::default().fg(Color::Yellow)),
+                UploadStatus::MissingApiToken => (
+                    "No API token for uploading".to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+                UploadStatus::MissingServerUrl => (
+                    "No server URL for uploading".to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+                UploadStatus::MissingConfig => (
+                    "Upload config incomplete".to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
             };
 
             if !status_text.is_empty() {
@@ -466,8 +463,8 @@ fn draw_daily_stats_table(
             Span::from("(see above)").dim(),
         ])),
     ])
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .height(1);
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .height(1);
 
     // Find best values for highlighting
     // TODO: Let's refactor this.
@@ -560,11 +557,11 @@ fn draw_daily_stats_table(
         // Create styled cells with colors matching original implementation
         let date_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_date_for_display(&date),
+                format_date_for_display(date),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else {
-            Line::from(Span::raw(format_date_for_display(&date)))
+            Line::from(Span::raw(format_date_for_display(date)))
         };
 
         let cost_cell = if is_empty_row {
@@ -583,7 +580,7 @@ fn draw_daily_stats_table(
                 Style::default().fg(Color::Yellow),
             ))
         }
-            .right_aligned();
+        .right_aligned();
 
         let cached_cell = if is_empty_row {
             Line::from(Span::styled(
@@ -601,7 +598,7 @@ fn draw_daily_stats_table(
                 Style::default().add_modifier(Modifier::DIM),
             ))
         }
-            .right_aligned();
+        .right_aligned();
 
         let input_cell = if is_empty_row {
             Line::from(Span::styled(
@@ -619,7 +616,7 @@ fn draw_daily_stats_table(
                 format_options,
             )))
         }
-            .right_aligned();
+        .right_aligned();
 
         let output_cell = if is_empty_row {
             Line::from(Span::styled(
@@ -637,7 +634,7 @@ fn draw_daily_stats_table(
                 format_options,
             )))
         }
-            .right_aligned();
+        .right_aligned();
 
         let conv_cell = if is_empty_row {
             Line::from(Span::styled(
@@ -655,7 +652,7 @@ fn draw_daily_stats_table(
                 format_options,
             )))
         }
-            .right_aligned();
+        .right_aligned();
 
         let tool_cell = if is_empty_row {
             Line::from(Span::styled(
@@ -673,7 +670,7 @@ fn draw_daily_stats_table(
                 Style::default().fg(Color::Green),
             ))
         }
-            .right_aligned();
+        .right_aligned();
 
         let lines_cell = if is_empty_row {
             Line::from(Span::styled(
@@ -686,7 +683,7 @@ fn draw_daily_stats_table(
                 Style::default().fg(Color::Blue),
             ))
         }
-            .right_aligned();
+        .right_aligned();
 
         let models_cell = Line::from(Span::styled(
             models,
@@ -730,14 +727,7 @@ fn draw_daily_stats_table(
     }
     let mut all_models_vec = all_models
         .iter()
-        .map(|k| {
-            stats
-                .model_abbrs
-                .model_to_abbr
-                .get(*k)
-                .unwrap_or(k)
-                .clone()
-        })
+        .map(|k| stats.model_abbrs.model_to_abbr.get(*k).unwrap_or(k).clone())
         .collect::<Vec<String>>();
     all_models_vec.sort();
     let all_models_text = all_models_vec.join(", ");
@@ -821,41 +811,41 @@ fn draw_daily_stats_table(
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            format!("${:.2}", total_cost),
+            format!("${total_cost:.2}"),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ))
-            .right_aligned(),
+        .right_aligned(),
         Line::from(Span::styled(
             format_number(total_cached, format_options),
             Style::default()
                 .add_modifier(Modifier::DIM)
                 .add_modifier(Modifier::BOLD),
         ))
-            .right_aligned(),
+        .right_aligned(),
         Line::from(Span::styled(
             format_number(total_input, format_options),
             Style::default().add_modifier(Modifier::BOLD),
         ))
-            .right_aligned(),
+        .right_aligned(),
         Line::from(Span::styled(
             format_number(total_output, format_options),
             Style::default().add_modifier(Modifier::BOLD),
         ))
-            .right_aligned(),
+        .right_aligned(),
         Line::from(Span::styled(
             format_number(stats.num_conversations, format_options),
             Style::default().add_modifier(Modifier::BOLD),
         ))
-            .right_aligned(),
+        .right_aligned(),
         Line::from(Span::styled(
             format_number(total_tool_calls as u64, format_options),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ))
-            .right_aligned(),
+        .right_aligned(),
         Line::from(Span::styled(
             format!(
                 "{}/{}/{}",
@@ -867,7 +857,7 @@ fn draw_daily_stats_table(
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
         ))
-            .right_aligned(),
+        .right_aligned(),
         Line::from(Span::styled(
             all_models_text,
             Style::default().add_modifier(Modifier::DIM),
@@ -884,7 +874,7 @@ fn draw_daily_stats_table(
         [
             Constraint::Length(1),  // Arrow
             Constraint::Length(11), // Date
-            Constraint::Length(10),  // Cost
+            Constraint::Length(10), // Cost
             Constraint::Length(12), // Cached
             Constraint::Length(8),  // Input
             Constraint::Length(9),  // Output
@@ -894,10 +884,10 @@ fn draw_daily_stats_table(
             Constraint::Min(10),    // Models
         ],
     )
-        .header(header)
-        .block(Block::default().title(""))
-        .row_highlight_style(Style::new().blue())
-        .column_spacing(2);
+    .header(header)
+    .block(Block::default().title(""))
+    .row_highlight_style(Style::new().blue())
+    .column_spacing(2);
 
     frame.render_stateful_widget(table, area, table_state);
 
@@ -934,7 +924,7 @@ fn draw_summary_stats(
             format_number(total_tool_calls, format_options),
             Color::LightGreen,
         ),
-        ("Cost:", format!("${:.2}", total_cost), Color::LightYellow),
+        ("Cost:", format!("${total_cost:.2}"), Color::LightYellow),
         (
             "Days tracked:",
             stats.daily_stats.len().to_string(),
@@ -954,12 +944,9 @@ fn draw_summary_stats(
         .into_iter()
         .map(|(label, value, color)| {
             Line::from(vec![
-                Span::raw(format!("{:<width$}", label, width = max_label_width)),
+                Span::raw(format!("{label:<max_label_width$}")),
                 Span::raw("      "), // 6 spaces between label and value
-                Span::styled(
-                    value,
-                    Style::new().fg(color).bold(),
-                ),
+                Span::styled(value, Style::new().fg(color).bold()),
             ])
         })
         .collect();
@@ -983,7 +970,7 @@ fn update_table_states(
     // Preserve existing table states when resizing
     let old_states = table_states.clone();
     table_states.clear();
-    
+
     for i in 0..filtered_count {
         let state = if i < old_states.len() {
             // Preserve existing state if available

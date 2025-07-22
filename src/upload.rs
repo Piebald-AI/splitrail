@@ -1,11 +1,11 @@
 use crate::config::Config;
 use crate::types::{ConversationMessage, FileOperationStats, UploadResponse, WebappStats};
 use anyhow::{Context, Result};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 fn generate_message_hash(conversation_file: &str, timestamp: &str) -> String {
-    let input = format!("{}:{}", conversation_file, timestamp);
+    let input = format!("{conversation_file}:{timestamp}");
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
@@ -14,25 +14,24 @@ fn generate_message_hash(conversation_file: &str, timestamp: &str) -> String {
 
 fn parse_json_error(error_body: &str) -> Option<String> {
     // Try to parse JSON and extract error message from the defined API format
-    if error_body.trim().starts_with('{') {
-        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(error_body) {
-            // The API returns errors in the format: {"error": "message"}
-            if let Some(error_msg) = json_value.get("error") {
-                if let Some(msg_str) = error_msg.as_str() {
-                    return Some(msg_str.to_string());
-                }
-            }
-        }
+    if error_body.trim().starts_with('{')
+        && let Ok(json_value) = serde_json::from_str::<serde_json::Value>(error_body)
+        && let Some(error_msg) = json_value.get("error")
+        && let Some(msg_str) = error_msg.as_str()
+    {
+        // The API returns errors in the format: {"error": "message"}
+        return Some(msg_str.to_string());
     }
+
     None
 }
 
 pub async fn upload_message_stats(
-    messages: &Vec<ConversationMessage>,
+    messages: &[ConversationMessage],
     config: &mut Config,
 ) -> Result<()> {
     let date = chrono::Utc::now().timestamp_millis();
-    config.set_last_date_uploaded(date.try_into().unwrap());
+    config.set_last_date_uploaded(date);
     config.save(true)?;
 
     let client = reqwest::Client::builder()
@@ -52,12 +51,16 @@ pub async fn upload_message_stats(
                 .iter()
                 .map(|m| WebappStats {
                     hash: match m {
-                        ConversationMessage::AI { conversation_file, timestamp, .. } => {
-                            generate_message_hash(conversation_file, timestamp)
-                        },
-                        ConversationMessage::User { conversation_file, timestamp, .. } => {
-                            generate_message_hash(conversation_file, timestamp)
-                        },
+                        ConversationMessage::AI {
+                            conversation_file,
+                            timestamp,
+                            ..
+                        } => generate_message_hash(conversation_file, timestamp),
+                        ConversationMessage::User {
+                            conversation_file,
+                            timestamp,
+                            ..
+                        } => generate_message_hash(conversation_file, timestamp),
                     },
                     message: m.clone(),
                 })
@@ -73,7 +76,7 @@ pub async fn upload_message_stats(
                     resp.json().await.context("Failed to parse response")?;
 
                 if upload_response.success {
-                    return Ok(());
+                    Ok(())
                 } else {
                     anyhow::bail!(
                         "Server returned error: {}",
@@ -91,36 +94,42 @@ pub async fn upload_message_stats(
 
                 // Parse JSON error if present
                 let parsed_error = parse_json_error(&error_text);
-                
+
                 let error_message = match status.as_u16() {
                     400 => {
                         if let Some(json_msg) = parsed_error {
-                            format!("Bad request: {}", json_msg)
-                        } else if error_text.contains("invalid") || error_text.contains("validation") {
-                            format!("Invalid data: {}", error_text)
+                            format!("Bad request: {json_msg}")
+                        } else if error_text.contains("invalid")
+                            || error_text.contains("validation")
+                        {
+                            format!("Invalid data: {error_text}")
                         } else if error_text.contains("missing") {
-                            format!("Missing data: {}", error_text)
-                        } else if error_text.contains("malformed") || error_text.contains("format") {
-                            format!("Bad format: {}", error_text)
-                        } else if !error_text.is_empty() && error_text != "Unknown error" && !error_text.starts_with('{') {
-                            format!("Bad request: {}", error_text)
+                            format!("Missing data: {error_text}")
+                        } else if error_text.contains("malformed") || error_text.contains("format")
+                        {
+                            format!("Bad format: {error_text}")
+                        } else if !error_text.is_empty()
+                            && error_text != "Unknown error"
+                            && !error_text.starts_with('{')
+                        {
+                            format!("Bad request: {error_text}")
                         } else {
                             "Bad request (malformed JSON)".to_string()
                         }
-                    },
+                    }
                     401 => "Unauthorized".to_string(),
                     403 => "Invalid API token".to_string(),
                     404 => "Server not found".to_string(),
                     409 => "Conflict".to_string(),
                     422 => {
                         if let Some(json_msg) = parsed_error {
-                            format!("Validation: {}", json_msg)
+                            format!("Validation: {json_msg}")
                         } else if !error_text.is_empty() && error_text != "Unknown error" {
-                            format!("Validation: {}", error_text)
+                            format!("Validation: {error_text}")
                         } else {
                             "Validation error".to_string()
                         }
-                    },
+                    }
                     429 => "Rate limited".to_string(),
                     500 => "Server error".to_string(),
                     502 => "Bad gateway".to_string(),
@@ -140,9 +149,7 @@ pub async fn upload_message_stats(
                 anyhow::bail!("{}", error_message);
             }
         }
-        Err(e) => {
-            return Err(e.into());
-        }
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -180,9 +187,9 @@ mod tests {
         let hash1 = generate_message_hash("conv1.jsonl", "2025-01-19T14:30:22Z");
         let hash2 = generate_message_hash("conv1.jsonl", "2025-01-19T14:30:23Z");
         let hash3 = generate_message_hash("conv1.jsonl", "2025-01-19T14:30:22Z");
-        
+
         assert_ne!(hash1, hash2); // Different timestamps
-        assert_eq!(hash1, hash3);  // Same inputs = same hash
+        assert_eq!(hash1, hash3); // Same inputs = same hash
         assert_eq!(hash1.len(), 16); // Verify length
     }
 
@@ -190,7 +197,7 @@ mod tests {
     fn test_hash_different_files() {
         let hash1 = generate_message_hash("conv1.jsonl", "2025-01-19T14:30:22Z");
         let hash2 = generate_message_hash("conv2.jsonl", "2025-01-19T14:30:22Z");
-        
+
         assert_ne!(hash1, hash2); // Different files should produce different hashes
         assert_eq!(hash1.len(), 16);
         assert_eq!(hash2.len(), 16);
@@ -201,7 +208,7 @@ mod tests {
         let hash1 = generate_message_hash("", "");
         let hash2 = generate_message_hash("file.jsonl", "");
         let hash3 = generate_message_hash("", "timestamp");
-        
+
         assert_eq!(hash1.len(), 16);
         assert_eq!(hash2.len(), 16);
         assert_eq!(hash3.len(), 16);

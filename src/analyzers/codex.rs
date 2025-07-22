@@ -1,18 +1,17 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::analyzer::{
-    Analyzer, AnalyzerCapabilities, CachingType, DataFormat, DataSource,
+    Analyzer, DataSource,
 };
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, GeneralStats
+    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, FileCategory, FileOperationStats, GeneralStats,
 };
 use crate::utils::ModelAbbreviations;
 
@@ -26,30 +25,8 @@ impl CodexAnalyzer {
 
 #[async_trait]
 impl Analyzer for CodexAnalyzer {
-    fn name(&self) -> &'static str {
-        "codex"
-    }
-
     fn display_name(&self) -> &'static str {
         "Codex"
-    }
-
-    fn get_capabilities(&self) -> AnalyzerCapabilities {
-        AnalyzerCapabilities {
-            supports_todos: false, // Codex doesn't have TodoWrite/TodoRead
-            caching_type: Some(CachingType::InputOnly),
-            supports_file_operations: true,
-            supports_cost_tracking: true,
-            supports_model_selection: true,
-            supported_tools: vec![
-                "local_shell_call".to_string(),
-                "Bash".to_string(),
-                "Grep".to_string(),
-                "Read".to_string(),
-                "Write".to_string(),
-                "Edit".to_string(),
-            ],
-        }
     }
 
     #[rustfmt::skip]
@@ -100,7 +77,7 @@ impl Analyzer for CodexAnalyzer {
 
         if let Some(home_dir) = std::env::home_dir() {
             let home_str = home_dir.to_string_lossy();
-            patterns.push(format!("{}/.codex/sessions/**/*.jsonl", home_str));
+            patterns.push(format!("{home_str}/.codex/sessions/**/*.jsonl"));
         }
 
         patterns
@@ -116,8 +93,6 @@ impl Analyzer for CodexAnalyzer {
                 if path.is_file() {
                     sources.push(DataSource {
                         path,
-                        format: DataFormat::JsonL,
-                        metadata: std::collections::HashMap::new(),
                     });
                 }
             }
@@ -173,7 +148,7 @@ impl Analyzer for CodexAnalyzer {
     }
 
     fn is_available(&self) -> bool {
-        self.discover_data_sources().map_or(false, |sources| !sources.is_empty())
+        self.discover_data_sources().is_ok_and(|sources| !sources.is_empty())
     }
 }
 
@@ -284,51 +259,49 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                 session_model = header.model;
             }
             CodexEntry::Message(message) => {
-                if message.message_type == "message" {
-                    if let Some(role) = &message.role {
-                        match role.as_str() {
-                            "user" => {
-                                entries.push(ConversationMessage::User {
-                                    timestamp: message.timestamp,
+                if message.message_type == "message" && let Some(role) = &message.role {
+                    match role.as_str() {
+                        "user" => {
+                            entries.push(ConversationMessage::User {
+                                timestamp: message.timestamp,
+                                application: Application::CodexCLI,
+                                conversation_file: conversation_file.clone(),
+                                todo_stats: None,
+                                analyzer_specific: HashMap::new(),
+                            });
+                        }
+                        "assistant" => {
+                            let model_name = session_model
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string());
+
+                            if let Some(usage) = message.token_usage {
+                                let total_output_tokens =
+                                    usage.output_tokens + usage.reasoning_output_tokens;
+
+                                entries.push(ConversationMessage::AI {
                                     application: Application::CodexCLI,
+                                    general_stats: GeneralStats {
+                                        input_tokens: usage.input_tokens,
+                                        output_tokens: total_output_tokens,
+                                        cache_creation_tokens: 0,
+                                        cache_read_tokens: 0,
+                                        cached_tokens: usage.cached_input_tokens,
+                                        cost: calculate_cost_from_tokens(&usage, &model_name),
+                                        tool_calls: 0, // We'll count shell calls separately
+                                    },
+                                    model: model_name,
+                                    timestamp: message.timestamp,
+                                    hash: None,
                                     conversation_file: conversation_file.clone(),
+                                    file_operations: FileOperationStats::default(),
                                     todo_stats: None,
+                                    composition_stats: CompositionStats::default(),
                                     analyzer_specific: HashMap::new(),
                                 });
                             }
-                            "assistant" => {
-                                let model_name = session_model
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown".to_string());
-
-                                if let Some(usage) = message.token_usage {
-                                    let total_output_tokens =
-                                        usage.output_tokens + usage.reasoning_output_tokens;
-
-                                    entries.push(ConversationMessage::AI {
-                                        application: Application::CodexCLI,
-                                        general_stats: GeneralStats {
-                                            input_tokens: usage.input_tokens,
-                                            output_tokens: total_output_tokens,
-                                            cache_creation_tokens: 0,
-                                            cache_read_tokens: 0,
-                                            cached_tokens: usage.cached_input_tokens,
-                                            cost: calculate_cost_from_tokens(&usage, &model_name),
-                                            tool_calls: 0, // We'll count shell calls separately
-                                        },
-                                        model: model_name,
-                                        timestamp: message.timestamp,
-                                        hash: None,
-                                        conversation_file: conversation_file.clone(),
-                                        file_operations: FileOperationStats::default(),
-                                        todo_stats: None,
-                                        composition_stats: CompositionStats::default(),
-                                        analyzer_specific: HashMap::new(),
-                                    });
-                                }
-                            }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
             }
@@ -489,15 +462,12 @@ fn extract_line_count_from_sed(command: &str) -> Option<u64> {
         let after_quote = &command[start + 8..];
         if let Some(end) = after_quote.find('\'') {
             let range = &after_quote[..end];
-            if range.ends_with('p') {
-                let range_part = &range[..range.len() - 1];
-                if let Some(comma) = range_part.find(',') {
-                    let start_str = &range_part[..comma];
-                    let end_str = &range_part[comma + 1..];
-                    if let (Ok(start), Ok(end)) = (start_str.parse::<u64>(), end_str.parse::<u64>())
-                    {
-                        return Some(end - start + 1);
-                    }
+            if let Some(range_part) = range.strip_suffix('p') && let Some(comma) = range_part.find(',') {
+                let start_str = &range_part[..comma];
+                let end_str = &range_part[comma + 1..];
+                if let (Ok(start), Ok(end)) = (start_str.parse::<u64>(), end_str.parse::<u64>())
+                {
+                    return Some(end - start + 1);
                 }
             }
         }
@@ -519,8 +489,7 @@ fn calculate_cost_from_tokens(usage: &CodexTokenUsage, model_name: &str) -> f64 
         }
         None => {
             println!(
-                "WARNING: Unknown model name: {}. Using fallback pricing.",
-                model_name
+                "WARNING: Unknown model name: {model_name}. Using fallback pricing.",
             );
             // Fallback pricing - use reasonable estimates
             let input_cost = usage.input_tokens as f64 * 0.0000015; // $1.50 per 1M tokens
