@@ -1,9 +1,9 @@
 use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
-use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
+use crate::watcher::{FileWatcher, RealtimeStatsManager};
 use anyhow::Result;
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -749,11 +749,11 @@ fn draw_daily_stats_table(
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            "────────────",
+            "───────────",
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            "────────",
+            "──────────",
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
@@ -777,7 +777,7 @@ fn draw_daily_stats_table(
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            "─────────────────────────",
+            "───────────────────────",
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
@@ -883,21 +883,21 @@ fn draw_daily_stats_table(
         rows,
         [
             Constraint::Length(1),  // Arrow
-            Constraint::Length(12), // Date
-            Constraint::Length(8),  // Cost
+            Constraint::Length(11), // Date
+            Constraint::Length(10),  // Cost
             Constraint::Length(12), // Cached
             Constraint::Length(8),  // Input
             Constraint::Length(9),  // Output
             Constraint::Length(6),  // Convs
             Constraint::Length(6),  // Tools
-            Constraint::Length(25), // Lines
+            Constraint::Length(23), // Lines
             Constraint::Min(10),    // Models
         ],
     )
         .header(header)
         .block(Block::default().title(""))
         .row_highlight_style(Style::new().blue())
-        .column_spacing(4);
+        .column_spacing(2);
 
     frame.render_stateful_widget(table, area, table_state);
 
