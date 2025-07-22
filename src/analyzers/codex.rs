@@ -290,6 +290,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                             "user" => {
                                 entries.push(ConversationMessage::User {
                                     timestamp: message.timestamp,
+                                    application: Application::CodexCLI,
                                     conversation_file: conversation_file.clone(),
                                     todo_stats: None,
                                     analyzer_specific: HashMap::new(),
@@ -351,6 +352,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
 
                     entries.push(ConversationMessage::User {
                         timestamp,
+                        application: Application::CodexCLI,
                         conversation_file: conversation_file.clone(),
                         todo_stats: None,
                         analyzer_specific: {

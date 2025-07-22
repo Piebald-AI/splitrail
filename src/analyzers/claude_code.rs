@@ -529,6 +529,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
         if data.message.is_none() {
             temp_messages.push(ConversationMessage::User {
                 timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
+                application: Application::ClaudeCode,
                 conversation_file: conversation_file.clone(),
                 todo_stats,
                 analyzer_specific: HashMap::new(),
@@ -580,6 +581,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
             }
             None => temp_messages.push(ConversationMessage::User {
                 timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
+                application: Application::ClaudeCode,
                 conversation_file: conversation_file.clone(),
                 todo_stats,
                 analyzer_specific: HashMap::new(),
