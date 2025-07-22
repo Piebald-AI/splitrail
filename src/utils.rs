@@ -5,7 +5,6 @@ use chrono::{DateTime, Datelike};
 use num_format::{Locale, ToFormattedString};
 use serde::{Deserialize, Serialize};
 
-use crate::analyzer::CachingInfo;
 use crate::types::{ConversationMessage, DailyStats};
 
 #[derive(Clone)]
@@ -154,29 +153,26 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
         }
 
         // Handle case where conversation ends with AI messages (no final user message)
-        if let (Some(start), Some(end)) = (flow_start, last_ai_timestamp) {
-            let flow_duration = (end - start) as u64;
-            // Use the last AI message's date
-            if let Some(last_ai_msg) = sorted_messages
+        if let (Some(start), Some(end)) = (flow_start, last_ai_timestamp)
+            && let Some(ConversationMessage::AI { timestamp, .. }) = sorted_messages
                 .iter()
                 .rev()
                 .find(|msg| matches!(msg, ConversationMessage::AI { .. }))
-            {
-                if let ConversationMessage::AI { timestamp, .. } = last_ai_msg {
-                    let date = match extract_date_from_timestamp(timestamp) {
-                        Some(d) => d,
-                        None => continue,
-                    };
+        {
+            let flow_duration = (end - start) as u64;
+            // Use the last AI message's date
+            let date = match extract_date_from_timestamp(timestamp) {
+                Some(d) => d,
+                None => continue,
+            };
 
-                    // Cap flows at 4 hours (14400 seconds) to filter out data artifacts
-                    // Anything longer likely represents conversations left open rather than active work
-                    let capped_duration = flow_duration.min(14400);
+            // Cap flows at 4 hours (14400 seconds) to filter out data artifacts
+            // Anything longer likely represents conversations left open rather than active work
+            let capped_duration = flow_duration.min(14400);
 
-                    let current_max = daily_max_flows.get(&date).unwrap_or(&0);
-                    if capped_duration > *current_max {
-                        daily_max_flows.insert(date, capped_duration);
-                    }
-                }
+            let current_max = daily_max_flows.get(&date).unwrap_or(&0);
+            if capped_duration > *current_max {
+                daily_max_flows.insert(date, capped_duration);
             }
         }
     }
@@ -194,7 +190,7 @@ pub fn format_date_for_display(date: &str) -> String {
         let month = parsed.month();
         let day = parsed.day();
         let year = parsed.year();
-        let formatted = format!("{}/{}/{}", month, day, year);
+        let formatted = format!("{month}/{day}/{year}");
 
         // Check if this is today's date
         let today = chrono::Local::now().date_naive();
@@ -442,21 +438,12 @@ pub async fn get_messages_later_than(
             ConversationMessage::User { timestamp, .. } => timestamp,
         };
         if let Ok(timestamp) = DateTime::parse_from_rfc3339(timestamp)
-            .with_context(|| format!("Failed to parse timestamp: {}", timestamp))
+            .with_context(|| format!("Failed to parse timestamp: {timestamp}"))
+            && timestamp.timestamp_millis() >= date
         {
-            if timestamp.timestamp_millis() >= date {
-                messages_later_than_date.push(msg);
-            }
+            messages_later_than_date.push(msg);
         }
     }
 
     Ok(messages_later_than_date)
-}
-
-/// Filters messages to only include those created after a specific date (alternative implementation)
-pub async fn filter_messages_after_date(
-    date: i64,
-    messages: Vec<ConversationMessage>,
-) -> Result<Vec<ConversationMessage>> {
-    get_messages_later_than(date, messages).await
 }

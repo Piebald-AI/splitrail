@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use analyzer::AnalyzerRegistry;
 use analyzers::{ClaudeCodeAnalyzer, CodexAnalyzer, GeminiAnalyzer};
-use types::{AgenticCodingToolStats, MultiAnalyzerStats};
+use types::AgenticCodingToolStats;
 
 mod analyzer;
 mod analyzers;
@@ -77,9 +77,7 @@ async fn main() {
     let cli = Cli::parse();
 
     // Load config file to get defaults
-    let config = config::Config::load()
-        .unwrap_or_else(|_| None)
-        .unwrap_or_default();
+    let config = config::Config::load().unwrap_or(None).unwrap_or_default();
 
     // Create format options merging config defaults with CLI overrides
     let format_options = utils::NumberFormatOptions {
@@ -107,18 +105,18 @@ async fn main() {
 
 fn create_analyzer_registry() -> AnalyzerRegistry {
     let mut registry = AnalyzerRegistry::new();
-    
+
     // Register available analyzers
     registry.register(ClaudeCodeAnalyzer::new());
     registry.register(CodexAnalyzer::new());
     registry.register(GeminiAnalyzer::new());
-    
+
     registry
 }
 
 async fn run_default(format_options: utils::NumberFormatOptions) {
     let registry = create_analyzer_registry();
-    
+
     // Check if any analyzers are available
     if registry.available_analyzers().is_empty() {
         eprintln!("No supported AI coding tools found on this system");
@@ -130,7 +128,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let file_watcher = match watcher::FileWatcher::new(&registry) {
         Ok(watcher) => watcher,
         Err(e) => {
-            eprintln!("Error setting up file watcher: {}", e);
+            eprintln!("Error setting up file watcher: {e}");
             std::process::exit(1);
         }
     };
@@ -139,7 +137,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let stats_manager = match watcher::RealtimeStatsManager::new(registry).await {
         Ok(manager) => manager,
         Err(e) => {
-            eprintln!("Error loading analyzer stats: {}", e);
+            eprintln!("Error loading analyzer stats: {e}");
             std::process::exit(1);
         }
     };
@@ -155,10 +153,14 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let upload_status = Arc::new(Mutex::new(tui::UploadStatus::None));
 
     // Check if auto-upload is enabled and start background upload
-    let config = config::Config::load().unwrap_or_else(|_| None).unwrap_or_default();
+    let config = config::Config::load().unwrap_or(None).unwrap_or_default();
     if config.upload.auto_upload {
         if config.is_configured() {
-            let primary_stats = initial_stats.analyzer_stats.iter().max_by_key(|s| s.num_conversations).cloned();
+            let primary_stats = initial_stats
+                .analyzer_stats
+                .iter()
+                .max_by_key(|s| s.num_conversations)
+                .cloned();
             if let Some(stats) = primary_stats {
                 let upload_status_clone = upload_status.clone();
                 tokio::spawn(async move {
@@ -185,21 +187,24 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     // Start real-time TUI with file watcher
     if let Err(e) = tui::run_tui(
         stats_manager.get_stats_receiver(),
-        &format_options, 
+        &format_options,
         upload_status.clone(),
         file_watcher,
-        stats_manager
+        stats_manager,
     ) {
-        eprintln!("Error displaying TUI: {}", e);
+        eprintln!("Error displaying TUI: {e}");
     }
 }
 
 fn extract_user_friendly_error(error: &anyhow::Error) -> String {
     let error_str = error.to_string();
     let error_lower = error_str.to_lowercase();
-    
+
     // Check for network/connection issues
-    if error_lower.contains("network") || error_lower.contains("connection") || error_lower.contains("timeout") {
+    if error_lower.contains("network")
+        || error_lower.contains("connection")
+        || error_lower.contains("timeout")
+    {
         "Network error".to_string()
     } else if error_lower.contains("dns") || error_lower.contains("name resolution") {
         "DNS error".to_string()
@@ -213,53 +218,53 @@ fn extract_user_friendly_error(error: &anyhow::Error) -> String {
     } else {
         // For other errors, return the first line of the error message
         // (upload.rs now provides user-friendly error messages directly)
-        error.to_string().lines().next().unwrap_or("Upload failed").to_string()
+        error
+            .to_string()
+            .lines()
+            .next()
+            .unwrap_or("Upload failed")
+            .to_string()
     }
 }
 
-async fn run_background_upload(stats: AgenticCodingToolStats, upload_status: Arc<Mutex<tui::UploadStatus>>) {
-    // Set status to uploading
-    if let Ok(mut status) = upload_status.lock() {
-        *status = tui::UploadStatus::Uploading;
+async fn run_background_upload(
+    stats: AgenticCodingToolStats,
+    upload_status: Arc<Mutex<tui::UploadStatus>>,
+) {
+    // Helper to set status
+    fn set_status(status: &Arc<Mutex<tui::UploadStatus>>, value: tui::UploadStatus) {
+        if let Ok(mut s) = status.lock() {
+            *s = value;
+        }
     }
 
-    // Small delay to show the "Uploading..." status
+    set_status(&upload_status, tui::UploadStatus::Uploading);
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let result = match config::Config::load() {
-        Ok(Some(mut config)) if config.is_configured() => {
-            match utils::get_messages_later_than(config.last_date_uploaded, stats.messages).await {
-                Ok(messages) => {
-                    upload::upload_message_stats(&messages, &mut config).await
-                }
-                Err(e) => Err(e.into())
-            }
+    let upload_result = async {
+        let config = config::Config::load().ok().flatten()?;
+        if !config.is_configured() {
+            return None;
         }
-        _ => {
-            // Config not available or not configured - silently skip upload
-            return;
-        }
-    };
+        let mut config = config;
+        let messages = utils::get_messages_later_than(config.last_date_uploaded, stats.messages)
+            .await
+            .ok()?;
+        Some(upload::upload_message_stats(&messages, &mut config).await)
+    }
+    .await;
 
-    // Update status based on result
-    if let Ok(mut status) = upload_status.lock() {
-        *status = match result {
-            Ok(_) => tui::UploadStatus::Uploaded,
-            Err(e) => {
-                // Extract a user-friendly error message
-                let error_msg = extract_user_friendly_error(&e);
-                tui::UploadStatus::Failed(error_msg)
-            },
-        };
+    match upload_result {
+        Some(Ok(_)) => set_status(&upload_status, tui::UploadStatus::Uploaded),
+        Some(Err(e)) => {
+            let msg = extract_user_friendly_error(&e);
+            set_status(&upload_status, tui::UploadStatus::Failed(msg))
+        }
+        None => return, // Config not available or not configured - skip upload
     }
 
-    // Keep the status visible for a few seconds
     tokio::time::sleep(Duration::from_secs(3)).await;
-    
-    // Clear the status after delay
-    if let Ok(mut status) = upload_status.lock() {
-        *status = tui::UploadStatus::None;
-    }
+    set_status(&upload_status, tui::UploadStatus::None);
 }
 
 async fn run_upload(stats: Option<AgenticCodingToolStats>) {
@@ -270,7 +275,7 @@ async fn run_upload(stats: Option<AgenticCodingToolStats>) {
         }
         None => {
             let registry = create_analyzer_registry();
-            
+
             // Get the primary analyzer (prioritized by data volume)
             let analyzer = match registry.get_primary_analyzer_by_volume() {
                 Some(analyzer) => analyzer,
@@ -292,20 +297,18 @@ async fn run_upload(stats: Option<AgenticCodingToolStats>) {
 
     match config::Config::load() {
         Ok(Some(mut config)) if config.is_configured() => {
-            let messages = match utils::get_messages_later_than(
-                config.last_date_uploaded,
-                stats.messages,
-            )
-            .await
-            {
-                Ok(messages) => messages,
-                Err(e) => {
-                    eprintln!("Error getting messages: {}", e);
-                    std::process::exit(1);
-                }
-            };
+            let messages =
+                match utils::get_messages_later_than(config.last_date_uploaded, stats.messages)
+                    .await
+                {
+                    Ok(messages) => messages,
+                    Err(e) => {
+                        eprintln!("Error getting messages: {e}");
+                        std::process::exit(1);
+                    }
+                };
             if let Err(e) = upload::upload_message_stats(&messages, &mut config).await {
-                eprintln!("Upload failed: {:#}", e);
+                eprintln!("Upload failed: {e:#}");
                 eprintln!("Tip: Check your configuration with 'splitrail config show'");
                 std::process::exit(1);
             }
@@ -321,7 +324,7 @@ async fn run_upload(stats: Option<AgenticCodingToolStats>) {
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("Config error: {}", e);
+            eprintln!("Config error: {e}");
             std::process::exit(1);
         }
     }
@@ -331,19 +334,19 @@ async fn handle_config_subcommand(config_args: ConfigArgs) {
     match config_args.subcommand {
         ConfigSubcommands::Init => {
             if let Err(e) = config::create_default_config() {
-                eprintln!("Error creating config: {}", e);
+                eprintln!("Error creating config: {e}");
                 std::process::exit(1);
             }
         }
         ConfigSubcommands::Show => {
             if let Err(e) = config::show_config() {
-                eprintln!("Error showing config: {}", e);
+                eprintln!("Error showing config: {e}");
                 std::process::exit(1);
             }
         }
         ConfigSubcommands::Set { key, value } => {
             if let Err(e) = config::set_config_value(&key, &value) {
-                eprintln!("Error setting config: {}", e);
+                eprintln!("Error setting config: {e}");
                 std::process::exit(1);
             }
         }

@@ -1,9 +1,8 @@
-use crate::analyzer::{
-    Analyzer, AnalyzerCapabilities, CachingType, DataFormat, DataSource,
-};
+use crate::analyzer::{Analyzer, DataSource};
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, DailyStats, FileCategory, FileOperationStats, GeneralStats
+    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, DailyStats,
+    FileCategory, FileOperationStats, GeneralStats,
 };
 use crate::utils::ModelAbbreviations;
 use anyhow::Result;
@@ -13,7 +12,7 @@ use glob::glob;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct GeminiAnalyzer;
 
@@ -203,10 +202,7 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
             input_cost + output_cost + cache_cost
         }
         None => {
-            eprintln!(
-                "WARNING: Unknown Gemini model: {}. Using default pricing.",
-                model_name
-            );
+            eprintln!("WARNING: Unknown Gemini model: {model_name}. Using default pricing.",);
             // Fallback to default Gemini 2.5 Flash pricing (more conservative)
             calculate_gemini_cost(tokens, "gemini-2.5-flash")
         }
@@ -215,7 +211,7 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
 
 // Hash generation for deduplication
 fn generate_gemini_hash(session_id: &str, message_id: &str) -> String {
-    format!("gemini:{}:{}", session_id, message_id)
+    format!("gemini:{session_id}:{message_id}")
 }
 
 // JSON session parsing (not JSONL)
@@ -350,30 +346,8 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
 
 #[async_trait]
 impl Analyzer for GeminiAnalyzer {
-    fn name(&self) -> &'static str {
-        "gemini_cli"
-    }
-
     fn display_name(&self) -> &'static str {
         "Gemini CLI"
-    }
-
-    fn get_capabilities(&self) -> AnalyzerCapabilities {
-        AnalyzerCapabilities {
-            supports_todos: false, // Gemini CLI doesn't have TodoWrite/TodoRead equivalent
-            caching_type: Some(CachingType::Generic), // Simple cached tokens
-            supports_file_operations: true,
-            supports_cost_tracking: true,
-            supports_model_selection: true,
-            supported_tools: vec![
-                "read_many_files".to_string(),
-                "replace".to_string(),
-                "run_shell_command".to_string(),
-                "list_directory".to_string(),
-                "web_fetch".to_string(),
-                "web_search".to_string(),
-            ],
-        }
     }
 
     fn get_model_abbreviations(&self) -> ModelAbbreviations {
@@ -406,7 +380,7 @@ impl Analyzer for GeminiAnalyzer {
 
         if let Some(home_dir) = std::env::home_dir() {
             let home_str = home_dir.to_string_lossy();
-            patterns.push(format!("{}/.gemini/tmp/*/chats/*.json", home_str));
+            patterns.push(format!("{home_str}/.gemini/tmp/*/chats/*.json"));
         }
 
         patterns
@@ -422,8 +396,6 @@ impl Analyzer for GeminiAnalyzer {
                 if path.is_file() {
                     sources.push(DataSource {
                         path,
-                        format: DataFormat::Json, // Single JSON files, not JSONL
-                        metadata: HashMap::new(),
                     });
                 }
             }
@@ -447,15 +419,14 @@ impl Analyzer for GeminiAnalyzer {
         let deduplicated_entries: Vec<ConversationMessage> = all_entries
             .into_iter()
             .filter(|entry| {
-                if let ConversationMessage::AI { hash, .. } = entry {
-                    if let Some(hash) = hash {
-                        if seen_hashes.contains(hash) {
-                            false
-                        } else {
-                            seen_hashes.insert(hash.clone());
-                            true
-                        }
+                if let ConversationMessage::AI {
+                    hash: Some(hash), ..
+                } = entry
+                {
+                    if seen_hashes.contains(hash) {
+                        false
                     } else {
+                        seen_hashes.insert(hash.clone());
                         true
                     }
                 } else {
@@ -488,7 +459,7 @@ impl Analyzer for GeminiAnalyzer {
                 }
             };
 
-            let stats = daily_stats.entry(date).or_insert_with(DailyStats::default);
+            let stats = daily_stats.entry(date).or_default();
 
             match message {
                 ConversationMessage::AI {
@@ -550,6 +521,6 @@ impl Analyzer for GeminiAnalyzer {
 
     fn is_available(&self) -> bool {
         self.discover_data_sources()
-            .map_or(false, |sources| !sources.is_empty())
+            .is_ok_and(|sources| !sources.is_empty())
     }
 }

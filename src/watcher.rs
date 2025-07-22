@@ -2,7 +2,7 @@ use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_types::event::{Event, EventKind};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::watch;
 
@@ -32,11 +32,11 @@ impl FileWatcher {
             match res {
                 Ok(event) => {
                     if let Err(e) = handle_fs_event(event, &event_tx, &dir_to_analyzer) {
-                        let _ = event_tx.send(WatcherEvent::Error(format!("Event handling error: {}", e)));
+                        let _ = event_tx.send(WatcherEvent::Error(format!("Event handling error: {e}")));
                     }
                 }
                 Err(e) => {
-                    let _ = event_tx.send(WatcherEvent::Error(format!("Watch error: {}", e)));
+                    let _ = event_tx.send(WatcherEvent::Error(format!("Watch error: {e}")));
                 }
             }
         })?;
@@ -80,7 +80,7 @@ fn handle_fs_event(
     Ok(())
 }
 
-fn find_analyzer_for_path(file_path: &PathBuf, dir_to_analyzer: &HashMap<PathBuf, String>) -> Option<String> {
+fn find_analyzer_for_path(file_path: &Path, dir_to_analyzer: &HashMap<PathBuf, String>) -> Option<String> {
     // Find the longest matching directory path (most specific match)
     let mut best_match: Option<(&PathBuf, &String)> = None;
     let mut best_length = 0;
@@ -149,22 +149,15 @@ impl RealtimeStatsManager {
                             let _ = self.update_tx.send(self.current_stats.clone());
                         }
                         Err(e) => {
-                            eprintln!("Error reloading {} stats: {}", analyzer_name, e);
+                            eprintln!("Error reloading {analyzer_name} stats: {e}");
                         }
                     }
                 }
             }
             WatcherEvent::Error(err) => {
-                eprintln!("File watcher error: {}", err);
+                eprintln!("File watcher error: {err}");
             }
         }
-        Ok(())
-    }
-
-    pub async fn refresh_all(&mut self) -> Result<()> {
-        // Use registry method instead of duplicating logic
-        self.current_stats = self.registry.load_all_stats().await?;
-        let _ = self.update_tx.send(self.current_stats.clone());
         Ok(())
     }
 }

@@ -13,6 +13,7 @@ pub enum Application {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ConversationMessage {
     #[serde(rename_all = "camelCase")]
     #[serde(rename = "AI")]
@@ -183,28 +184,10 @@ pub struct MultiAnalyzerStats {
 }
 
 #[derive(Debug, Serialize)]
-pub struct UploadStatsRequest {
-    pub date: String,
-    pub stats: WebappStats,
-}
-
-#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebappStats {
     pub hash: String,
     pub message: ConversationMessage,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ProjectData {
-    pub percentage: f64,
-    pub lines: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct LanguageData {
-    pub lines: u64,
-    pub files: u64,
 }
 
 #[derive(Debug, Deserialize)]
