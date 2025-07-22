@@ -394,9 +394,7 @@ impl Analyzer for GeminiAnalyzer {
             for entry in glob(&pattern)? {
                 let path = entry?;
                 if path.is_file() {
-                    sources.push(DataSource {
-                        path,
-                    });
+                    sources.push(DataSource { path });
                 }
             }
         }
