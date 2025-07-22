@@ -1,5 +1,6 @@
 use anyhow::Result;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher, EventKind};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify_types::event::{Event, EventKind};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
