@@ -28,23 +28,27 @@ impl FileWatcher {
         let dir_to_analyzer = registry.get_directory_to_analyzer_mapping();
         let watched_dirs: HashSet<_> = dir_to_analyzer.keys().cloned().collect();
 
-        let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-            match res {
+        let mut watcher =
+            notify::recommended_watcher(move |res: Result<Event, notify::Error>| match res {
                 Ok(event) => {
                     if let Err(e) = handle_fs_event(event, &event_tx, &dir_to_analyzer) {
-                        let _ = event_tx.send(WatcherEvent::Error(format!("Event handling error: {e}")));
+                        let _ = event_tx
+                            .send(WatcherEvent::Error(format!("Event handling error: {e}")));
                     }
                 }
                 Err(e) => {
                     let _ = event_tx.send(WatcherEvent::Error(format!("Watch error: {e}")));
                 }
-            }
-        })?;
+            })?;
 
         // Start watching all directories
         for dir in &watched_dirs {
             if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                eprintln!("Warning: Could not watch directory {}: {}", dir.display(), e);
+                eprintln!(
+                    "Warning: Could not watch directory {}: {}",
+                    dir.display(),
+                    e
+                );
             }
         }
 
@@ -60,9 +64,9 @@ impl FileWatcher {
 }
 
 fn handle_fs_event(
-    event: Event, 
+    event: Event,
     tx: &Sender<WatcherEvent>,
-    dir_to_analyzer: &HashMap<PathBuf, String>
+    dir_to_analyzer: &HashMap<PathBuf, String>,
 ) -> Result<()> {
     // Only care about create, write, and remove events
     match event.kind {
@@ -80,7 +84,10 @@ fn handle_fs_event(
     Ok(())
 }
 
-fn find_analyzer_for_path(file_path: &Path, dir_to_analyzer: &HashMap<PathBuf, String>) -> Option<String> {
+fn find_analyzer_for_path(
+    file_path: &Path,
+    dir_to_analyzer: &HashMap<PathBuf, String>,
+) -> Option<String> {
     // Find the longest matching directory path (most specific match)
     let mut best_match: Option<(&PathBuf, &String)> = None;
     let mut best_length = 0;
@@ -131,10 +138,14 @@ impl RealtimeStatsManager {
                     match analyzer.get_stats().await {
                         Ok(new_stats) => {
                             // Update the stats for this analyzer
-                            let mut updated_analyzer_stats = self.current_stats.analyzer_stats.clone();
-                            
+                            let mut updated_analyzer_stats =
+                                self.current_stats.analyzer_stats.clone();
+
                             // Find and replace the stats for this analyzer
-                            if let Some(pos) = updated_analyzer_stats.iter().position(|s| s.analyzer_name == analyzer_name) {
+                            if let Some(pos) = updated_analyzer_stats
+                                .iter()
+                                .position(|s| s.analyzer_name == analyzer_name)
+                            {
                                 updated_analyzer_stats[pos] = new_stats;
                             } else {
                                 // New analyzer data
