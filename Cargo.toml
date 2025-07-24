@@ -3,7 +3,7 @@ name = "splitrail"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-authors = ["Piebald, LLC <support@piebald.ai>"]
+authors = ["Piebald LLC <support@piebald.ai>"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
