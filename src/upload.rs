@@ -1,16 +1,8 @@
 use crate::config::Config;
 use crate::types::{ConversationMessage, FileOperationStats, UploadResponse, WebappStats};
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-fn generate_message_hash(conversation_file: &str, timestamp: &str) -> String {
-    let input = format!("{conversation_file}:{timestamp}");
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8]) // Use first 8 bytes (16 hex chars) for brevity
-}
 
 fn parse_json_error(error_body: &str) -> Option<String> {
     // Try to parse JSON and extract error message from the defined API format
@@ -52,15 +44,13 @@ pub async fn upload_message_stats(
                 .map(|m| WebappStats {
                     hash: match m {
                         ConversationMessage::AI {
-                            conversation_file,
-                            timestamp,
-                            ..
-                        } => generate_message_hash(conversation_file, timestamp),
+                            hash: Some(h), ..
+                        } => h.clone(),
                         ConversationMessage::User {
-                            conversation_file,
-                            timestamp,
-                            ..
-                        } => generate_message_hash(conversation_file, timestamp),
+                            hash: Some(h), ..
+                        } => h.clone(),
+                        // Fallback for messages without hash (shouldn't happen with our updates)
+                        _ => "missing_hash".to_string(),
                     },
                     message: m.clone(),
                 })
@@ -178,42 +168,3 @@ pub fn show_upload_help() {
     println!("  splitrail config show");
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_hash_generation() {
-        let hash1 = generate_message_hash("conv1.jsonl", "2025-01-19T14:30:22Z");
-        let hash2 = generate_message_hash("conv1.jsonl", "2025-01-19T14:30:23Z");
-        let hash3 = generate_message_hash("conv1.jsonl", "2025-01-19T14:30:22Z");
-
-        assert_ne!(hash1, hash2); // Different timestamps
-        assert_eq!(hash1, hash3); // Same inputs = same hash
-        assert_eq!(hash1.len(), 16); // Verify length
-    }
-
-    #[test]
-    fn test_hash_different_files() {
-        let hash1 = generate_message_hash("conv1.jsonl", "2025-01-19T14:30:22Z");
-        let hash2 = generate_message_hash("conv2.jsonl", "2025-01-19T14:30:22Z");
-
-        assert_ne!(hash1, hash2); // Different files should produce different hashes
-        assert_eq!(hash1.len(), 16);
-        assert_eq!(hash2.len(), 16);
-    }
-
-    #[test]
-    fn test_hash_empty_inputs() {
-        let hash1 = generate_message_hash("", "");
-        let hash2 = generate_message_hash("file.jsonl", "");
-        let hash3 = generate_message_hash("", "timestamp");
-
-        assert_eq!(hash1.len(), 16);
-        assert_eq!(hash2.len(), 16);
-        assert_eq!(hash3.len(), 16);
-        assert_ne!(hash1, hash2);
-        assert_ne!(hash1, hash3);
-        assert_ne!(hash2, hash3);
-    }
-}

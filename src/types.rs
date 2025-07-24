@@ -21,9 +21,8 @@ pub enum ConversationMessage {
         application: Application,
         model: String,
         timestamp: String,
-        #[serde(skip)]
         hash: Option<String>,
-        conversation_file: String,
+        project_hash: String,
         file_operations: FileOperationStats,
         general_stats: GeneralStats,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,7 +35,8 @@ pub enum ConversationMessage {
     User {
         timestamp: String,
         application: Application,
-        conversation_file: String,
+        hash: Option<String>,
+        project_hash: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         todo_stats: Option<TodoStats>,
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]

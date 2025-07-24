@@ -88,16 +88,16 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
     // Group messages by conversation file and sort by timestamp
     let mut conversations: BTreeMap<String, Vec<&ConversationMessage>> = BTreeMap::new();
     for entry in entries {
-        let conversation_file = match entry {
+        let project_hash = match entry {
             ConversationMessage::AI {
-                conversation_file, ..
-            } => conversation_file,
+                project_hash, ..
+            } => project_hash,
             ConversationMessage::User {
-                conversation_file, ..
-            } => conversation_file,
+                project_hash, ..
+            } => project_hash,
         };
         conversations
-            .entry(conversation_file.clone())
+            .entry(project_hash.clone())
             .or_default()
             .push(entry);
     }
@@ -213,17 +213,17 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
     // First, find the start date for each conversation
     let mut conversation_start_dates: BTreeMap<String, String> = BTreeMap::new();
     for entry in entries {
-        let (timestamp, conversation_file) = match entry {
+        let (timestamp, project_hash) = match entry {
             ConversationMessage::AI {
                 timestamp,
-                conversation_file,
+                project_hash,
                 ..
-            } => (timestamp, conversation_file),
+            } => (timestamp, project_hash),
             ConversationMessage::User {
                 timestamp,
-                conversation_file,
+                project_hash,
                 ..
-            } => (timestamp, conversation_file),
+            } => (timestamp, project_hash),
         };
         let date = match extract_date_from_timestamp(timestamp) {
             Some(d) => d,
@@ -232,7 +232,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
 
         // Only update if this is earlier than what we've seen, or if we haven't seen this conversation
         conversation_start_dates
-            .entry(conversation_file.clone())
+            .entry(project_hash.clone())
             .and_modify(|existing_date| {
                 if date < *existing_date {
                     *existing_date = date.clone();
