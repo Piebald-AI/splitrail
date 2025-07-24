@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -136,6 +137,37 @@ impl Analyzer for ClaudeCodeAnalyzer {
 }
 
 // Claude Code specific implementation functions
+
+// Helper function to generate hash from conversation file path and timestamp
+fn generate_conversation_hash(conversation_file: &str, timestamp: &str) -> String {
+    let input = format!("{conversation_file}:{timestamp}");
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8]) // Use first 8 bytes (16 hex chars) for consistency
+}
+
+// Helper function to extract project ID from Claude Code file path and hash it
+fn extract_and_hash_project_id(file_path: &Path) -> String {
+    // Claude Code path format: ~/.claude/projects/{PROJECT_ID}/{conversation_file}.jsonl
+    // Example: "C:\Users\user\.claude\projects\D--splitrail-leaderboard\4d1b8bda-6d8c-4ee4-b480-a606953bc9c2.jsonl"
+    
+    if let Some(parent) = file_path.parent() {
+        if let Some(project_id) = parent.file_name().and_then(|name| name.to_str()) {
+            // Hash the project ID using the same algorithm as the rest of the app
+            let mut hasher = Sha256::new();
+            hasher.update(project_id.as_bytes());
+            let result = hasher.finalize();
+            return hex::encode(&result[..8]); // Use first 8 bytes (16 hex chars) for consistency
+        }
+    }
+    
+    // Fallback: hash the full file path if we can't extract project ID
+    let mut hasher = Sha256::new();
+    hasher.update(file_path.to_string_lossy().as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8])
+}
 
 // CLAUDE CODE JSONL FILES SCHEMA
 
@@ -420,6 +452,7 @@ fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
 
 fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
     let conversation_file = file_path.to_string_lossy().to_string();
+    let project_hash = extract_and_hash_project_id(file_path);
     let mut entries = Vec::new();
     let mut has_non_summary_messages = false;
     let mut temp_messages = Vec::new();
@@ -483,14 +516,16 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
             has_non_summary_messages = true;
         }
 
-        let hash = hash_cc_entry(&data);
+        let _hash = hash_cc_entry(&data);
         let (file_ops, todo_stats) = extract_tool_stats(&data);
 
         if data.message.is_none() {
+            let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
             temp_messages.push(ConversationMessage::User {
-                timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
+                timestamp: timestamp.clone(),
                 application: Application::ClaudeCode,
-                conversation_file: conversation_file.clone(),
+                hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                project_hash: project_hash.clone(),
                 todo_stats,
                 analyzer_specific: HashMap::new(),
             });
@@ -501,6 +536,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
         let model_name = message.model.unwrap_or_else(|| "unknown".to_string());
         let file_types = file_ops.file_types.clone();
 
+        let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
         match message.usage {
             Some(usage) => {
                 temp_messages.push(ConversationMessage::AI {
@@ -523,9 +559,9 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                         },
                     },
                     model: model_name,
-                    timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
-                    hash,
-                    conversation_file: conversation_file.clone(),
+                    timestamp: timestamp.clone(),
+                    hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                    project_hash: project_hash.clone(),
                     file_operations: file_ops,
                     todo_stats,
                     analyzer_specific: HashMap::new(),
@@ -539,13 +575,17 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                     },
                 });
             }
-            None => temp_messages.push(ConversationMessage::User {
-                timestamp: data.timestamp.unwrap_or_else(|| "".to_string()),
-                application: Application::ClaudeCode,
-                conversation_file: conversation_file.clone(),
-                todo_stats,
-                analyzer_specific: HashMap::new(),
-            }),
+            None => {
+                let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
+                temp_messages.push(ConversationMessage::User {
+                    timestamp: timestamp.clone(),
+                    application: Application::ClaudeCode,
+                    hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                    project_hash: project_hash.clone(),
+                    todo_stats,
+                    analyzer_specific: HashMap::new(),
+                });
+            }
         }
     }
 

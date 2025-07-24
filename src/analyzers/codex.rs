@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -152,6 +153,15 @@ impl Analyzer for CodexAnalyzer {
 
 // Codex specific implementation functions
 
+// Helper function to generate hash from conversation file path and timestamp
+fn generate_conversation_hash(conversation_file: &str, timestamp: &str) -> String {
+    let input = format!("{conversation_file}:{timestamp}");
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8]) // Use first 8 bytes (16 hex chars) for consistency
+}
+
 // CODEX JSONL FILES SCHEMA
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,9 +273,10 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                     match role.as_str() {
                         "user" => {
                             entries.push(ConversationMessage::User {
-                                timestamp: message.timestamp,
+                                timestamp: message.timestamp.clone(),
                                 application: Application::CodexCLI,
-                                conversation_file: conversation_file.clone(),
+                                hash: Some(generate_conversation_hash(&conversation_file, &message.timestamp)),
+                                project_hash: "".to_string(),
                                 todo_stats: None,
                                 analyzer_specific: HashMap::new(),
                             });
@@ -279,6 +290,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                 let total_output_tokens =
                                     usage.output_tokens + usage.reasoning_output_tokens;
 
+                                let timestamp = message.timestamp.clone();
                                 entries.push(ConversationMessage::AI {
                                     application: Application::CodexCLI,
                                     general_stats: GeneralStats {
@@ -291,9 +303,9 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                         tool_calls: 0, // We'll count shell calls separately
                                     },
                                     model: model_name,
-                                    timestamp: message.timestamp,
-                                    hash: None,
-                                    conversation_file: conversation_file.clone(),
+                                    timestamp: timestamp.clone(),
+                                    hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                                    project_hash: "".to_string(),
                                     file_operations: FileOperationStats::default(),
                                     todo_stats: None,
                                     composition_stats: CompositionStats::default(),
@@ -324,9 +336,10 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                         .unwrap_or_else(|| "".to_string());
 
                     entries.push(ConversationMessage::User {
-                        timestamp,
+                        timestamp: timestamp.clone(),
                         application: Application::CodexCLI,
-                        conversation_file: conversation_file.clone(),
+                        hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                        project_hash: "".to_string(),
                         todo_stats: None,
                         analyzer_specific: {
                             let mut map = HashMap::new();

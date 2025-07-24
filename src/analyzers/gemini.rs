@@ -11,6 +11,7 @@ use chrono::DateTime;
 use glob::glob;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
@@ -131,6 +132,44 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> FileOperationStats {
     file_ops
 }
 
+// Helper function to generate hash from conversation file path and timestamp
+fn generate_conversation_hash(conversation_file: &str, timestamp: &str) -> String {
+    let input = format!("{conversation_file}:{timestamp}");
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8]) // Use first 8 bytes (16 hex chars) for consistency
+}
+
+// Helper function to extract project ID from Gemini file path and hash it
+fn extract_and_hash_project_id_gemini(file_path: &Path) -> String {
+    // Gemini path format: ~/.gemini/tmp/{PROJECT_ID}/chats/{session}.json
+    // Example: "/home/user/.gemini/tmp/project-abc123/chats/session.json"
+    
+    let path_components: Vec<_> = file_path.components().collect();
+    for (i, component) in path_components.iter().enumerate() {
+        if let std::path::Component::Normal(name) = component {
+            if name.to_str() == Some("tmp") && i + 1 < path_components.len() {
+                if let std::path::Component::Normal(project_id) = &path_components[i + 1] {
+                    if let Some(project_id_str) = project_id.to_str() {
+                        // Hash the project ID using the same algorithm as the rest of the app
+                        let mut hasher = Sha256::new();
+                        hasher.update(project_id_str.as_bytes());
+                        let result = hasher.finalize();
+                        return hex::encode(&result[..8]); // Use first 8 bytes (16 hex chars) for consistency
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback: hash the full file path if we can't extract project ID
+    let mut hasher = Sha256::new();
+    hasher.update(file_path.to_string_lossy().as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8])
+}
+
 // Cost calculation with tiered pricing support
 fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
     match MODEL_PRICING.get(model_name) {
@@ -209,14 +248,11 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
     }
 }
 
-// Hash generation for deduplication
-fn generate_gemini_hash(session_id: &str, message_id: &str) -> String {
-    format!("gemini:{session_id}:{message_id}")
-}
 
 // JSON session parsing (not JSONL)
 fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
     let conversation_file = file_path.to_string_lossy().to_string();
+    let project_hash = extract_and_hash_project_id_gemini(file_path);
     let mut entries = Vec::new();
 
     // Read entire file (not line-by-line like JSONL)
@@ -254,9 +290,10 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                 content: _,
             } => {
                 entries.push(ConversationMessage::User {
-                    timestamp,
+                    timestamp: timestamp.clone(),
                     application: Application::GeminiCLI,
-                    conversation_file: conversation_file.clone(),
+                    hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                    project_hash: project_hash.clone(),
                     todo_stats: None,
                     analyzer_specific: {
                         let mut map = HashMap::new();
@@ -283,7 +320,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
             } => {
                 if let Some(tokens) = tokens {
                     let file_ops = extract_tool_stats(&tool_calls);
-                    let hash = generate_gemini_hash(&session.session_id, &id);
+                    let hash = generate_conversation_hash(&conversation_file, &timestamp);
 
                     // Use a reasonable fallback model - Gemini 2.5 Flash is most common and cost-effective
                     let fallback_model = "gemini-2.5-flash";
@@ -293,7 +330,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                         model: fallback_model.to_string(), // TODO: Extract actual model from session
                         timestamp,
                         hash: Some(hash),
-                        conversation_file: conversation_file.clone(),
+                        project_hash: project_hash.clone(),
                         file_operations: file_ops,
                         todo_stats: None, // Gemini CLI doesn't have todos
                         composition_stats: CompositionStats::default(),
