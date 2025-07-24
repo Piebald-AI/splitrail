@@ -196,3 +196,8 @@ pub struct UploadResponse {
     #[serde(default)]
     pub error: Option<String>,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ErrorResponse {
+    pub error: String
+}
