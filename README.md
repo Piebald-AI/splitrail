@@ -20,3 +20,8 @@ Also check out our developer-first agentic AI experience, [Piebald](https://pieb
 ## Releases
 
 Coming soon.
+
+
+-----
+
+© 2025 [Piebald LLC](https://piebald.ai). All rights reserved.
