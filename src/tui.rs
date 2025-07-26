@@ -32,7 +32,10 @@ pub enum UploadStatus {
 fn has_data(stats: &AgenticCodingToolStats) -> bool {
     stats.num_conversations > 0
         || stats.daily_stats.values().any(|day| {
-            day.cost > 0.0 || day.input_tokens > 0 || day.output_tokens > 0 || day.tool_calls > 0
+            day.stats.cost > 0.0
+                || day.stats.input_tokens > 0
+                || day.stats.output_tokens > 0
+                || day.stats.tool_calls > 0
         })
 }
 
@@ -483,28 +486,28 @@ fn draw_daily_stats_table(
     let mut best_tool_calls_i = 0;
 
     for (i, day_stats) in stats.daily_stats.values().enumerate() {
-        if day_stats.cost > best_cost {
-            best_cost = day_stats.cost;
+        if day_stats.stats.cost > best_cost {
+            best_cost = day_stats.stats.cost;
             best_cost_i = i;
         }
-        if day_stats.cached_tokens > best_cached_tokens {
-            best_cached_tokens = day_stats.cached_tokens;
+        if day_stats.stats.cached_tokens > best_cached_tokens {
+            best_cached_tokens = day_stats.stats.cached_tokens;
             best_cached_tokens_i = i;
         }
-        if day_stats.input_tokens > best_input_tokens {
-            best_input_tokens = day_stats.input_tokens;
+        if day_stats.stats.input_tokens > best_input_tokens {
+            best_input_tokens = day_stats.stats.input_tokens;
             best_input_tokens_i = i;
         }
-        if day_stats.output_tokens > best_output_tokens {
-            best_output_tokens = day_stats.output_tokens;
+        if day_stats.stats.output_tokens > best_output_tokens {
+            best_output_tokens = day_stats.stats.output_tokens;
             best_output_tokens_i = i;
         }
         if day_stats.conversations > best_conversations {
             best_conversations = day_stats.conversations;
             best_conversations_i = i;
         }
-        if day_stats.tool_calls > best_tool_calls {
-            best_tool_calls = day_stats.tool_calls;
+        if day_stats.stats.tool_calls > best_tool_calls {
+            best_tool_calls = day_stats.stats.tool_calls;
             best_tool_calls_i = i;
         }
     }
@@ -517,11 +520,11 @@ fn draw_daily_stats_table(
     let mut total_tool_calls = 0;
 
     for (i, (date, day_stats)) in stats.daily_stats.iter().enumerate() {
-        total_cost += day_stats.cost;
-        total_cached += day_stats.cached_tokens;
-        total_input += day_stats.input_tokens;
-        total_output += day_stats.output_tokens;
-        total_tool_calls += day_stats.tool_calls;
+        total_cost += day_stats.stats.cost;
+        total_cached += day_stats.stats.cached_tokens;
+        total_input += day_stats.stats.input_tokens;
+        total_output += day_stats.stats.output_tokens;
+        total_tool_calls += day_stats.stats.tool_calls;
 
         let models = day_stats
             .models
@@ -539,20 +542,20 @@ fn draw_daily_stats_table(
 
         let lines_summary = format!(
             "{}/{}/{}",
-            format_number(day_stats.file_operations.lines_read, format_options),
-            format_number(day_stats.file_operations.lines_edited, format_options),
-            format_number(day_stats.file_operations.lines_added, format_options)
+            format_number(day_stats.stats.lines_read, format_options),
+            format_number(day_stats.stats.lines_edited, format_options),
+            format_number(day_stats.stats.lines_added, format_options)
         );
 
         // Check if this is an empty row
-        let is_empty_row = day_stats.cost == 0.0
-            && day_stats.cached_tokens == 0
-            && day_stats.input_tokens == 0
-            && day_stats.output_tokens == 0
+        let is_empty_row = day_stats.stats.cost == 0.0
+            && day_stats.stats.cached_tokens == 0
+            && day_stats.stats.input_tokens == 0
+            && day_stats.stats.output_tokens == 0
             && day_stats.conversations == 0
             && day_stats.user_messages == 0
             && day_stats.ai_messages == 0
-            && day_stats.tool_calls == 0;
+            && day_stats.stats.tool_calls == 0;
 
         // Create styled cells with colors matching original implementation
         let date_cell = if is_empty_row {
@@ -566,17 +569,17 @@ fn draw_daily_stats_table(
 
         let cost_cell = if is_empty_row {
             Line::from(Span::styled(
-                format!("${:.2}", day_stats.cost),
+                format!("${:.2}", day_stats.stats.cost),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_cost_i {
             Line::from(Span::styled(
-                format!("${:.2}", day_stats.cost),
+                format!("${:.2}", day_stats.stats.cost),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::styled(
-                format!("${:.2}", day_stats.cost),
+                format!("${:.2}", day_stats.stats.cost),
                 Style::default().fg(Color::Yellow),
             ))
         }
@@ -584,17 +587,17 @@ fn draw_daily_stats_table(
 
         let cached_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.cached_tokens, format_options),
+                format_number(day_stats.stats.cached_tokens, format_options),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_cached_tokens_i {
             Line::from(Span::styled(
-                format_number(day_stats.cached_tokens, format_options),
+                format_number(day_stats.stats.cached_tokens, format_options),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::styled(
-                format_number(day_stats.cached_tokens, format_options),
+                format_number(day_stats.stats.cached_tokens, format_options),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         }
@@ -602,17 +605,17 @@ fn draw_daily_stats_table(
 
         let input_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.input_tokens, format_options),
+                format_number(day_stats.stats.input_tokens, format_options),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_input_tokens_i {
             Line::from(Span::styled(
-                format_number(day_stats.input_tokens, format_options),
+                format_number(day_stats.stats.input_tokens, format_options),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::raw(format_number(
-                day_stats.input_tokens,
+                day_stats.stats.input_tokens,
                 format_options,
             )))
         }
@@ -620,17 +623,17 @@ fn draw_daily_stats_table(
 
         let output_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.output_tokens, format_options),
+                format_number(day_stats.stats.output_tokens, format_options),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_output_tokens_i {
             Line::from(Span::styled(
-                format_number(day_stats.output_tokens, format_options),
+                format_number(day_stats.stats.output_tokens, format_options),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::raw(format_number(
-                day_stats.output_tokens,
+                day_stats.stats.output_tokens,
                 format_options,
             )))
         }
@@ -656,17 +659,17 @@ fn draw_daily_stats_table(
 
         let tool_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.tool_calls as u64, format_options),
+                format_number(day_stats.stats.tool_calls as u64, format_options),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_tool_calls_i {
             Line::from(Span::styled(
-                format_number(day_stats.tool_calls as u64, format_options),
+                format_number(day_stats.stats.tool_calls as u64, format_options),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::styled(
-                format_number(day_stats.tool_calls as u64, format_options),
+                format_number(day_stats.stats.tool_calls as u64, format_options),
                 Style::default().fg(Color::Green),
             ))
         }
@@ -781,17 +784,17 @@ fn draw_daily_stats_table(
     let total_lines_r = stats
         .daily_stats
         .values()
-        .map(|s| s.file_operations.lines_read)
+        .map(|s| s.stats.lines_read)
         .sum::<u64>();
     let total_lines_e = stats
         .daily_stats
         .values()
-        .map(|s| s.file_operations.lines_edited)
+        .map(|s| s.stats.lines_edited)
         .sum::<u64>();
     let total_lines_a = stats
         .daily_stats
         .values()
-        .map(|s| s.file_operations.lines_added)
+        .map(|s| s.stats.lines_added)
         .sum::<u64>();
 
     let totals_row = Row::new(vec![
@@ -901,14 +904,26 @@ fn draw_summary_stats(
     stats: &AgenticCodingToolStats,
     format_options: &NumberFormatOptions,
 ) {
-    let total_cost: f64 = stats.daily_stats.values().map(|s| s.cost).sum();
-    let total_cached: u64 = stats.daily_stats.values().map(|s| s.cached_tokens).sum();
-    let total_input: u64 = stats.daily_stats.values().map(|s| s.input_tokens).sum();
-    let total_output: u64 = stats.daily_stats.values().map(|s| s.output_tokens).sum();
+    let total_cost: f64 = stats.daily_stats.values().map(|s| s.stats.cost).sum();
+    let total_cached: u64 = stats
+        .daily_stats
+        .values()
+        .map(|s| s.stats.cached_tokens)
+        .sum();
+    let total_input: u64 = stats
+        .daily_stats
+        .values()
+        .map(|s| s.stats.input_tokens)
+        .sum();
+    let total_output: u64 = stats
+        .daily_stats
+        .values()
+        .map(|s| s.stats.output_tokens)
+        .sum();
     let total_tool_calls: u64 = stats
         .daily_stats
         .values()
-        .map(|s| s.tool_calls as u64)
+        .map(|s| s.stats.tool_calls as u64)
         .sum();
     let total_tokens = total_cached + total_input + total_output;
 

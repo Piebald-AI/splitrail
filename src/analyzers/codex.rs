@@ -10,8 +10,7 @@ use std::path::Path;
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, FileCategory,
-    FileOperationStats, GeneralStats,
+    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats
 };
 use crate::utils::ModelAbbreviations;
 
@@ -272,13 +271,14 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                 {
                     match role.as_str() {
                         "user" => {
-                            entries.push(ConversationMessage::User {
+                            entries.push(ConversationMessage {
                                 timestamp: message.timestamp.clone(),
                                 application: Application::CodexCLI,
-                                hash: Some(generate_conversation_hash(&conversation_file, &message.timestamp)),
+                                hash: generate_conversation_hash(&conversation_file, &message.timestamp),
                                 project_hash: "".to_string(),
-                                todo_stats: None,
-                                analyzer_specific: HashMap::new(),
+                                model: None,
+                                stats: Stats::default(),
+                                role: MessageRole::User,
                             });
                         }
                         "assistant" => {
@@ -291,25 +291,23 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                     usage.output_tokens + usage.reasoning_output_tokens;
 
                                 let timestamp = message.timestamp.clone();
-                                entries.push(ConversationMessage::AI {
+                                let mut stats = Stats::default();
+                                stats.input_tokens = usage.input_tokens;
+                                stats.output_tokens = total_output_tokens;
+                                stats.cache_creation_tokens = 0;
+                                stats.cache_read_tokens = 0;
+                                stats.cached_tokens = usage.cached_input_tokens;
+                                stats.cost = calculate_cost_from_tokens(&usage, &model_name);
+                                stats.tool_calls = 0; // We'll count shell calls separately
+
+                                entries.push(ConversationMessage {
                                     application: Application::CodexCLI,
-                                    general_stats: GeneralStats {
-                                        input_tokens: usage.input_tokens,
-                                        output_tokens: total_output_tokens,
-                                        cache_creation_tokens: 0,
-                                        cache_read_tokens: 0,
-                                        cached_tokens: usage.cached_input_tokens,
-                                        cost: calculate_cost_from_tokens(&usage, &model_name),
-                                        tool_calls: 0, // We'll count shell calls separately
-                                    },
-                                    model: model_name,
+                                    model: Some(model_name),
                                     timestamp: timestamp.clone(),
-                                    hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                                    hash: generate_conversation_hash(&conversation_file, &timestamp),
                                     project_hash: "".to_string(),
-                                    file_operations: FileOperationStats::default(),
-                                    todo_stats: None,
-                                    composition_stats: CompositionStats::default(),
-                                    analyzer_specific: HashMap::new(),
+                                    stats,
+                                    role: MessageRole::Assistant,
                                 });
                             }
                         }
@@ -324,10 +322,10 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                     }
 
                     // Count as a tool call and create a user message to represent the shell call
-                    let (file_ops, composition_stats) = if let Some(action) = &shell_call.action {
+                    let stats = if let Some(action) = &shell_call.action {
                         parse_shell_command_for_file_operations(&action.command)
                     } else {
-                        (FileOperationStats::default(), CompositionStats::default())
+                        Stats::default()
                     };
 
                     let timestamp = shell_call
@@ -335,28 +333,14 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                         .clone()
                         .unwrap_or_else(|| "".to_string());
 
-                    entries.push(ConversationMessage::User {
+                    entries.push(ConversationMessage {
                         timestamp: timestamp.clone(),
                         application: Application::CodexCLI,
-                        hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                        hash: generate_conversation_hash(&conversation_file, &timestamp),
                         project_hash: "".to_string(),
-                        todo_stats: None,
-                        analyzer_specific: {
-                            let mut map = HashMap::new();
-                            map.insert(
-                                "shell_call".to_string(),
-                                serde_json::to_value(&shell_call).unwrap_or_default(),
-                            );
-                            map.insert(
-                                "file_operations".to_string(),
-                                serde_json::to_value(&file_ops).unwrap_or_default(),
-                            );
-                            map.insert(
-                                "composition_stats".to_string(),
-                                serde_json::to_value(&composition_stats).unwrap_or_default(),
-                            );
-                            map
-                        },
+                        model: None,
+                        stats,
+                        role: MessageRole::User,
                     });
                 }
             }
@@ -373,19 +357,18 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
     Ok(entries)
 }
 
-fn parse_shell_command_for_file_operations(command: &[String]) -> (FileOperationStats, CompositionStats) {
-    let mut file_ops = FileOperationStats::default();
-    let mut composition_stats = CompositionStats::default();
+fn parse_shell_command_for_file_operations(command: &[String]) -> Stats {
+    let mut stats = Stats::default();
 
     if command.is_empty() {
-        return (file_ops, composition_stats);
+        return stats;
     }
 
     // Join the command for easier parsing
     let full_command = command.join(" ");
 
     // Count basic shell operations
-    file_ops.terminal_commands += 1;
+    stats.terminal_commands += 1;
 
     // Parse the actual command (usually after "bash -lc")
     let actual_command = if command.len() >= 3 && command[0] == "bash" && command[1] == "-lc" {
@@ -396,11 +379,11 @@ fn parse_shell_command_for_file_operations(command: &[String]) -> (FileOperation
 
     // Detect file operations based on command patterns
     if actual_command.contains("rg ") || actual_command.contains("grep ") {
-        file_ops.file_content_searches += 1;
+        stats.file_content_searches += 1;
     }
 
     if actual_command.contains("--files") || actual_command.contains("find ") {
-        file_ops.file_searches += 1;
+        stats.file_searches += 1;
     }
 
     // Detect file reads
@@ -411,21 +394,21 @@ fn parse_shell_command_for_file_operations(command: &[String]) -> (FileOperation
         || actual_command.contains("more ")
         || actual_command.contains("sed -n")
     {
-        file_ops.files_read += 1;
+        stats.files_read += 1;
 
         // Try to extract file paths and categorize
-        extract_file_paths_from_command(actual_command, &mut composition_stats);
+        extract_file_paths_from_command(actual_command, &mut stats);
 
         // Estimate lines read (rough approximation)
         if actual_command.contains("sed -n") {
             // Try to extract line numbers from sed command
             if let Some(lines) = extract_line_count_from_sed(actual_command) {
-                file_ops.lines_read += lines;
-                file_ops.bytes_read += lines * 80; // Rough estimate
+                stats.lines_read += lines;
+                stats.bytes_read += lines * 80; // Rough estimate
             }
         } else {
-            file_ops.lines_read += 100; // Default estimate
-            file_ops.bytes_read += 8000; // Default estimate
+            stats.lines_read += 100; // Default estimate
+            stats.bytes_read += 8000; // Default estimate
         }
     }
 
@@ -435,22 +418,22 @@ fn parse_shell_command_for_file_operations(command: &[String]) -> (FileOperation
         || actual_command.contains("tee ")
         || actual_command.contains("echo ")
     {
-        file_ops.files_edited += 1;
-        file_ops.lines_edited += 10; // Rough estimate
-        file_ops.bytes_edited += 800; // Rough estimate
+        stats.files_edited += 1;
+        stats.lines_edited += 10; // Rough estimate
+        stats.bytes_edited += 800; // Rough estimate
     }
 
     // Detect file edits
     if actual_command.contains("sed -i") || actual_command.contains("awk") {
-        file_ops.files_edited += 1;
-        file_ops.lines_edited += 5; // Rough estimate
-        file_ops.bytes_edited += 400; // Rough estimate
+        stats.files_edited += 1;
+        stats.lines_edited += 5; // Rough estimate
+        stats.bytes_edited += 400; // Rough estimate
     }
 
-    (file_ops, composition_stats)
+    stats
 }
 
-fn extract_file_paths_from_command(command: &str, composition_stats: &mut CompositionStats) {
+fn extract_file_paths_from_command(command: &str, stats: &mut Stats) {
     // This is a rough implementation - it tries to find file paths in the command
     let words: Vec<&str> = command.split_whitespace().collect();
 
@@ -468,12 +451,12 @@ fn extract_file_paths_from_command(command: &str, composition_stats: &mut Compos
                 // Estimate lines per file operation
                 let estimated_lines = 50; // Conservative estimate
                 match category {
-                    FileCategory::SourceCode => composition_stats.code_lines += estimated_lines,
-                    FileCategory::Documentation => composition_stats.docs_lines += estimated_lines,
-                    FileCategory::Data => composition_stats.data_lines += estimated_lines,
-                    FileCategory::Media => composition_stats.media_lines += estimated_lines,
-                    FileCategory::Config => composition_stats.config_lines += estimated_lines,
-                    FileCategory::Other => composition_stats.other_lines += estimated_lines,
+                    FileCategory::SourceCode => stats.code_lines += estimated_lines,
+                    FileCategory::Documentation => stats.docs_lines += estimated_lines,
+                    FileCategory::Data => stats.data_lines += estimated_lines,
+                    FileCategory::Media => stats.media_lines += estimated_lines,
+                    FileCategory::Config => stats.config_lines += estimated_lines,
+                    FileCategory::Other => stats.other_lines += estimated_lines,
                 }
             }
         }

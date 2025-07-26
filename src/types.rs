@@ -13,51 +13,34 @@ pub enum Application {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum ConversationMessage {
-    #[serde(rename_all = "camelCase")]
-    AI {
-        application: Application,
-        model: String,
-        timestamp: String,
-        hash: Option<String>,
-        project_hash: String,
-        file_operations: FileOperationStats,
-        general_stats: GeneralStats,
-        todo_stats: Option<TodoStats>,
-        composition_stats: CompositionStats,
-        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-        analyzer_specific: std::collections::HashMap<String, serde_json::Value>,
-    },
-    #[serde(rename_all = "camelCase")]
-    User {
-        timestamp: String,
-        application: Application,
-        hash: Option<String>,
-        project_hash: String,
-        todo_stats: Option<TodoStats>,
-        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-        analyzer_specific: std::collections::HashMap<String, serde_json::Value>,
-    },
+#[serde(rename_all = "camelCase")]
+#[derive(PartialEq)]
+pub enum MessageRole {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessage {
+    pub application: Application,
+    pub timestamp: String,
+    pub hash: String,
+    pub project_hash: String,
+    pub model: Option<String>, // None for user messages
+    pub stats: Stats,
+    pub role: MessageRole,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyStats {
     #[allow(dead_code)]
     pub date: String,
-    pub cost: f64,
-    pub cached_tokens: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
     pub user_messages: u32,
     pub ai_messages: u32,
-    pub tool_calls: u32,
     pub conversations: u32,
     pub models: BTreeMap<String, u32>,
-    pub file_operations: FileOperationStats,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub todo_stats: Option<TodoStats>,
-    pub composition_stats: CompositionStats,
+    pub stats: Stats,
     pub max_flow_length_seconds: u64, // Longest autonomous AI operation in seconds
 }
 
@@ -72,7 +55,17 @@ pub struct ModelPricing {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FileOperationStats {
+pub struct Stats {
+    // Token and cost stats
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cached_tokens: u64,
+    pub cost: f64,
+    pub tool_calls: u32,
+    
+    // File operation stats
     pub terminal_commands: u64,
     pub file_searches: u64,
     pub file_content_searches: u64,
@@ -88,39 +81,21 @@ pub struct FileOperationStats {
     pub bytes_added: u64,
     pub bytes_edited: u64,
     pub bytes_deleted: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TodoStats {
+    
+    // Todo stats
     pub todos_created: u64,
     pub todos_completed: u64,
     pub todos_in_progress: u64,
     pub todo_writes: u64,
     pub todo_reads: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompositionStats {
+    
+    // Composition stats
     pub code_lines: u64,
     pub docs_lines: u64,
     pub data_lines: u64,
     pub media_lines: u64,
     pub config_lines: u64,
     pub other_lines: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GeneralStats {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_creation_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cached_tokens: u64,
-    pub cost: f64,
-    pub tool_calls: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,13 +141,6 @@ pub struct AgenticCodingToolStats {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiAnalyzerStats {
     pub analyzer_stats: Vec<AgenticCodingToolStats>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WebappStats {
-    pub hash: String,
-    pub message: ConversationMessage,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,7 +1,5 @@
 use crate::config::Config;
-use crate::types::{
-    ConversationMessage, ErrorResponse, FileOperationStats, UploadResponse, WebappStats,
-};
+use crate::types::{ConversationMessage, ErrorResponse, Stats, UploadResponse};
 use anyhow::{Context, Result};
 use std::time::Duration;
 
@@ -25,20 +23,7 @@ pub async fn upload_message_stats(
             format!("Bearer {}", config.server.api_token),
         )
         .header("Content-Type", "application/json")
-        .json(
-            &messages
-                .iter()
-                .map(|m| WebappStats {
-                    hash: match m {
-                        ConversationMessage::AI { hash: Some(h), .. } => h.clone(),
-                        ConversationMessage::User { hash: Some(h), .. } => h.clone(),
-                        // Fallback for messages without hash (shouldn't happen with our updates)
-                        _ => "missing_hash".to_string(),
-                    },
-                    message: m.clone(),
-                })
-                .collect::<Vec<WebappStats>>(),
-        )
+        .json(&messages)
         .send()
         .await;
 
@@ -75,14 +60,14 @@ pub async fn upload_message_stats(
     }
 }
 
-pub fn estimate_lines_added(file_ops: &FileOperationStats) -> u64 {
+pub fn estimate_lines_added(stats: &Stats) -> u64 {
     // Estimate that edited files are mostly new content
-    file_ops.lines_edited + (file_ops.lines_edited / 3)
+    stats.lines_edited + (stats.lines_edited / 3)
 }
 
-pub fn estimate_lines_deleted(file_ops: &FileOperationStats) -> u64 {
+pub fn estimate_lines_deleted(stats: &Stats) -> u64 {
     // Estimate that some edited content was deleted
-    file_ops.lines_edited / 4
+    stats.lines_edited / 4
 }
 
 pub fn show_upload_help() {

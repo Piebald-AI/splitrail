@@ -10,8 +10,7 @@ use std::path::Path;
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, FileCategory,
-    FileOperationStats, GeneralStats, TodoStats,
+    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats
 };
 use crate::upload::{estimate_lines_added, estimate_lines_deleted};
 use crate::utils::ModelAbbreviations;
@@ -89,18 +88,11 @@ impl Analyzer for ClaudeCodeAnalyzer {
         let deduplicated_entries: Vec<ConversationMessage> = all_entries
             .into_iter()
             .filter(|entry| {
-                if let ConversationMessage::AI {
-                    hash: Some(hash), ..
-                } = &entry
-                {
-                    if seen_hashes.contains(hash) {
-                        false
-                    } else {
-                        seen_hashes.insert(hash.clone());
-                        true
-                    }
+                if seen_hashes.contains(&entry.hash) {
+                    false
                 } else {
-                    true // Keep user messages and entries without hashes
+                    seen_hashes.insert(entry.hash.clone());
+                    true
                 }
             })
             .collect();
@@ -271,11 +263,9 @@ fn is_synthetic_entry(data: &ClaudeCodeEntry) -> bool {
     false
 }
 
-fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<TodoStats>, CompositionStats) {
-    let mut file_ops = FileOperationStats::default();
-    let mut todo_stats = TodoStats::default();
-    let mut composition_stats = CompositionStats::default();
-    let mut has_todo_activity = false;
+fn extract_tool_stats(data: &ClaudeCodeEntry) -> Stats {
+    let mut stats = Stats::default();
+    let mut _has_todo_activity = false;
 
     if let Some(message) = &data.message
         && let Some(Content::Blocks(blocks)) = &message.content
@@ -286,7 +276,7 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
             {
                 match tool_name.as_str() {
                     "Read" => {
-                        file_ops.files_read += 1;
+                        stats.files_read += 1;
                         if let Some(input) = &block.input {
                             if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
                                 let ext = Path::new(file_path)
@@ -296,22 +286,22 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
                                 let category = FileCategory::from_extension(ext);
                                 let lines_read = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
                                 match category {
-                                    FileCategory::SourceCode => composition_stats.code_lines += lines_read,
-                                    FileCategory::Documentation => composition_stats.docs_lines += lines_read,
-                                    FileCategory::Data => composition_stats.data_lines += lines_read,
-                                    FileCategory::Media => composition_stats.media_lines += lines_read,
-                                    FileCategory::Config => composition_stats.config_lines += lines_read,
-                                    FileCategory::Other => composition_stats.other_lines += lines_read,
+                                    FileCategory::SourceCode => stats.code_lines += lines_read,
+                                    FileCategory::Documentation => stats.docs_lines += lines_read,
+                                    FileCategory::Data => stats.data_lines += lines_read,
+                                    FileCategory::Media => stats.media_lines += lines_read,
+                                    FileCategory::Config => stats.config_lines += lines_read,
+                                    FileCategory::Other => stats.other_lines += lines_read,
                                 }
                             }
                             let lines_read =
                                 input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
-                            file_ops.lines_read += lines_read;
-                            file_ops.bytes_read += lines_read * 80;
+                            stats.lines_read += lines_read;
+                            stats.bytes_read += lines_read * 80;
                         }
                     }
                     "Edit" | "MultiEdit" => {
-                        file_ops.files_edited += 1;
+                        stats.files_edited += 1;
                         if let Some(input) = &block.input {
                             if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
                                 let ext = Path::new(file_path)
@@ -333,12 +323,12 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
                                         .unwrap_or(5)
                                 };
                                 match category {
-                                    FileCategory::SourceCode => composition_stats.code_lines += lines_edited,
-                                    FileCategory::Documentation => composition_stats.docs_lines += lines_edited,
-                                    FileCategory::Data => composition_stats.data_lines += lines_edited,
-                                    FileCategory::Media => composition_stats.media_lines += lines_edited,
-                                    FileCategory::Config => composition_stats.config_lines += lines_edited,
-                                    FileCategory::Other => composition_stats.other_lines += lines_edited,
+                                    FileCategory::SourceCode => stats.code_lines += lines_edited,
+                                    FileCategory::Documentation => stats.docs_lines += lines_edited,
+                                    FileCategory::Data => stats.data_lines += lines_edited,
+                                    FileCategory::Media => stats.media_lines += lines_edited,
+                                    FileCategory::Config => stats.config_lines += lines_edited,
+                                    FileCategory::Other => stats.other_lines += lines_edited,
                                 }
                             }
                             let lines_edited = if tool_name == "MultiEdit" {
@@ -354,12 +344,12 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
                                     .map(|s| s.lines().count() as u64)
                                     .unwrap_or(5)
                             };
-                            file_ops.lines_edited += lines_edited;
-                            file_ops.bytes_edited += lines_edited * 80;
+                            stats.lines_edited += lines_edited;
+                            stats.bytes_edited += lines_edited * 80;
                         }
                     }
                     "Write" => {
-                        file_ops.files_edited += 1;
+                        stats.files_edited += 1;
                         if let Some(input) = &block.input {
                             if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
                                 let ext = Path::new(file_path)
@@ -373,12 +363,12 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
                                     .map(|s| s.lines().count() as u64)
                                     .unwrap_or(50);
                                 match category {
-                                    FileCategory::SourceCode => composition_stats.code_lines += lines_written,
-                                    FileCategory::Documentation => composition_stats.docs_lines += lines_written,
-                                    FileCategory::Data => composition_stats.data_lines += lines_written,
-                                    FileCategory::Media => composition_stats.media_lines += lines_written,
-                                    FileCategory::Config => composition_stats.config_lines += lines_written,
-                                    FileCategory::Other => composition_stats.other_lines += lines_written,
+                                    FileCategory::SourceCode => stats.code_lines += lines_written,
+                                    FileCategory::Documentation => stats.docs_lines += lines_written,
+                                    FileCategory::Data => stats.data_lines += lines_written,
+                                    FileCategory::Media => stats.media_lines += lines_written,
+                                    FileCategory::Config => stats.config_lines += lines_written,
+                                    FileCategory::Other => stats.other_lines += lines_written,
                                 }
                             }
                             let lines_written = input
@@ -386,20 +376,20 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.lines().count() as u64)
                                 .unwrap_or(50);
-                            file_ops.lines_added += lines_written;
-                            file_ops.bytes_added += lines_written * 80;
+                            stats.lines_added += lines_written;
+                            stats.bytes_added += lines_written * 80;
                         }
                     }
-                    "Bash" => file_ops.terminal_commands += 1,
-                    "Glob" => file_ops.file_searches += 1,
-                    "Grep" => file_ops.file_content_searches += 1,
+                    "Bash" => stats.terminal_commands += 1,
+                    "Glob" => stats.file_searches += 1,
+                    "Grep" => stats.file_content_searches += 1,
                     "TodoWrite" => {
-                        todo_stats.todo_writes += 1;
-                        has_todo_activity = true;
+                        stats.todo_writes += 1;
+                        _has_todo_activity = true;
                     }
                     "TodoRead" => {
-                        todo_stats.todo_reads += 1;
-                        has_todo_activity = true;
+                        stats.todo_reads += 1;
+                        _has_todo_activity = true;
                     }
                     _ => {}
                 }
@@ -416,8 +406,8 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
     {
         if new_array.len() > old_array.len() {
             let created = (new_array.len() - old_array.len()) as u64;
-            todo_stats.todos_created += created;
-            has_todo_activity = true;
+            stats.todos_created += created;
+            _has_todo_activity = true;
         }
 
         let old_completed = old_array
@@ -431,8 +421,8 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
 
         if new_completed > old_completed {
             let completed = (new_completed - old_completed) as u64;
-            todo_stats.todos_completed += completed;
-            has_todo_activity = true;
+            stats.todos_completed += completed;
+            _has_todo_activity = true;
         }
 
         let old_in_progress = old_array
@@ -446,23 +436,15 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
 
         if new_in_progress > old_in_progress {
             let in_progress = (new_in_progress - old_in_progress) as u64;
-            todo_stats.todos_in_progress += in_progress;
-            has_todo_activity = true;
+            stats.todos_in_progress += in_progress;
+            _has_todo_activity = true;
         }
     }
 
-    file_ops.lines_added = estimate_lines_added(&file_ops);
-    file_ops.lines_deleted = estimate_lines_deleted(&file_ops);
+    stats.lines_added = estimate_lines_added(&stats);
+    stats.lines_deleted = estimate_lines_deleted(&stats);
 
-    (
-        file_ops,
-        if has_todo_activity {
-            Some(todo_stats)
-        } else {
-            None
-        },
-        composition_stats,
-    )
+    stats
 }
 
 fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
@@ -547,17 +529,18 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
         }
 
         let _hash = hash_cc_entry(&data);
-        let (file_ops, todo_stats, composition_stats) = extract_tool_stats(&data);
+        let stats = extract_tool_stats(&data);
 
         if data.message.is_none() {
             let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
-            temp_messages.push(ConversationMessage::User {
+            temp_messages.push(ConversationMessage {
                 timestamp: timestamp.clone(),
                 application: Application::ClaudeCode,
-                hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                hash: generate_conversation_hash(&conversation_file, &timestamp),
                 project_hash: project_hash.clone(),
-                todo_stats,
-                analyzer_specific: HashMap::new(),
+                model: None,
+                stats,
+                role: MessageRole::User,
             });
             continue;
         }
@@ -568,44 +551,43 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
         let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
         match message.usage {
             Some(usage) => {
-                temp_messages.push(ConversationMessage::AI {
+                let mut ai_stats = stats;
+                ai_stats.input_tokens = usage.input_tokens;
+                ai_stats.output_tokens = usage.output_tokens;
+                ai_stats.cache_creation_tokens = usage.cache_creation_tokens;
+                ai_stats.cache_read_tokens = usage.cache_read_tokens;
+                ai_stats.cached_tokens = 0;
+                ai_stats.cost = match data.cost_usd {
+                    Some(precalc_cost) => precalc_cost,
+                    None => calculate_cost_from_tokens(&usage, &model_name),
+                };
+                ai_stats.tool_calls = match message.content {
+                    Some(Content::Blocks(blocks)) => {
+                        blocks.iter().filter(|c| c.r#type == "tool_use").count() as u32
+                    }
+                    _ => 0,
+                };
+
+                temp_messages.push(ConversationMessage {
                     application: Application::ClaudeCode,
-                    general_stats: GeneralStats {
-                        input_tokens: usage.input_tokens,
-                        output_tokens: usage.output_tokens,
-                        cache_creation_tokens: usage.cache_creation_tokens,
-                        cache_read_tokens: usage.cache_read_tokens,
-                        cached_tokens: 0,
-                        cost: match data.cost_usd {
-                            Some(precalc_cost) => precalc_cost,
-                            None => calculate_cost_from_tokens(&usage, &model_name),
-                        },
-                        tool_calls: match message.content {
-                            Some(Content::Blocks(blocks)) => {
-                                blocks.iter().filter(|c| c.r#type == "tool_use").count() as u32
-                            }
-                            _ => 0,
-                        },
-                    },
-                    model: model_name,
+                    model: Some(model_name),
                     timestamp: timestamp.clone(),
-                    hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                    hash: generate_conversation_hash(&conversation_file, &timestamp),
                     project_hash: project_hash.clone(),
-                    file_operations: file_ops,
-                    todo_stats,
-                    analyzer_specific: HashMap::new(),
-                    composition_stats,
+                    stats: ai_stats,
+                    role: MessageRole::Assistant,
                 });
             }
             None => {
                 let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
-                temp_messages.push(ConversationMessage::User {
+                temp_messages.push(ConversationMessage {
                     timestamp: timestamp.clone(),
                     application: Application::ClaudeCode,
-                    hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                    hash: generate_conversation_hash(&conversation_file, &timestamp),
                     project_hash: project_hash.clone(),
-                    todo_stats,
-                    analyzer_specific: HashMap::new(),
+                    model: None,
+                    stats,
+                    role: MessageRole::User,
                 });
             }
         }
@@ -618,13 +600,8 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
 
     // Filter out messages with invalid timestamps and only add valid ones
     for message in temp_messages {
-        let timestamp = match &message {
-            ConversationMessage::AI { timestamp, .. } => timestamp,
-            ConversationMessage::User { timestamp, .. } => timestamp,
-        };
-
         // Skip messages with unknown dates
-        if crate::utils::extract_date_from_timestamp(timestamp).is_none() {
+        if crate::utils::extract_date_from_timestamp(&message.timestamp).is_none() {
             continue;
         }
 
