@@ -8,8 +8,8 @@ use crate::utils::ModelAbbreviations;
 #[serde(rename_all = "snake_case")]
 pub enum Application {
     ClaudeCode,
-    GeminiCLI,
-    CodexCLI,
+    GeminiCli,
+    CodexCli,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -75,24 +75,6 @@ impl AnalyzerRegistry {
             .map(|a| a.as_ref())
     }
 
-    /// Get the analyzer with the most data sources (prioritizes by volume)
-    pub fn get_primary_analyzer_by_volume(&self) -> Option<&dyn Analyzer> {
-        let mut best_analyzer: Option<&dyn Analyzer> = None;
-        let mut best_count: usize = 0;
-
-        for analyzer in self.available_analyzers() {
-            if let Ok(sources) = analyzer.discover_data_sources() {
-                let count = sources.len();
-                if count > best_count {
-                    best_count = count;
-                    best_analyzer = Some(analyzer);
-                }
-            }
-        }
-
-        best_analyzer
-    }
-
     /// Load stats from all available analyzers
     pub async fn load_all_stats(&self) -> Result<crate::types::MultiAnalyzerStats> {
         let available_analyzers = self.available_analyzers();

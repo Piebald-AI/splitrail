@@ -296,7 +296,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
             } => {
                 entries.push(ConversationMessage {
                     timestamp: timestamp.clone(),
-                    application: Application::GeminiCLI,
+                    application: Application::GeminiCli,
                     hash: generate_conversation_hash(&conversation_file, &timestamp),
                     project_hash: project_hash.clone(),
                     model: None,
@@ -329,7 +329,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                     stats.tool_calls = tool_calls.len() as u32;
 
                     entries.push(ConversationMessage {
-                        application: Application::GeminiCLI,
+                        application: Application::GeminiCli,
                         model: Some(fallback_model.to_string()), // TODO: Extract actual model from session
                         timestamp,
                         hash,
