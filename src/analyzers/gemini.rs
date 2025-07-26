@@ -1,8 +1,7 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, Application, CompositionStats, ConversationMessage, DailyStats,
-    FileCategory, FileOperationStats, GeneralStats,
+    AgenticCodingToolStats, Application, ConversationMessage, DailyStats, FileCategory, MessageRole, Stats
 };
 use crate::utils::ModelAbbreviations;
 use anyhow::Result;
@@ -12,7 +11,7 @@ use glob::glob;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 pub struct GeminiAnalyzer;
@@ -73,9 +72,8 @@ struct GeminiTokens {
 }
 
 // Tool extraction and file operation mapping
-fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> (FileOperationStats, CompositionStats) {
-    let mut file_ops = FileOperationStats::default();
-    let mut composition_stats = CompositionStats::default();
+fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> Stats {
+    let mut stats = Stats::default();
 
     for tool_call in tool_calls {
         if let Some(tool_name) = tool_call.get("name").and_then(|v| v.as_str()) {
@@ -86,7 +84,7 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> (FileOperationStats, 
                         .and_then(|v| v.get("paths"))
                         .and_then(|v| v.as_array())
                     {
-                        file_ops.files_read += paths.len() as u64;
+                        stats.files_read += paths.len() as u64;
 
                         // Categorize files and estimate composition stats
                         for path in paths {
@@ -98,33 +96,33 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> (FileOperationStats, 
                                 let category = FileCategory::from_extension(ext);
                                 let estimated_lines = 100; // Estimate lines per file
                                 match category {
-                                    FileCategory::SourceCode => composition_stats.code_lines += estimated_lines,
-                                    FileCategory::Documentation => composition_stats.docs_lines += estimated_lines,
-                                    FileCategory::Data => composition_stats.data_lines += estimated_lines,
-                                    FileCategory::Media => composition_stats.media_lines += estimated_lines,
-                                    FileCategory::Config => composition_stats.config_lines += estimated_lines,
-                                    FileCategory::Other => composition_stats.other_lines += estimated_lines,
+                                    FileCategory::SourceCode => stats.code_lines += estimated_lines,
+                                    FileCategory::Documentation => stats.docs_lines += estimated_lines,
+                                    FileCategory::Data => stats.data_lines += estimated_lines,
+                                    FileCategory::Media => stats.media_lines += estimated_lines,
+                                    FileCategory::Config => stats.config_lines += estimated_lines,
+                                    FileCategory::Other => stats.other_lines += estimated_lines,
                                 }
                             }
                         }
 
                         // Simple estimation without complex heuristics
-                        file_ops.lines_read += (paths.len() as u64) * 100;
-                        file_ops.bytes_read += (paths.len() as u64) * 8000;
+                        stats.lines_read += (paths.len() as u64) * 100;
+                        stats.bytes_read += (paths.len() as u64) * 8000;
                     }
                 }
                 "replace" => {
-                    file_ops.files_edited += 1;
+                    stats.files_edited += 1;
                     // Simple counting without complex content analysis
-                    file_ops.lines_edited += 10; // Conservative estimate
-                    file_ops.bytes_edited += 800;
+                    stats.lines_edited += 10; // Conservative estimate
+                    stats.bytes_edited += 800;
                 }
                 "run_shell_command" => {
-                    file_ops.terminal_commands += 1;
+                    stats.terminal_commands += 1;
                 }
                 "list_directory" => {
                     // Treat as a lightweight read operation
-                    file_ops.files_read += 1;
+                    stats.files_read += 1;
                 }
                 _ => {} // Unknown tools - just skip
             }
@@ -132,10 +130,10 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> (FileOperationStats, 
     }
 
     // Use existing utility functions for line estimation
-    file_ops.lines_added = (file_ops.lines_edited / 2).max(1); // Simple estimate
-    file_ops.lines_deleted = (file_ops.lines_edited / 3).max(1); // Simple estimate
+    stats.lines_added = (stats.lines_edited / 2).max(1); // Simple estimate
+    stats.lines_deleted = (stats.lines_edited / 3).max(1); // Simple estimate
 
-    (file_ops, composition_stats)
+    stats
 }
 
 // Helper function to generate hash from conversation file path and timestamp
@@ -291,93 +289,52 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
     for message in session.messages {
         match message {
             GeminiMessage::User {
-                id,
+                id: _,
                 timestamp,
                 content: _,
             } => {
-                entries.push(ConversationMessage::User {
+                entries.push(ConversationMessage {
                     timestamp: timestamp.clone(),
                     application: Application::GeminiCLI,
-                    hash: Some(generate_conversation_hash(&conversation_file, &timestamp)),
+                    hash: generate_conversation_hash(&conversation_file, &timestamp),
                     project_hash: project_hash.clone(),
-                    todo_stats: None,
-                    analyzer_specific: {
-                        let mut map = HashMap::new();
-                        map.insert("user_id".to_string(), serde_json::Value::String(id));
-                        map.insert(
-                            "session_id".to_string(),
-                            serde_json::Value::String(session.session_id.clone()),
-                        );
-                        map.insert(
-                            "project_hash".to_string(),
-                            serde_json::Value::String(session.project_hash.clone()),
-                        );
-                        map
-                    },
+                    model: None,
+                    stats: Stats::default(),
+                    role: MessageRole::User,
                 });
             }
             GeminiMessage::Gemini {
-                id,
+                id: _,
                 timestamp,
                 content: _,
-                thoughts,
+                thoughts: _,
                 tokens,
                 tool_calls,
             } => {
                 if let Some(tokens) = tokens {
-                    let (file_ops, composition_stats) = extract_tool_stats(&tool_calls);
+                    let mut stats = extract_tool_stats(&tool_calls);
                     let hash = generate_conversation_hash(&conversation_file, &timestamp);
 
                     // Use a reasonable fallback model - Gemini 2.5 Flash is most common and cost-effective
                     let fallback_model = "gemini-2.5-flash";
 
-                    entries.push(ConversationMessage::AI {
+                    // Update stats with token information
+                    stats.input_tokens = tokens.input;
+                    stats.output_tokens = tokens.output;
+                    stats.cache_creation_tokens = 0;
+                    stats.cache_read_tokens = 0;
+                    stats.cached_tokens = tokens.cached;
+                    stats.cost = calculate_gemini_cost(&tokens, fallback_model);
+                    stats.tool_calls = tool_calls.len() as u32;
+
+                    entries.push(ConversationMessage {
                         application: Application::GeminiCLI,
-                        model: fallback_model.to_string(), // TODO: Extract actual model from session
+                        model: Some(fallback_model.to_string()), // TODO: Extract actual model from session
                         timestamp,
-                        hash: Some(hash),
+                        hash,
                         project_hash: project_hash.clone(),
-                        file_operations: file_ops,
-                        todo_stats: None, // Gemini CLI doesn't have todos
-                        composition_stats,
-                        analyzer_specific: {
-                            let mut map = HashMap::new();
-                            map.insert("gemini_id".to_string(), serde_json::Value::String(id));
-                            map.insert(
-                                "session_id".to_string(),
-                                serde_json::Value::String(session.session_id.clone()),
-                            );
-                            map.insert(
-                                "project_hash".to_string(),
-                                serde_json::Value::String(session.project_hash.clone()),
-                            );
-                            map.insert(
-                                "thoughts_tokens".to_string(),
-                                serde_json::Value::Number(tokens.thoughts.into()),
-                            );
-                            map.insert(
-                                "tool_tokens".to_string(),
-                                serde_json::Value::Number(tokens.tool.into()),
-                            );
-                            map.insert(
-                                "thoughts".to_string(),
-                                serde_json::to_value(thoughts).unwrap_or_default(),
-                            );
-                            map.insert(
-                                "tool_calls".to_string(),
-                                serde_json::to_value(&tool_calls).unwrap_or_default(),
-                            );
-                            map
-                        },
-                        general_stats: GeneralStats {
-                            input_tokens: tokens.input,
-                            output_tokens: tokens.output,
-                            cache_creation_tokens: 0,
-                            cache_read_tokens: 0,
-                            cached_tokens: tokens.cached,
-                            cost: calculate_gemini_cost(&tokens, fallback_model),
-                            tool_calls: tool_calls.len() as u32,
-                        },
+                        stats,
+                        role: MessageRole::Assistant,
                     });
                 }
             }
@@ -460,18 +417,11 @@ impl Analyzer for GeminiAnalyzer {
         let deduplicated_entries: Vec<ConversationMessage> = all_entries
             .into_iter()
             .filter(|entry| {
-                if let ConversationMessage::AI {
-                    hash: Some(hash), ..
-                } = entry
-                {
-                    if seen_hashes.contains(hash) {
-                        false
-                    } else {
-                        seen_hashes.insert(hash.clone());
-                        true
-                    }
+                if seen_hashes.contains(&entry.hash) {
+                    false
                 } else {
-                    true // Keep all user messages
+                    seen_hashes.insert(entry.hash.clone());
+                    true
                 }
             })
             .collect();
@@ -487,69 +437,74 @@ impl Analyzer for GeminiAnalyzer {
         let mut daily_stats: BTreeMap<String, DailyStats> = BTreeMap::new();
 
         for message in &messages {
-            let date = match message {
-                ConversationMessage::AI { timestamp, .. }
-                | ConversationMessage::User { timestamp, .. } => {
-                    // Extract date from timestamp
-                    if let Ok(parsed_time) = DateTime::parse_from_rfc3339(timestamp) {
-                        parsed_time.format("%Y-%m-%d").to_string()
-                    } else {
-                        // Fallback date parsing
-                        timestamp.split('T').next().unwrap_or("unknown").to_string()
-                    }
-                }
+            let date = if let Ok(parsed_time) = DateTime::parse_from_rfc3339(&message.timestamp) {
+                parsed_time.format("%Y-%m-%d").to_string()
+            } else {
+                // Fallback date parsing
+                message.timestamp.split('T').next().unwrap_or("unknown").to_string()
             };
 
-            let stats = daily_stats.entry(date).or_default();
+
+            let daily_stats_entry = daily_stats.entry(date).or_default();
 
             match message {
-                ConversationMessage::AI {
-                    general_stats,
-                    file_operations,
-                    composition_stats,
+                ConversationMessage {
+                    model: Some(_),
+                    stats,
                     ..
                 } => {
-                    stats.cost += general_stats.cost;
-                    stats.input_tokens += general_stats.input_tokens;
-                    stats.output_tokens += general_stats.output_tokens;
-                    stats.tool_calls += general_stats.tool_calls;
+                    daily_stats_entry.stats.cost += stats.cost;
+                    daily_stats_entry.stats.input_tokens += stats.input_tokens;
+                    daily_stats_entry.stats.output_tokens += stats.output_tokens;
+                    daily_stats_entry.stats.tool_calls += stats.tool_calls;
 
-                    // Aggregate file operations
-                    stats.file_operations.files_read += file_operations.files_read;
-                    stats.file_operations.files_edited += file_operations.files_edited;
-                    stats.file_operations.files_added += file_operations.files_added;
-                    stats.file_operations.files_deleted += file_operations.files_deleted;
-                    stats.file_operations.terminal_commands += file_operations.terminal_commands;
-                    stats.file_operations.file_searches += file_operations.file_searches;
-                    stats.file_operations.file_content_searches +=
-                        file_operations.file_content_searches;
-                    stats.file_operations.lines_read += file_operations.lines_read;
-                    stats.file_operations.lines_added += file_operations.lines_added;
-                    stats.file_operations.lines_edited += file_operations.lines_edited;
-                    stats.file_operations.lines_deleted += file_operations.lines_deleted;
-                    stats.file_operations.bytes_read += file_operations.bytes_read;
-                    stats.file_operations.bytes_added += file_operations.bytes_added;
-                    stats.file_operations.bytes_edited += file_operations.bytes_edited;
-                    stats.file_operations.bytes_deleted += file_operations.bytes_deleted;
-
-                    // Aggregate composition stats
-                    stats.composition_stats.code_lines += composition_stats.code_lines;
-                    stats.composition_stats.docs_lines += composition_stats.docs_lines;
-                    stats.composition_stats.data_lines += composition_stats.data_lines;
-                    stats.composition_stats.media_lines += composition_stats.media_lines;
-                    stats.composition_stats.config_lines += composition_stats.config_lines;
-                    stats.composition_stats.other_lines += composition_stats.other_lines;
+                    // Aggregate all stats into daily stats
+                    daily_stats_entry.stats.cost += stats.cost;
+                    daily_stats_entry.stats.input_tokens += stats.input_tokens;
+                    daily_stats_entry.stats.output_tokens += stats.output_tokens;
+                    daily_stats_entry.stats.cache_creation_tokens += stats.cache_creation_tokens;
+                    daily_stats_entry.stats.cache_read_tokens += stats.cache_read_tokens;
+                    daily_stats_entry.stats.cached_tokens += stats.cached_tokens;
+                    daily_stats_entry.stats.tool_calls += stats.tool_calls;
+                    daily_stats_entry.stats.terminal_commands += stats.terminal_commands;
+                    daily_stats_entry.stats.file_searches += stats.file_searches;
+                    daily_stats_entry.stats.file_content_searches += stats.file_content_searches;
+                    daily_stats_entry.stats.files_read += stats.files_read;
+                    daily_stats_entry.stats.files_added += stats.files_added;
+                    daily_stats_entry.stats.files_edited += stats.files_edited;
+                    daily_stats_entry.stats.files_deleted += stats.files_deleted;
+                    daily_stats_entry.stats.lines_read += stats.lines_read;
+                    daily_stats_entry.stats.lines_added += stats.lines_added;
+                    daily_stats_entry.stats.lines_edited += stats.lines_edited;
+                    daily_stats_entry.stats.lines_deleted += stats.lines_deleted;
+                    daily_stats_entry.stats.bytes_read += stats.bytes_read;
+                    daily_stats_entry.stats.bytes_added += stats.bytes_added;
+                    daily_stats_entry.stats.bytes_edited += stats.bytes_edited;
+                    daily_stats_entry.stats.bytes_deleted += stats.bytes_deleted;
+                    daily_stats_entry.stats.todos_created += stats.todos_created;
+                    daily_stats_entry.stats.todos_completed += stats.todos_completed;
+                    daily_stats_entry.stats.todos_in_progress += stats.todos_in_progress;
+                    daily_stats_entry.stats.todo_writes += stats.todo_writes;
+                    daily_stats_entry.stats.todo_reads += stats.todo_reads;
+                    daily_stats_entry.stats.code_lines += stats.code_lines;
+                    daily_stats_entry.stats.docs_lines += stats.docs_lines;
+                    daily_stats_entry.stats.data_lines += stats.data_lines;
+                    daily_stats_entry.stats.media_lines += stats.media_lines;
+                    daily_stats_entry.stats.config_lines += stats.config_lines;
+                    daily_stats_entry.stats.other_lines += stats.other_lines;
 
                 }
-                ConversationMessage::User { .. } => {
-                    stats.conversations += 1;
+                ConversationMessage {
+                    model: None, ..
+                } => {
+                    daily_stats_entry.conversations += 1;
                 }
             }
         }
 
         let num_conversations = messages
             .iter()
-            .filter(|m| matches!(m, ConversationMessage::User { .. }))
+            .filter(|m| m.role == MessageRole::User)
             .count() as u64;
 
         Ok(AgenticCodingToolStats {

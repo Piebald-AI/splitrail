@@ -88,10 +88,7 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
     // Group messages by conversation file and sort by timestamp
     let mut conversations: BTreeMap<String, Vec<&ConversationMessage>> = BTreeMap::new();
     for entry in entries {
-        let project_hash = match entry {
-            ConversationMessage::AI { project_hash, .. } => project_hash,
-            ConversationMessage::User { project_hash, .. } => project_hash,
-        };
+        let project_hash = &entry.project_hash;
         conversations
             .entry(project_hash.clone())
             .or_default()
@@ -102,20 +99,17 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
     for messages in conversations.values() {
         let mut sorted_messages = messages.clone();
         sorted_messages.sort_by_key(|msg| {
-            let timestamp = match msg {
-                ConversationMessage::AI { timestamp, .. } => timestamp,
-                ConversationMessage::User { timestamp, .. } => timestamp,
-            };
-            parse_timestamp_to_seconds(timestamp).unwrap_or(0)
+            parse_timestamp_to_seconds(&msg.timestamp).unwrap_or(0)
         });
 
         let mut flow_start: Option<i64> = None;
         let mut last_ai_timestamp: Option<i64> = None;
 
         for message in &sorted_messages {
-            match message {
-                ConversationMessage::AI { timestamp, .. } => {
-                    let ts = parse_timestamp_to_seconds(timestamp);
+            match message.model {
+                Some(_) => {
+                    // AI message
+                    let ts = parse_timestamp_to_seconds(&message.timestamp);
                     if let Some(ts) = ts {
                         if flow_start.is_none() {
                             flow_start = Some(ts); // Start of new flow
@@ -123,11 +117,11 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
                         last_ai_timestamp = Some(ts); // Update last AI message time
                     }
                 }
-                ConversationMessage::User { timestamp, .. } => {
+                None => {
                     // User message ends the current flow
                     if let (Some(start), Some(end)) = (flow_start, last_ai_timestamp) {
                         let flow_duration = (end - start) as u64;
-                        let date = match extract_date_from_timestamp(timestamp) {
+                        let date = match extract_date_from_timestamp(&message.timestamp) {
                             Some(d) => d,
                             None => continue,
                         };
@@ -150,14 +144,14 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
 
         // Handle case where conversation ends with AI messages (no final user message)
         if let (Some(start), Some(end)) = (flow_start, last_ai_timestamp)
-            && let Some(ConversationMessage::AI { timestamp, .. }) = sorted_messages
+            && let Some(last_ai_msg) = sorted_messages
                 .iter()
                 .rev()
-                .find(|msg| matches!(msg, ConversationMessage::AI { .. }))
+                .find(|msg| msg.model.is_some())
         {
             let flow_duration = (end - start) as u64;
             // Use the last AI message's date
-            let date = match extract_date_from_timestamp(timestamp) {
+            let date = match extract_date_from_timestamp(&last_ai_msg.timestamp) {
                 Some(d) => d,
                 None => continue,
             };
@@ -209,18 +203,8 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
     // First, find the start date for each conversation
     let mut conversation_start_dates: BTreeMap<String, String> = BTreeMap::new();
     for entry in entries {
-        let (timestamp, project_hash) = match entry {
-            ConversationMessage::AI {
-                timestamp,
-                project_hash,
-                ..
-            } => (timestamp, project_hash),
-            ConversationMessage::User {
-                timestamp,
-                project_hash,
-                ..
-            } => (timestamp, project_hash),
-        };
+        let timestamp = &entry.timestamp;
+        let project_hash = &entry.project_hash;
         let date = match extract_date_from_timestamp(timestamp) {
             Some(d) => d,
             None => continue, // Skip entries with invalid timestamps
@@ -246,110 +230,84 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
     }
 
     for entry in entries {
-        let date = match entry {
-            ConversationMessage::AI { timestamp, .. } => extract_date_from_timestamp(timestamp),
-            ConversationMessage::User { timestamp, .. } => extract_date_from_timestamp(timestamp),
-        };
-
-        let date = match date {
+        let date = match extract_date_from_timestamp(&entry.timestamp) {
             Some(d) => d,
             None => continue, // Skip entries with invalid timestamps
         };
 
-        let stats = daily_stats
+        let daily_stats_entry = daily_stats
             .entry(date.clone())
             .or_insert_with(|| DailyStats {
                 date: date.clone(),
                 ..Default::default()
             });
 
-        match entry {
-            ConversationMessage::AI {
-                model,
-                general_stats,
-                file_operations,
-                todo_stats,
-                composition_stats,
-                ..
-            } => {
-                stats.cost += general_stats.cost;
+        match &entry.model {
+            Some(model) => {
+                // AI message
+                daily_stats_entry.ai_messages += 1;
+                *daily_stats_entry.models.entry(model.to_string()).or_insert(0) += 1;
 
-                stats.cached_tokens += general_stats.cache_read_tokens;
-                stats.cached_tokens += general_stats.cache_creation_tokens;
-                stats.cached_tokens += general_stats.cached_tokens;
-
-                stats.input_tokens += general_stats.input_tokens;
-                stats.output_tokens += general_stats.output_tokens;
-                stats.tool_calls += general_stats.tool_calls;
-                stats.ai_messages += 1;
-                *stats.models.entry(model.to_string()).or_insert(0) += 1;
-
-                // Aggregate file operations for this day
-                stats.file_operations.files_read += file_operations.files_read;
-                stats.file_operations.files_edited += file_operations.files_edited;
-                stats.file_operations.files_added += file_operations.files_added;
-                stats.file_operations.terminal_commands += file_operations.terminal_commands;
-                stats.file_operations.file_content_searches +=
-                    file_operations.file_content_searches;
-                stats.file_operations.file_searches += file_operations.file_searches;
-                stats.file_operations.lines_read += file_operations.lines_read;
-                stats.file_operations.lines_edited += file_operations.lines_edited;
-                stats.file_operations.lines_added += file_operations.lines_added;
-                stats.file_operations.bytes_read += file_operations.bytes_read;
-                stats.file_operations.bytes_edited += file_operations.bytes_edited;
-                stats.file_operations.bytes_added += file_operations.bytes_added;
-
-                // Aggregate todo stats for this day (if available)
-                if let Some(todo_stats) = todo_stats {
-                    if let Some(ref mut daily_todos) = stats.todo_stats {
-                        daily_todos.todos_created += todo_stats.todos_created;
-                        daily_todos.todos_completed += todo_stats.todos_completed;
-                        daily_todos.todos_in_progress += todo_stats.todos_in_progress;
-                        daily_todos.todo_writes += todo_stats.todo_writes;
-                        daily_todos.todo_reads += todo_stats.todo_reads;
-                    } else {
-                        stats.todo_stats = Some(todo_stats.clone());
-                    }
-                }
-
-                // Aggregate composition stats for this day
-                stats.composition_stats.code_lines += composition_stats.code_lines;
-                stats.composition_stats.docs_lines += composition_stats.docs_lines;
-                stats.composition_stats.data_lines += composition_stats.data_lines;
-                stats.composition_stats.media_lines += composition_stats.media_lines;
-                stats.composition_stats.config_lines += composition_stats.config_lines;
-                stats.composition_stats.other_lines += composition_stats.other_lines;
+                // Aggregate all stats
+                daily_stats_entry.stats.cost += entry.stats.cost;
+                daily_stats_entry.stats.input_tokens += entry.stats.input_tokens;
+                daily_stats_entry.stats.output_tokens += entry.stats.output_tokens;
+                daily_stats_entry.stats.cache_creation_tokens += entry.stats.cache_creation_tokens;
+                daily_stats_entry.stats.cache_read_tokens += entry.stats.cache_read_tokens;
+                daily_stats_entry.stats.cached_tokens += entry.stats.cached_tokens;
+                daily_stats_entry.stats.tool_calls += entry.stats.tool_calls;
+                daily_stats_entry.stats.terminal_commands += entry.stats.terminal_commands;
+                daily_stats_entry.stats.file_searches += entry.stats.file_searches;
+                daily_stats_entry.stats.file_content_searches += entry.stats.file_content_searches;
+                daily_stats_entry.stats.files_read += entry.stats.files_read;
+                daily_stats_entry.stats.files_added += entry.stats.files_added;
+                daily_stats_entry.stats.files_edited += entry.stats.files_edited;
+                daily_stats_entry.stats.files_deleted += entry.stats.files_deleted;
+                daily_stats_entry.stats.lines_read += entry.stats.lines_read;
+                daily_stats_entry.stats.lines_added += entry.stats.lines_added;
+                daily_stats_entry.stats.lines_edited += entry.stats.lines_edited;
+                daily_stats_entry.stats.lines_deleted += entry.stats.lines_deleted;
+                daily_stats_entry.stats.bytes_read += entry.stats.bytes_read;
+                daily_stats_entry.stats.bytes_added += entry.stats.bytes_added;
+                daily_stats_entry.stats.bytes_edited += entry.stats.bytes_edited;
+                daily_stats_entry.stats.bytes_deleted += entry.stats.bytes_deleted;
+                daily_stats_entry.stats.todos_created += entry.stats.todos_created;
+                daily_stats_entry.stats.todos_completed += entry.stats.todos_completed;
+                daily_stats_entry.stats.todos_in_progress += entry.stats.todos_in_progress;
+                daily_stats_entry.stats.todo_writes += entry.stats.todo_writes;
+                daily_stats_entry.stats.todo_reads += entry.stats.todo_reads;
+                daily_stats_entry.stats.code_lines += entry.stats.code_lines;
+                daily_stats_entry.stats.docs_lines += entry.stats.docs_lines;
+                daily_stats_entry.stats.data_lines += entry.stats.data_lines;
+                daily_stats_entry.stats.media_lines += entry.stats.media_lines;
+                daily_stats_entry.stats.config_lines += entry.stats.config_lines;
+                daily_stats_entry.stats.other_lines += entry.stats.other_lines;
             }
-            ConversationMessage::User { todo_stats, .. } => {
-                stats.user_messages += 1;
+            None => {
+                // User message
+                daily_stats_entry.user_messages += 1;
 
-                // Aggregate todo stats from user messages too (if available)
-                if let Some(todo_stats) = todo_stats {
-                    if let Some(ref mut daily_todos) = stats.todo_stats {
-                        daily_todos.todos_created += todo_stats.todos_created;
-                        daily_todos.todos_completed += todo_stats.todos_completed;
-                        daily_todos.todos_in_progress += todo_stats.todos_in_progress;
-                        daily_todos.todo_writes += todo_stats.todo_writes;
-                        daily_todos.todo_reads += todo_stats.todo_reads;
-                    } else {
-                        stats.todo_stats = Some(todo_stats.clone());
-                    }
-                }
+                // Aggregate user stats too (mostly todo-related)
+                daily_stats_entry.stats.todos_created += entry.stats.todos_created;
+                daily_stats_entry.stats.todos_completed += entry.stats.todos_completed;
+                daily_stats_entry.stats.todos_in_progress += entry.stats.todos_in_progress;
+                daily_stats_entry.stats.todo_writes += entry.stats.todo_writes;
+                daily_stats_entry.stats.todo_reads += entry.stats.todo_reads;
             }
         };
     }
 
     // Put the number of conversations started on each day on the daily stats.
     for (date, count) in daily_conversations_started {
-        if let Some(stats) = daily_stats.get_mut(&date) {
-            stats.conversations = count;
+        if let Some(daily_stats_entry) = daily_stats.get_mut(&date) {
+            daily_stats_entry.conversations = count;
         }
     }
 
     // Set max flow lengths for each day
     for (date, max_flow) in max_flows {
-        if let Some(stats) = daily_stats.get_mut(&date) {
-            stats.max_flow_length_seconds = max_flow;
+        if let Some(daily_stats_entry) = daily_stats.get_mut(&date) {
+            daily_stats_entry.max_flow_length_seconds = max_flow;
         }
     }
 
@@ -431,10 +389,7 @@ pub async fn get_messages_later_than(
 ) -> Result<Vec<ConversationMessage>> {
     let mut messages_later_than_date = Vec::new();
     for msg in messages {
-        let timestamp = match &msg {
-            ConversationMessage::AI { timestamp, .. } => timestamp,
-            ConversationMessage::User { timestamp, .. } => timestamp,
-        };
+        let timestamp = &msg.timestamp;
         if let Ok(timestamp) = DateTime::parse_from_rfc3339(timestamp)
             .with_context(|| format!("Failed to parse timestamp: {timestamp}"))
             && timestamp.timestamp_millis() >= date
