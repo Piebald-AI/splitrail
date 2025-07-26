@@ -1,7 +1,8 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, DailyStats, FileCategory, MessageRole, Stats
+    AgenticCodingToolStats, Application, ConversationMessage, DailyStats, FileCategory,
+    MessageRole, Stats,
 };
 use crate::utils::ModelAbbreviations;
 use anyhow::Result;
@@ -97,7 +98,9 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> Stats {
                                 let estimated_lines = 100; // Estimate lines per file
                                 match category {
                                     FileCategory::SourceCode => stats.code_lines += estimated_lines,
-                                    FileCategory::Documentation => stats.docs_lines += estimated_lines,
+                                    FileCategory::Documentation => {
+                                        stats.docs_lines += estimated_lines
+                                    }
                                     FileCategory::Data => stats.data_lines += estimated_lines,
                                     FileCategory::Media => stats.media_lines += estimated_lines,
                                     FileCategory::Config => stats.config_lines += estimated_lines,
@@ -149,24 +152,23 @@ fn generate_conversation_hash(conversation_file: &str, timestamp: &str) -> Strin
 fn extract_and_hash_project_id_gemini(file_path: &Path) -> String {
     // Gemini path format: ~/.gemini/tmp/{PROJECT_ID}/chats/{session}.json
     // Example: "/home/user/.gemini/tmp/project-abc123/chats/session.json"
-    
+
     let path_components: Vec<_> = file_path.components().collect();
     for (i, component) in path_components.iter().enumerate() {
-        if let std::path::Component::Normal(name) = component {
-            if name.to_str() == Some("tmp") && i + 1 < path_components.len() {
-                if let std::path::Component::Normal(project_id) = &path_components[i + 1] {
-                    if let Some(project_id_str) = project_id.to_str() {
-                        // Hash the project ID using the same algorithm as the rest of the app
-                        let mut hasher = Sha256::new();
-                        hasher.update(project_id_str.as_bytes());
-                        let result = hasher.finalize();
-                        return hex::encode(&result[..8]); // Use first 8 bytes (16 hex chars) for consistency
-                    }
-                }
-            }
+        if let std::path::Component::Normal(name) = component
+            && name.to_str() == Some("tmp")
+            && i + 1 < path_components.len()
+            && let std::path::Component::Normal(project_id) = &path_components[i + 1]
+            && let Some(project_id_str) = project_id.to_str()
+        {
+            // Hash the project ID using the same algorithm as the rest of the app
+            let mut hasher = Sha256::new();
+            hasher.update(project_id_str.as_bytes());
+            let result = hasher.finalize();
+            return hex::encode(&result[..8]); // Use first 8 bytes (16 hex chars) for consistency
         }
     }
-    
+
     // Fallback: hash the full file path if we can't extract project ID
     let mut hasher = Sha256::new();
     hasher.update(file_path.to_string_lossy().as_bytes());
@@ -251,7 +253,6 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
         }
     }
 }
-
 
 // JSON session parsing (not JSONL)
 fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
@@ -441,9 +442,13 @@ impl Analyzer for GeminiAnalyzer {
                 parsed_time.format("%Y-%m-%d").to_string()
             } else {
                 // Fallback date parsing
-                message.timestamp.split('T').next().unwrap_or("unknown").to_string()
+                message
+                    .timestamp
+                    .split('T')
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string()
             };
-
 
             let daily_stats_entry = daily_stats.entry(date).or_default();
 
@@ -492,11 +497,8 @@ impl Analyzer for GeminiAnalyzer {
                     daily_stats_entry.stats.media_lines += stats.media_lines;
                     daily_stats_entry.stats.config_lines += stats.config_lines;
                     daily_stats_entry.stats.other_lines += stats.other_lines;
-
                 }
-                ConversationMessage {
-                    model: None, ..
-                } => {
+                ConversationMessage { model: None, .. } => {
                     daily_stats_entry.conversations += 1;
                 }
             }

@@ -291,14 +291,16 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                     usage.output_tokens + usage.reasoning_output_tokens;
 
                                 let timestamp = message.timestamp.clone();
-                                let mut stats = Stats::default();
-                                stats.input_tokens = usage.input_tokens;
-                                stats.output_tokens = total_output_tokens;
-                                stats.cache_creation_tokens = 0;
-                                stats.cache_read_tokens = 0;
-                                stats.cached_tokens = usage.cached_input_tokens;
-                                stats.cost = calculate_cost_from_tokens(&usage, &model_name);
-                                stats.tool_calls = 0; // We'll count shell calls separately
+                                let stats = Stats {
+                                    input_tokens: usage.input_tokens,
+                                    output_tokens: total_output_tokens,
+                                    cache_creation_tokens: 0,
+                                    cache_read_tokens: 0,
+                                    cached_tokens: usage.cached_input_tokens,
+                                    cost: calculate_cost_from_tokens(&usage, &model_name),
+                                    tool_calls: 0,
+                                    ..Default::default()
+                                };
 
                                 entries.push(ConversationMessage {
                                     application: Application::CodexCLI,
