@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::MODEL_PRICING;
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats
+    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
 use crate::upload::{estimate_lines_added, estimate_lines_deleted};
 use crate::utils::ModelAbbreviations;
@@ -143,17 +143,17 @@ fn generate_conversation_hash(conversation_file: &str, timestamp: &str) -> Strin
 fn extract_and_hash_project_id(file_path: &Path) -> String {
     // Claude Code path format: ~/.claude/projects/{PROJECT_ID}/{conversation_file}.jsonl
     // Example: "C:\Users\user\.claude\projects\D--splitrail-leaderboard\4d1b8bda-6d8c-4ee4-b480-a606953bc9c2.jsonl"
-    
-    if let Some(parent) = file_path.parent() {
-        if let Some(project_id) = parent.file_name().and_then(|name| name.to_str()) {
-            // Hash the project ID using the same algorithm as the rest of the app
-            let mut hasher = Sha256::new();
-            hasher.update(project_id.as_bytes());
-            let result = hasher.finalize();
-            return hex::encode(&result[..8]); // Use first 8 bytes (16 hex chars) for consistency
-        }
+
+    if let Some(parent) = file_path.parent()
+        && let Some(project_id) = parent.file_name().and_then(|name| name.to_str())
+    {
+        // Hash the project ID using the same algorithm as the rest of the app
+        let mut hasher = Sha256::new();
+        hasher.update(project_id.as_bytes());
+        let result = hasher.finalize();
+        return hex::encode(&result[..8]); // Use first 8 bytes (16 hex chars) for consistency
     }
-    
+
     // Fallback: hash the full file path if we can't extract project ID
     let mut hasher = Sha256::new();
     hasher.update(file_path.to_string_lossy().as_bytes());
@@ -271,128 +271,147 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> Stats {
         && let Some(Content::Blocks(blocks)) = &message.content
     {
         for block in blocks {
-            if block.r#type == "tool_use"
-                && let Some(tool_name) = &block.name
-            {
-                match tool_name.as_str() {
-                    "Read" => {
-                        stats.files_read += 1;
-                        if let Some(input) = &block.input {
-                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
-                                let ext = Path::new(file_path)
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("");
-                                let category = FileCategory::from_extension(ext);
-                                let lines_read = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
-                                match category {
-                                    FileCategory::SourceCode => stats.code_lines += lines_read,
-                                    FileCategory::Documentation => stats.docs_lines += lines_read,
-                                    FileCategory::Data => stats.data_lines += lines_read,
-                                    FileCategory::Media => stats.media_lines += lines_read,
-                                    FileCategory::Config => stats.config_lines += lines_read,
-                                    FileCategory::Other => stats.other_lines += lines_read,
-                                }
-                            }
-                            let lines_read =
-                                input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
-                            stats.lines_read += lines_read;
-                            stats.bytes_read += lines_read * 80;
+            if block.r#type != "tool_use" {
+                continue;
+            }
+            let tool_name = if let Some(tool_name) = &block.name {
+                tool_name
+            } else {
+                continue;
+            };
+
+            match tool_name.as_str() {
+                "Read" => {
+                    stats.files_read += 1;
+                    let input = if let Some(input) = &block.input {
+                        input
+                    } else {
+                        continue;
+                    };
+
+                    if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
+                        let ext = Path::new(file_path)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
+                        let category = FileCategory::from_extension(ext);
+                        let lines_read = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
+                        match category {
+                            FileCategory::SourceCode => stats.code_lines += lines_read,
+                            FileCategory::Documentation => stats.docs_lines += lines_read,
+                            FileCategory::Data => stats.data_lines += lines_read,
+                            FileCategory::Media => stats.media_lines += lines_read,
+                            FileCategory::Config => stats.config_lines += lines_read,
+                            FileCategory::Other => stats.other_lines += lines_read,
                         }
                     }
-                    "Edit" | "MultiEdit" => {
-                        stats.files_edited += 1;
-                        if let Some(input) = &block.input {
-                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
-                                let ext = Path::new(file_path)
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("");
-                                let category = FileCategory::from_extension(ext);
-                                let lines_edited = if tool_name == "MultiEdit" {
-                                    input
-                                        .get("edits")
-                                        .and_then(|v| v.as_array())
-                                        .map(|edits| edits.len() as u64 * 5)
-                                        .unwrap_or(10)
-                                } else {
-                                    input
-                                        .get("new_string")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.lines().count() as u64)
-                                        .unwrap_or(5)
-                                };
-                                match category {
-                                    FileCategory::SourceCode => stats.code_lines += lines_edited,
-                                    FileCategory::Documentation => stats.docs_lines += lines_edited,
-                                    FileCategory::Data => stats.data_lines += lines_edited,
-                                    FileCategory::Media => stats.media_lines += lines_edited,
-                                    FileCategory::Config => stats.config_lines += lines_edited,
-                                    FileCategory::Other => stats.other_lines += lines_edited,
-                                }
-                            }
-                            let lines_edited = if tool_name == "MultiEdit" {
-                                input
-                                    .get("edits")
-                                    .and_then(|v| v.as_array())
-                                    .map(|edits| edits.len() as u64 * 5)
-                                    .unwrap_or(10)
-                            } else {
-                                input
-                                    .get("new_string")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.lines().count() as u64)
-                                    .unwrap_or(5)
-                            };
-                            stats.lines_edited += lines_edited;
-                            stats.bytes_edited += lines_edited * 80;
-                        }
-                    }
-                    "Write" => {
-                        stats.files_edited += 1;
-                        if let Some(input) = &block.input {
-                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
-                                let ext = Path::new(file_path)
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("");
-                                let category = FileCategory::from_extension(ext);
-                                let lines_written = input
-                                    .get("content")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.lines().count() as u64)
-                                    .unwrap_or(50);
-                                match category {
-                                    FileCategory::SourceCode => stats.code_lines += lines_written,
-                                    FileCategory::Documentation => stats.docs_lines += lines_written,
-                                    FileCategory::Data => stats.data_lines += lines_written,
-                                    FileCategory::Media => stats.media_lines += lines_written,
-                                    FileCategory::Config => stats.config_lines += lines_written,
-                                    FileCategory::Other => stats.other_lines += lines_written,
-                                }
-                            }
-                            let lines_written = input
-                                .get("content")
+                    let lines_read = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
+                    stats.lines_read += lines_read;
+                    // TODO 7/26/2025: This is a poor estimate!
+                    stats.bytes_read += lines_read * 80;
+                }
+                "Edit" | "MultiEdit" => {
+                    stats.files_edited += 1;
+                    let input = if let Some(input) = &block.input {
+                        input
+                    } else {
+                        continue;
+                    };
+                    if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
+                        let ext = Path::new(file_path)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
+                        let category = FileCategory::from_extension(ext);
+                        let lines_edited = if tool_name == "MultiEdit" {
+                            input
+                                .get("edits")
+                                .and_then(|v| v.as_array())
+                                // TODO 7/26/2025: This is a poor estimate!
+                                .map(|edits| edits.len() as u64 * 5)
+                                .unwrap_or(10)
+                        } else {
+                            input
+                                .get("new_string")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.lines().count() as u64)
-                                .unwrap_or(50);
-                            stats.lines_added += lines_written;
-                            stats.bytes_added += lines_written * 80;
+                                .unwrap_or(5)
+                        };
+                        match category {
+                            FileCategory::SourceCode => stats.code_lines += lines_edited,
+                            FileCategory::Documentation => stats.docs_lines += lines_edited,
+                            FileCategory::Data => stats.data_lines += lines_edited,
+                            FileCategory::Media => stats.media_lines += lines_edited,
+                            FileCategory::Config => stats.config_lines += lines_edited,
+                            FileCategory::Other => stats.other_lines += lines_edited,
                         }
                     }
-                    "Bash" => stats.terminal_commands += 1,
-                    "Glob" => stats.file_searches += 1,
-                    "Grep" => stats.file_content_searches += 1,
-                    "TodoWrite" => {
-                        stats.todo_writes += 1;
-                        _has_todo_activity = true;
-                    }
-                    "TodoRead" => {
-                        stats.todo_reads += 1;
-                        _has_todo_activity = true;
-                    }
-                    _ => {}
+                    let lines_edited = if tool_name == "MultiEdit" {
+                        input
+                            .get("edits")
+                            .and_then(|v| v.as_array())
+                            // TODO 7/26/2025: This is a poor estimate!
+                            .map(|edits| edits.len() as u64 * 5)
+                            .unwrap_or(10)
+                    } else {
+                        input
+                            .get("new_string")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.lines().count() as u64)
+                            .unwrap_or(5)
+                    };
+                    stats.lines_edited += lines_edited;
+                    // TODO 7/26/2025: This is a poor estimate!
+                    stats.bytes_edited += lines_edited * 80;
                 }
+                "Write" => {
+                    stats.files_edited += 1;
+                    let input = if let Some(input) = &block.input {
+                        input
+                    } else {
+                        continue;
+                    };
+
+                    if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
+                        let ext = Path::new(file_path)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
+                        let category = FileCategory::from_extension(ext);
+                        let lines_written = input
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.lines().count() as u64)
+                            .unwrap_or(50);
+                        match category {
+                            FileCategory::SourceCode => stats.code_lines += lines_written,
+                            FileCategory::Documentation => stats.docs_lines += lines_written,
+                            FileCategory::Data => stats.data_lines += lines_written,
+                            FileCategory::Media => stats.media_lines += lines_written,
+                            FileCategory::Config => stats.config_lines += lines_written,
+                            FileCategory::Other => stats.other_lines += lines_written,
+                        }
+                    }
+                    let lines_written = input
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.lines().count() as u64)
+                        .unwrap_or(50);
+                    stats.lines_added += lines_written;
+                    stats.bytes_added += lines_written * 80;
+                }
+                "Bash" => stats.terminal_commands += 1,
+                "Glob" => stats.file_searches += 1,
+                "Grep" => stats.file_content_searches += 1,
+                "TodoWrite" => {
+                    stats.todo_writes += 1;
+                    _has_todo_activity = true;
+                }
+                "TodoRead" => {
+                    stats.todo_reads += 1;
+                    _has_todo_activity = true;
+                }
+                _ => {}
             }
         }
     }
@@ -441,6 +460,7 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> Stats {
         }
     }
 
+    // TODO 7/26/2025: These are poor estimates!
     stats.lines_added = estimate_lines_added(&stats);
     stats.lines_deleted = estimate_lines_deleted(&stats);
 
