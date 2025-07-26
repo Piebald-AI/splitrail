@@ -324,10 +324,10 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                     }
 
                     // Count as a tool call and create a user message to represent the shell call
-                    let file_ops = if let Some(action) = &shell_call.action {
+                    let (file_ops, composition_stats) = if let Some(action) = &shell_call.action {
                         parse_shell_command_for_file_operations(&action.command)
                     } else {
-                        FileOperationStats::default()
+                        (FileOperationStats::default(), CompositionStats::default())
                     };
 
                     let timestamp = shell_call
@@ -351,6 +351,10 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                 "file_operations".to_string(),
                                 serde_json::to_value(&file_ops).unwrap_or_default(),
                             );
+                            map.insert(
+                                "composition_stats".to_string(),
+                                serde_json::to_value(&composition_stats).unwrap_or_default(),
+                            );
                             map
                         },
                     });
@@ -369,11 +373,12 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
     Ok(entries)
 }
 
-fn parse_shell_command_for_file_operations(command: &[String]) -> FileOperationStats {
+fn parse_shell_command_for_file_operations(command: &[String]) -> (FileOperationStats, CompositionStats) {
     let mut file_ops = FileOperationStats::default();
+    let mut composition_stats = CompositionStats::default();
 
     if command.is_empty() {
-        return file_ops;
+        return (file_ops, composition_stats);
     }
 
     // Join the command for easier parsing
@@ -409,7 +414,7 @@ fn parse_shell_command_for_file_operations(command: &[String]) -> FileOperationS
         file_ops.files_read += 1;
 
         // Try to extract file paths and categorize
-        extract_file_paths_from_command(actual_command, &mut file_ops);
+        extract_file_paths_from_command(actual_command, &mut composition_stats);
 
         // Estimate lines read (rough approximation)
         if actual_command.contains("sed -n") {
@@ -442,10 +447,10 @@ fn parse_shell_command_for_file_operations(command: &[String]) -> FileOperationS
         file_ops.bytes_edited += 400; // Rough estimate
     }
 
-    file_ops
+    (file_ops, composition_stats)
 }
 
-fn extract_file_paths_from_command(command: &str, file_ops: &mut FileOperationStats) {
+fn extract_file_paths_from_command(command: &str, composition_stats: &mut CompositionStats) {
     // This is a rough implementation - it tries to find file paths in the command
     let words: Vec<&str> = command.split_whitespace().collect();
 
@@ -460,14 +465,21 @@ fn extract_file_paths_from_command(command: &str, file_ops: &mut FileOperationSt
             let ext = &word[dot_pos + 1..];
             if ext.len() <= 5 && ext.chars().all(|c| c.is_alphabetic()) {
                 let category = FileCategory::from_extension(ext);
-                *file_ops
-                    .file_types
-                    .entry(category.as_str().to_string())
-                    .or_insert(0) += 1;
+                // Estimate lines per file operation
+                let estimated_lines = 50; // Conservative estimate
+                match category {
+                    FileCategory::SourceCode => composition_stats.code_lines += estimated_lines,
+                    FileCategory::Documentation => composition_stats.docs_lines += estimated_lines,
+                    FileCategory::Data => composition_stats.data_lines += estimated_lines,
+                    FileCategory::Media => composition_stats.media_lines += estimated_lines,
+                    FileCategory::Config => composition_stats.config_lines += estimated_lines,
+                    FileCategory::Other => composition_stats.other_lines += estimated_lines,
+                }
             }
         }
     }
 }
+
 
 fn extract_line_count_from_sed(command: &str) -> Option<u64> {
     // Try to extract line numbers from sed -n 'X,Yp' commands

@@ -16,7 +16,6 @@ pub enum Application {
 #[allow(clippy::large_enum_variant)]
 pub enum ConversationMessage {
     #[serde(rename_all = "camelCase")]
-    #[serde(rename = "AI")]
     AI {
         application: Application,
         model: String,
@@ -25,19 +24,17 @@ pub enum ConversationMessage {
         project_hash: String,
         file_operations: FileOperationStats,
         general_stats: GeneralStats,
-        #[serde(skip_serializing_if = "Option::is_none")]
         todo_stats: Option<TodoStats>,
         composition_stats: CompositionStats,
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
         analyzer_specific: std::collections::HashMap<String, serde_json::Value>,
     },
-    #[serde(rename = "User")]
+    #[serde(rename_all = "camelCase")]
     User {
         timestamp: String,
         application: Application,
         hash: Option<String>,
         project_hash: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         todo_stats: Option<TodoStats>,
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
         analyzer_specific: std::collections::HashMap<String, serde_json::Value>,
@@ -76,7 +73,6 @@ pub struct ModelPricing {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileOperationStats {
-    pub file_types: BTreeMap<String, u64>, // grouped by category
     pub terminal_commands: u64,
     pub file_searches: u64,
     pub file_content_searches: u64,
@@ -154,17 +150,6 @@ impl FileCategory {
             "config" | "conf" | "cfg" | "env" | "properties" | "plist" | "reg" | "desktop"
             | "service" => FileCategory::Config,
             _ => FileCategory::Other,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            FileCategory::SourceCode => "source_code",
-            FileCategory::Data => "data",
-            FileCategory::Documentation => "documentation",
-            FileCategory::Media => "media",
-            FileCategory::Config => "config",
-            FileCategory::Other => "other",
         }
     }
 }

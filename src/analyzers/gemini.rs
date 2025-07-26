@@ -73,8 +73,9 @@ struct GeminiTokens {
 }
 
 // Tool extraction and file operation mapping
-fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> FileOperationStats {
+fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> (FileOperationStats, CompositionStats) {
     let mut file_ops = FileOperationStats::default();
+    let mut composition_stats = CompositionStats::default();
 
     for tool_call in tool_calls {
         if let Some(tool_name) = tool_call.get("name").and_then(|v| v.as_str()) {
@@ -87,7 +88,7 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> FileOperationStats {
                     {
                         file_ops.files_read += paths.len() as u64;
 
-                        // Simple file categorization using existing FileCategory
+                        // Categorize files and estimate composition stats
                         for path in paths {
                             if let Some(path_str) = path.as_str() {
                                 let ext = std::path::Path::new(path_str)
@@ -95,10 +96,15 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> FileOperationStats {
                                     .and_then(|e| e.to_str())
                                     .unwrap_or("");
                                 let category = FileCategory::from_extension(ext);
-                                *file_ops
-                                    .file_types
-                                    .entry(category.as_str().to_string())
-                                    .or_insert(0) += 1;
+                                let estimated_lines = 100; // Estimate lines per file
+                                match category {
+                                    FileCategory::SourceCode => composition_stats.code_lines += estimated_lines,
+                                    FileCategory::Documentation => composition_stats.docs_lines += estimated_lines,
+                                    FileCategory::Data => composition_stats.data_lines += estimated_lines,
+                                    FileCategory::Media => composition_stats.media_lines += estimated_lines,
+                                    FileCategory::Config => composition_stats.config_lines += estimated_lines,
+                                    FileCategory::Other => composition_stats.other_lines += estimated_lines,
+                                }
                             }
                         }
 
@@ -129,7 +135,7 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> FileOperationStats {
     file_ops.lines_added = (file_ops.lines_edited / 2).max(1); // Simple estimate
     file_ops.lines_deleted = (file_ops.lines_edited / 3).max(1); // Simple estimate
 
-    file_ops
+    (file_ops, composition_stats)
 }
 
 // Helper function to generate hash from conversation file path and timestamp
@@ -319,7 +325,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                 tool_calls,
             } => {
                 if let Some(tokens) = tokens {
-                    let file_ops = extract_tool_stats(&tool_calls);
+                    let (file_ops, composition_stats) = extract_tool_stats(&tool_calls);
                     let hash = generate_conversation_hash(&conversation_file, &timestamp);
 
                     // Use a reasonable fallback model - Gemini 2.5 Flash is most common and cost-effective
@@ -333,7 +339,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                         project_hash: project_hash.clone(),
                         file_operations: file_ops,
                         todo_stats: None, // Gemini CLI doesn't have todos
-                        composition_stats: CompositionStats::default(),
+                        composition_stats,
                         analyzer_specific: {
                             let mut map = HashMap::new();
                             map.insert("gemini_id".to_string(), serde_json::Value::String(id));
@@ -500,6 +506,7 @@ impl Analyzer for GeminiAnalyzer {
                 ConversationMessage::AI {
                     general_stats,
                     file_operations,
+                    composition_stats,
                     ..
                 } => {
                     stats.cost += general_stats.cost;
@@ -525,14 +532,14 @@ impl Analyzer for GeminiAnalyzer {
                     stats.file_operations.bytes_edited += file_operations.bytes_edited;
                     stats.file_operations.bytes_deleted += file_operations.bytes_deleted;
 
-                    // Aggregate file types
-                    for (file_type, count) in &file_operations.file_types {
-                        *stats
-                            .file_operations
-                            .file_types
-                            .entry(file_type.clone())
-                            .or_insert(0) += count;
-                    }
+                    // Aggregate composition stats
+                    stats.composition_stats.code_lines += composition_stats.code_lines;
+                    stats.composition_stats.docs_lines += composition_stats.docs_lines;
+                    stats.composition_stats.data_lines += composition_stats.data_lines;
+                    stats.composition_stats.media_lines += composition_stats.media_lines;
+                    stats.composition_stats.config_lines += composition_stats.config_lines;
+                    stats.composition_stats.other_lines += composition_stats.other_lines;
+
                 }
                 ConversationMessage::User { .. } => {
                     stats.conversations += 1;

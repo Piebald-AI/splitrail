@@ -89,12 +89,8 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
     let mut conversations: BTreeMap<String, Vec<&ConversationMessage>> = BTreeMap::new();
     for entry in entries {
         let project_hash = match entry {
-            ConversationMessage::AI {
-                project_hash, ..
-            } => project_hash,
-            ConversationMessage::User {
-                project_hash, ..
-            } => project_hash,
+            ConversationMessage::AI { project_hash, .. } => project_hash,
+            ConversationMessage::User { project_hash, .. } => project_hash,
         };
         conversations
             .entry(project_hash.clone())
@@ -273,6 +269,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 general_stats,
                 file_operations,
                 todo_stats,
+                composition_stats,
                 ..
             } => {
                 stats.cost += general_stats.cost;
@@ -301,13 +298,6 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 stats.file_operations.bytes_read += file_operations.bytes_read;
                 stats.file_operations.bytes_edited += file_operations.bytes_edited;
                 stats.file_operations.bytes_added += file_operations.bytes_added;
-                for (file_type, count) in &file_operations.file_types {
-                    *stats
-                        .file_operations
-                        .file_types
-                        .entry(file_type.clone())
-                        .or_insert(0) += count;
-                }
 
                 // Aggregate todo stats for this day (if available)
                 if let Some(todo_stats) = todo_stats {
@@ -321,6 +311,14 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                         stats.todo_stats = Some(todo_stats.clone());
                     }
                 }
+
+                // Aggregate composition stats for this day
+                stats.composition_stats.code_lines += composition_stats.code_lines;
+                stats.composition_stats.docs_lines += composition_stats.docs_lines;
+                stats.composition_stats.data_lines += composition_stats.data_lines;
+                stats.composition_stats.media_lines += composition_stats.media_lines;
+                stats.composition_stats.config_lines += composition_stats.config_lines;
+                stats.composition_stats.other_lines += composition_stats.other_lines;
             }
             ConversationMessage::User { todo_stats, .. } => {
                 stats.user_messages += 1;
