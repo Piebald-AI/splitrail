@@ -1,12 +1,14 @@
 #![feature(if_let_guard)]
 
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use analyzer::AnalyzerRegistry;
 use analyzers::{ClaudeCodeAnalyzer, CodexAnalyzer, GeminiAnalyzer};
-use types::AgenticCodingToolStats;
+
+use crate::types::MultiAnalyzerStats;
 
 mod analyzer;
 mod analyzers;
@@ -94,9 +96,13 @@ async fn main() {
             // No subcommand - run default behavior
             run_default(format_options).await;
         }
-        Some(Commands::Upload) => {
-            run_upload(None).await;
-        }
+        Some(Commands::Upload) => match run_upload().await.context("Failed to run upload") {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Error running upload: {e:#}");
+                std::process::exit(1);
+            }
+        },
         Some(Commands::Config(config_args)) => {
             handle_config_subcommand(config_args).await;
         }
@@ -156,17 +162,10 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let config = config::Config::load().unwrap_or(None).unwrap_or_default();
     if config.upload.auto_upload {
         if config.is_configured() {
-            let primary_stats = initial_stats
-                .analyzer_stats
-                .iter()
-                .max_by_key(|s| s.num_conversations)
-                .cloned();
-            if let Some(stats) = primary_stats {
-                let upload_status_clone = upload_status.clone();
-                tokio::spawn(async move {
-                    run_background_upload(stats, upload_status_clone).await;
-                });
-            }
+            let upload_status_clone = upload_status.clone();
+            tokio::spawn(async move {
+                run_background_upload(initial_stats, upload_status_clone).await;
+            });
         } else {
             // Auto-upload is enabled but configuration is incomplete
             if let Ok(mut status) = upload_status.lock() {
@@ -196,39 +195,8 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     }
 }
 
-fn extract_user_friendly_error(error: &anyhow::Error) -> String {
-    let error_str = error.to_string();
-    let error_lower = error_str.to_lowercase();
-
-    // Check for network/connection issues
-    if error_lower.contains("network")
-        || error_lower.contains("connection")
-        || error_lower.contains("timeout")
-    {
-        "Network error".to_string()
-    } else if error_lower.contains("dns") || error_lower.contains("name resolution") {
-        "DNS error".to_string()
-    } else if error_lower.contains("server returned error:") {
-        // Extract server error message from upload response
-        if let Some(server_msg) = error_str.split("Server returned error: ").nth(1) {
-            format!("Server: {}", server_msg.trim())
-        } else {
-            "Server error".to_string()
-        }
-    } else {
-        // For other errors, return the first line of the error message
-        // (upload.rs now provides user-friendly error messages directly)
-        error
-            .to_string()
-            .lines()
-            .next()
-            .unwrap_or("Upload failed")
-            .to_string()
-    }
-}
-
 async fn run_background_upload(
-    stats: AgenticCodingToolStats,
+    initial_stats: MultiAnalyzerStats,
     upload_status: Arc<Mutex<tui::UploadStatus>>,
 ) {
     // Helper to set status
@@ -246,8 +214,12 @@ async fn run_background_upload(
         if !config.is_configured() {
             return None;
         }
+        let mut messages = vec![];
+        for analyzer_stats in initial_stats.analyzer_stats {
+            messages.extend(analyzer_stats.messages);
+        }
         let mut config = config;
-        let messages = utils::get_messages_later_than(config.last_date_uploaded, stats.messages)
+        let messages = utils::get_messages_later_than(config.last_date_uploaded, messages)
             .await
             .ok()?;
         Some(upload::upload_message_stats(&messages, &mut config).await)
@@ -256,10 +228,7 @@ async fn run_background_upload(
 
     match upload_result {
         Some(Ok(_)) => set_status(&upload_status, tui::UploadStatus::Uploaded),
-        Some(Err(e)) => {
-            let msg = extract_user_friendly_error(&e);
-            set_status(&upload_status, tui::UploadStatus::Failed(msg))
-        }
+        Some(Err(e)) => set_status(&upload_status, tui::UploadStatus::Failed(e.to_string())),
         None => return, // Config not available or not configured - skip upload
     }
 
@@ -267,51 +236,22 @@ async fn run_background_upload(
     set_status(&upload_status, tui::UploadStatus::None);
 }
 
-async fn run_upload(stats: Option<AgenticCodingToolStats>) {
-    let stats = match stats {
-        Some(stats) => {
-            println!("Uploading {} usage...", stats.analyzer_name);
-            stats
-        }
-        None => {
-            let registry = create_analyzer_registry();
-
-            // Get the primary analyzer (prioritized by data volume)
-            let analyzer = match registry.get_primary_analyzer_by_volume() {
-                Some(analyzer) => analyzer,
-                None => {
-                    eprintln!("No supported agentic development tools found on this system.");
-                    eprintln!("Supported tools: Claude Code, Codex CLI, Gemini CLI.");
-                    std::process::exit(1);
-                }
-            };
-            match analyzer.get_stats().await {
-                Ok(stats) => stats,
-                Err(e) => {
-                    eprintln!("Error analyzing {} data: {}", analyzer.display_name(), e);
-                    std::process::exit(1);
-                }
-            }
-        }
-    };
-
+async fn run_upload() -> Result<()> {
+    let registry = create_analyzer_registry();
+    let stats = registry.load_all_stats().await?;
+    let mut messages = vec![];
+    for analyzer_stats in stats.analyzer_stats {
+        messages.extend(analyzer_stats.messages);
+    }
     match config::Config::load() {
         Ok(Some(mut config)) if config.is_configured() => {
-            let messages =
-                match utils::get_messages_later_than(config.last_date_uploaded, stats.messages)
-                    .await
-                {
-                    Ok(messages) => messages,
-                    Err(e) => {
-                        eprintln!("Error getting messages: {e}");
-                        std::process::exit(1);
-                    }
-                };
-            if let Err(e) = upload::upload_message_stats(&messages, &mut config).await {
-                eprintln!("Upload failed: {e:#}");
-                eprintln!("Tip: Check your configuration with 'splitrail config show'");
-                std::process::exit(1);
-            }
+            let messages = utils::get_messages_later_than(config.last_date_uploaded, messages)
+                .await
+                .context("Failed to get messages later than last saved date")?;
+            upload::upload_message_stats(&messages, &mut config)
+                .await
+                .context("Failed to upload messages")?;
+            Ok(())
         }
         Ok(Some(_)) => {
             eprintln!("Configuration incomplete");

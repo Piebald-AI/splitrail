@@ -273,7 +273,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                         "user" => {
                             entries.push(ConversationMessage {
                                 timestamp: message.timestamp.clone(),
-                                application: Application::CodexCLI,
+                                application: Application::CodexCli,
                                 hash: generate_conversation_hash(&conversation_file, &message.timestamp),
                                 project_hash: "".to_string(),
                                 model: None,
@@ -303,7 +303,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                 };
 
                                 entries.push(ConversationMessage {
-                                    application: Application::CodexCLI,
+                                    application: Application::CodexCli,
                                     model: Some(model_name),
                                     timestamp: timestamp.clone(),
                                     hash: generate_conversation_hash(&conversation_file, &timestamp),
@@ -337,7 +337,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
 
                     entries.push(ConversationMessage {
                         timestamp: timestamp.clone(),
-                        application: Application::CodexCLI,
+                        application: Application::CodexCli,
                         hash: generate_conversation_hash(&conversation_file, &timestamp),
                         project_hash: "".to_string(),
                         model: None,
