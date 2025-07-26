@@ -271,9 +271,10 @@ fn is_synthetic_entry(data: &ClaudeCodeEntry) -> bool {
     false
 }
 
-fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<TodoStats>) {
+fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<TodoStats>, CompositionStats) {
     let mut file_ops = FileOperationStats::default();
     let mut todo_stats = TodoStats::default();
+    let mut composition_stats = CompositionStats::default();
     let mut has_todo_activity = false;
 
     if let Some(message) = &data.message
@@ -287,17 +288,21 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
                     "Read" => {
                         file_ops.files_read += 1;
                         if let Some(input) = &block.input {
-                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str())
-                            {
+                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
                                 let ext = Path::new(file_path)
                                     .extension()
                                     .and_then(|e| e.to_str())
                                     .unwrap_or("");
                                 let category = FileCategory::from_extension(ext);
-                                *file_ops
-                                    .file_types
-                                    .entry(category.as_str().to_string())
-                                    .or_insert(0) += 1;
+                                let lines_read = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
+                                match category {
+                                    FileCategory::SourceCode => composition_stats.code_lines += lines_read,
+                                    FileCategory::Documentation => composition_stats.docs_lines += lines_read,
+                                    FileCategory::Data => composition_stats.data_lines += lines_read,
+                                    FileCategory::Media => composition_stats.media_lines += lines_read,
+                                    FileCategory::Config => composition_stats.config_lines += lines_read,
+                                    FileCategory::Other => composition_stats.other_lines += lines_read,
+                                }
                             }
                             let lines_read =
                                 input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
@@ -308,17 +313,33 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
                     "Edit" | "MultiEdit" => {
                         file_ops.files_edited += 1;
                         if let Some(input) = &block.input {
-                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str())
-                            {
+                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
                                 let ext = Path::new(file_path)
                                     .extension()
                                     .and_then(|e| e.to_str())
                                     .unwrap_or("");
                                 let category = FileCategory::from_extension(ext);
-                                *file_ops
-                                    .file_types
-                                    .entry(category.as_str().to_string())
-                                    .or_insert(0) += 1;
+                                let lines_edited = if tool_name == "MultiEdit" {
+                                    input
+                                        .get("edits")
+                                        .and_then(|v| v.as_array())
+                                        .map(|edits| edits.len() as u64 * 5)
+                                        .unwrap_or(10)
+                                } else {
+                                    input
+                                        .get("new_string")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.lines().count() as u64)
+                                        .unwrap_or(5)
+                                };
+                                match category {
+                                    FileCategory::SourceCode => composition_stats.code_lines += lines_edited,
+                                    FileCategory::Documentation => composition_stats.docs_lines += lines_edited,
+                                    FileCategory::Data => composition_stats.data_lines += lines_edited,
+                                    FileCategory::Media => composition_stats.media_lines += lines_edited,
+                                    FileCategory::Config => composition_stats.config_lines += lines_edited,
+                                    FileCategory::Other => composition_stats.other_lines += lines_edited,
+                                }
                             }
                             let lines_edited = if tool_name == "MultiEdit" {
                                 input
@@ -340,17 +361,25 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
                     "Write" => {
                         file_ops.files_edited += 1;
                         if let Some(input) = &block.input {
-                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str())
-                            {
+                            if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
                                 let ext = Path::new(file_path)
                                     .extension()
                                     .and_then(|e| e.to_str())
                                     .unwrap_or("");
                                 let category = FileCategory::from_extension(ext);
-                                *file_ops
-                                    .file_types
-                                    .entry(category.as_str().to_string())
-                                    .or_insert(0) += 1;
+                                let lines_written = input
+                                    .get("content")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.lines().count() as u64)
+                                    .unwrap_or(50);
+                                match category {
+                                    FileCategory::SourceCode => composition_stats.code_lines += lines_written,
+                                    FileCategory::Documentation => composition_stats.docs_lines += lines_written,
+                                    FileCategory::Data => composition_stats.data_lines += lines_written,
+                                    FileCategory::Media => composition_stats.media_lines += lines_written,
+                                    FileCategory::Config => composition_stats.config_lines += lines_written,
+                                    FileCategory::Other => composition_stats.other_lines += lines_written,
+                                }
                             }
                             let lines_written = input
                                 .get("content")
@@ -432,6 +461,7 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> (FileOperationStats, Option<Tod
         } else {
             None
         },
+        composition_stats,
     )
 }
 
@@ -517,7 +547,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
         }
 
         let _hash = hash_cc_entry(&data);
-        let (file_ops, todo_stats) = extract_tool_stats(&data);
+        let (file_ops, todo_stats, composition_stats) = extract_tool_stats(&data);
 
         if data.message.is_none() {
             let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
@@ -534,7 +564,6 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
 
         let message = data.message.unwrap();
         let model_name = message.model.unwrap_or_else(|| "unknown".to_string());
-        let file_types = file_ops.file_types.clone();
 
         let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
         match message.usage {
@@ -565,14 +594,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                     file_operations: file_ops,
                     todo_stats,
                     analyzer_specific: HashMap::new(),
-                    composition_stats: CompositionStats {
-                        code_lines: *file_types.get("source_code").unwrap_or(&0),
-                        docs_lines: *file_types.get("documentation").unwrap_or(&0),
-                        data_lines: *file_types.get("data").unwrap_or(&0),
-                        media_lines: *file_types.get("media").unwrap_or(&0),
-                        config_lines: *file_types.get("config").unwrap_or(&0),
-                        other_lines: *file_types.get("other").unwrap_or(&0),
-                    },
+                    composition_stats,
                 });
             }
             None => {
