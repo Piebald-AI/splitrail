@@ -2,26 +2,32 @@ use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
 use crate::watcher::{FileWatcher, RealtimeStatsManager};
 use anyhow::Result;
-use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode};
+use crossterm::style::{Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use crossterm::{ExecutableCommand, execute};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
-use std::io::stdout;
+use std::io::{Write, stdout};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 #[derive(Debug, Clone)]
 pub enum UploadStatus {
     None,
-    Uploading { current: usize, total: usize, dots: usize },
+    Uploading {
+        current: usize,
+        total: usize,
+        dots: usize,
+    },
     Uploaded,
     Failed(String), // Include error message
     MissingApiToken,
@@ -128,7 +134,12 @@ async fn run_app(
         let current_upload_status = {
             let mut status = upload_status.lock().unwrap();
             // Advance dots animation for uploading status every 500ms (5 frames at 100ms)
-            if let UploadStatus::Uploading { current: _, total: _, dots } = &mut *status {
+            if let UploadStatus::Uploading {
+                current: _,
+                total: _,
+                dots,
+            } = &mut *status
+            {
                 // Always animate dots during upload
                 dots_counter += 1;
                 if dots_counter >= 5 {
@@ -291,15 +302,22 @@ fn draw_ui(
     // Since we're already working with filtered stats, has_data is simply whether we have any stats
     let has_data = !filtered_stats.is_empty();
 
+    // Check if we have an error to determine help area height
+    let has_error = if let Ok(status) = upload_status.lock() {
+        matches!(*status, UploadStatus::Failed(_))
+    } else {
+        false
+    };
+
     // Adjust layout based on whether we have data or not
     let chunks = if has_data {
         Layout::vertical([
-            Constraint::Length(3), // Header
-            Constraint::Length(1), // Tabs
-            Constraint::Length(4), // Models info
-            Constraint::Min(3),    // Main table
-            Constraint::Length(6), // Summary stats
-            Constraint::Length(2), // Help text
+            Constraint::Length(3),                             // Header
+            Constraint::Length(1),                             // Tabs
+            Constraint::Length(4),                             // Models info
+            Constraint::Min(3),                                // Main table
+            Constraint::Length(6),                             // Summary stats
+            Constraint::Length(if has_error { 3 } else { 1 }), // Help text
         ])
         .split(frame.area())
     } else {
@@ -392,7 +410,7 @@ fn draw_ui(
         // Split help area horizontally: help text on left, upload status on right
         let help_chunks = Layout::horizontal([
             Constraint::Min(0),
-            Constraint::Length(50), // Increased space for longer error messages
+            Constraint::Min(20), // Allow flexible space for error messages
         ])
         .split(help_area);
 
@@ -405,7 +423,11 @@ fn draw_ui(
         if let Ok(status) = upload_status.lock() {
             let (status_text, status_style) = match &*status {
                 UploadStatus::None => (String::new(), Style::default()),
-                UploadStatus::Uploading { current, total, dots } => {
+                UploadStatus::Uploading {
+                    current,
+                    total,
+                    dots,
+                } => {
                     // Always show animated dots - ignore is_counting
                     let dots_str = match dots % 4 {
                         0 => "   ",
@@ -414,22 +436,22 @@ fn draw_ui(
                         _ => "...",
                     };
                     (
-                        format!("Uploading {}/{} messages{}", current, total, dots_str),
+                        format!(
+                            "Uploading {}/{} messages{}",
+                            format_number(*current as u64, format_options),
+                            format_number(*total as u64, format_options),
+                            dots_str
+                        ),
                         Style::default().add_modifier(Modifier::DIM),
                     )
-                },
+                }
                 UploadStatus::Uploaded => (
                     "✓ Uploaded successfully".to_string(),
                     Style::default().fg(Color::Green),
                 ),
                 UploadStatus::Failed(error) => {
-                    // Show error message directly, truncating only if necessary
-                    let error_text = if error.len() <= 47 {
-                        format!("✕ {error}")
-                    } else {
-                        format!("✕ {error:.44}...")
-                    };
-                    (error_text, Style::default().fg(Color::Red))
+                    // Show full error message - let the widget handle wrapping/display
+                    (format!("✕ {error}"), Style::default().fg(Color::Red))
                 }
                 UploadStatus::MissingApiToken => (
                     "No API token for uploading".to_string(),
@@ -448,14 +470,15 @@ fn draw_ui(
             if !status_text.is_empty() {
                 let status_widget = Paragraph::new(status_text)
                     .style(status_style)
-                    .alignment(ratatui::layout::Alignment::Right);
+                    .alignment(ratatui::layout::Alignment::Right)
+                    .wrap(ratatui::widgets::Wrap { trim: true });
                 frame.render_widget(status_widget, help_chunks[1]);
             }
         }
     } else {
         // No data message
         let no_data_message = Paragraph::new(Text::styled(
-            "You don't have any agentic coding data.  Once you start using Claude Code or Codex, you'll see some data here.",
+            "You don't have any agentic development tool data.  Once you start using Claude Code, Codex, or Gemini CLI, you'll see some data here.",
             Style::default().add_modifier(Modifier::DIM),
         ));
         frame.render_widget(no_data_message, chunks[1]);
@@ -1026,4 +1049,73 @@ fn update_table_states(
     if *selected_tab >= filtered_count && filtered_count > 0 {
         *selected_tab = filtered_count - 1;
     }
+}
+
+pub fn create_upload_progress_callback(
+    format_options: &NumberFormatOptions,
+) -> impl Fn(usize, usize) + '_ {
+    static LAST_CURRENT: AtomicUsize = AtomicUsize::new(0);
+    static DOTS: AtomicUsize = AtomicUsize::new(0);
+    static LAST_DOTS_UPDATE: AtomicU64 = AtomicU64::new(0);
+
+    move |current: usize, total: usize| {
+        let last = LAST_CURRENT.load(Ordering::Relaxed);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let last_update = LAST_DOTS_UPDATE.load(Ordering::Relaxed);
+
+        let mut should_update = false;
+
+        if current != last {
+            // Progress changed - update current but keep dots timing
+            LAST_CURRENT.store(current, Ordering::Relaxed);
+            should_update = true;
+        }
+
+        if now - last_update >= 500 {
+            // 500ms between dot updates
+            // Enough time passed - advance dots animation
+            let dots = DOTS.load(Ordering::Relaxed);
+            DOTS.store((dots + 1) % 4, Ordering::Relaxed);
+            LAST_DOTS_UPDATE.store(now, Ordering::Relaxed);
+            should_update = true;
+        }
+
+        if should_update {
+            let current_dots = DOTS.load(Ordering::Relaxed);
+            let dots_str = ".".repeat(current_dots);
+            print!(
+                "\r\x1b[KUploading {}/{} messages{}",
+                format_number(current as u64, format_options),
+                format_number(total as u64, format_options),
+                dots_str
+            );
+            let _ = Write::flush(&mut stdout());
+        }
+    }
+}
+
+pub fn show_upload_success(total: usize, format_options: &NumberFormatOptions) {
+    let _ = execute!(
+        stdout(),
+        Print("\r"),
+        SetForegroundColor(crossterm::style::Color::DarkGreen),
+        Print(format!(
+            "✓ Successfully uploaded {} messages\n",
+            format_number(total as u64, format_options)
+        )),
+        ResetColor
+    );
+}
+
+pub fn show_upload_error(error: &str) {
+    let _ = execute!(
+        stdout(),
+        Print("\r"),
+        SetForegroundColor(crossterm::style::Color::DarkRed),
+        Print(format!("✕ {error}\n")),
+        ResetColor
+    );
 }

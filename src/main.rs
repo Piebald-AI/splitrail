@@ -102,7 +102,7 @@ async fn main() {
         Some(Commands::Upload) => match run_upload().await.context("Failed to run upload") {
             Ok(_) => {}
             Err(e) => {
-                eprintln!("Error running upload: {e:#}");
+                tui::show_upload_error(&format!("{e:#}"));
                 std::process::exit(1);
             }
         },
@@ -214,30 +214,46 @@ async fn run_background_upload(
         let messages = utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
             .await
             .ok()?;
-        Some(upload::upload_message_stats(&messages, &mut config, |current, total| {
-            // Preserve the current dots value when updating
-            if let Ok(mut status) = upload_status.lock() {
-                match &*status {
-                    tui::UploadStatus::Uploading { dots, .. } => {
-                        *status = tui::UploadStatus::Uploading { current, total, dots: *dots };
-                    }
-                    _ => {
-                        *status = tui::UploadStatus::Uploading { current, total, dots: 0 };
+        Some(
+            upload::upload_message_stats(&messages, &mut config, |current, total| {
+                // Preserve the current dots value when updating
+                if let Ok(mut status) = upload_status.lock() {
+                    match &*status {
+                        tui::UploadStatus::Uploading { dots, .. } => {
+                            *status = tui::UploadStatus::Uploading {
+                                current,
+                                total,
+                                dots: *dots,
+                            };
+                        }
+                        _ => {
+                            *status = tui::UploadStatus::Uploading {
+                                current,
+                                total,
+                                dots: 0,
+                            };
+                        }
                     }
                 }
-            }
-        }).await)
+            })
+            .await,
+        )
     }
     .await;
 
     match upload_result {
-        Some(Ok(_)) => set_status(&upload_status, tui::UploadStatus::Uploaded),
-        Some(Err(e)) => set_status(&upload_status, tui::UploadStatus::Failed(e.to_string())),
+        Some(Ok(_)) => {
+            set_status(&upload_status, tui::UploadStatus::Uploaded);
+            // Only hide success messages after 3 seconds
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            set_status(&upload_status, tui::UploadStatus::None);
+        }
+        Some(Err(e)) => {
+            // Keep error messages visible permanently (don't auto-hide)
+            set_status(&upload_status, tui::UploadStatus::Failed(format!("{e:#}")));
+        }
         None => return, // Config not available or not configured - skip upload
     }
-
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    set_status(&upload_status, tui::UploadStatus::None);
 }
 
 async fn run_upload() -> Result<()> {
@@ -247,16 +263,27 @@ async fn run_upload() -> Result<()> {
     for analyzer_stats in stats.analyzer_stats {
         messages.extend(analyzer_stats.messages);
     }
+    
+    // Load config file to get formatting options
+    let config_file = config::Config::load().unwrap_or(None).unwrap_or_default();
+    let format_options = utils::NumberFormatOptions {
+        use_comma: config_file.formatting.number_comma,
+        use_human: config_file.formatting.number_human,
+        locale: config_file.formatting.locale,
+        decimal_places: config_file.formatting.decimal_places,
+    };
+    
     match config::Config::load() {
         Ok(Some(mut config)) if config.is_configured() => {
-            let messages = utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
-                .await
-                .context("Failed to get messages later than last saved date")?;
-            upload::upload_message_stats(&messages, &mut config, |current, total| {
-                println!("Uploading {}/{} messages...", current, total);
-            })
-                .await
-                .context("Failed to upload messages")?;
+            let messages =
+                utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
+                    .await
+                    .context("Failed to get messages later than last saved date")?;
+            let progress_callback = tui::create_upload_progress_callback(&format_options);
+            upload::upload_message_stats(&messages, &mut config, progress_callback)
+            .await
+            .context("Failed to upload messages")?;
+            tui::show_upload_success(messages.len(), &format_options);
             Ok(())
         }
         Ok(Some(_)) => {
@@ -270,7 +297,7 @@ async fn run_upload() -> Result<()> {
             std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("Config error: {e}");
+            eprintln!("Config error: {e:#}");
             std::process::exit(1);
         }
     }
