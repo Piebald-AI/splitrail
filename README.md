@@ -17,9 +17,19 @@ Also check out our developer-first agentic AI experience, [Piebald](https://pieb
 ### [Splitrail Leaderboard](https://splitrail.dev/leaderboard)
 <img width="750" alt="Screenshot of the Splitrail Leaderboard" src="./screenshots/leaderboard.png" />
 
-## Releases
+## Development
 
-Coming soon.
+On Windows, we use `lld-link.exe` from LLVM to significantly speed up compilation, so you'll need to install it to compile Splitrail.  Example for `winget`:
+
+```shell
+winget install --id LLVM.LLVM
+```
+
+Then use standard Cargo commands to build and run:
+
+```shell
+cargo run
+```
 
 
 -----
