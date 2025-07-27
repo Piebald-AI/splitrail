@@ -126,13 +126,6 @@ fn create_analyzer_registry() -> AnalyzerRegistry {
 async fn run_default(format_options: utils::NumberFormatOptions) {
     let registry = create_analyzer_registry();
 
-    // Check if any analyzers are available
-    if registry.available_analyzers().is_empty() {
-        eprintln!("No supported AI coding tools found on this system");
-        eprintln!("Supported tools: Claude Code, Codex CLI, Gemini CLI");
-        std::process::exit(1);
-    }
-
     // Create file watcher
     let file_watcher = match watcher::FileWatcher::new(&registry) {
         Ok(watcher) => watcher,
@@ -153,10 +146,6 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
 
     // Get the initial stats to check if we have data
     let initial_stats = stats_manager.get_stats_receiver().borrow().clone();
-    if initial_stats.analyzer_stats.is_empty() {
-        eprintln!("No data could be analyzed from any supported tools");
-        std::process::exit(1);
-    }
 
     // Create upload status for TUI
     let upload_status = Arc::new(Mutex::new(tui::UploadStatus::None));

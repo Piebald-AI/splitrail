@@ -306,7 +306,7 @@ fn draw_ui(
         Layout::vertical([
             Constraint::Length(3), // Header
             Constraint::Min(3),    // No-data message
-            Constraint::Length(2), // Help text
+            Constraint::Length(1), // Help text
         ])
         .split(frame.area())
     };
@@ -314,11 +314,11 @@ fn draw_ui(
     // Header
     let header = Paragraph::new(Text::from(vec![
         Line::styled(
-            "AGENTIC CODING TOOL ACTIVITY ANALYSIS",
+            "AGENTIC DEVELOPMENT TOOL ACTIVITY ANALYSIS",
             Style::new().cyan().bold(),
         ),
         Line::styled(
-            "=====================================",
+            "==========================================",
             Style::new().cyan().bold(),
         ),
     ]));
