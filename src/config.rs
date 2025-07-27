@@ -121,15 +121,19 @@ impl Config {
 }
 
 // CLI helper functions
-pub fn create_default_config() -> Result<()> {
+pub fn create_default_config(overwrite: bool) -> Result<()> {
     let config = Config::default();
-    config.save(true)?;
+    if !std::fs::exists(Config::config_path()?)? || overwrite {
+        config.save(true)?;
 
-    println!("📝 Created default configuration file.");
-    println!("📍 Edit it with your Splitrail Cloud API token:");
-    println!("   splitrail config set api-token ...");
-    println!("or");
-    println!("   {}", Config::config_path()?.display());
+        println!("📝 Created default configuration file.");
+        println!("📍 Edit it with your Splitrail Cloud API token:");
+        println!("   splitrail config set api-token ...");
+        println!("or");
+        println!("   {}", Config::config_path()?.display());
+    } else {
+        println!("Configuration already exists.  Pass `--overwrite` to overwrite.");
+    }
 
     Ok(())
 }

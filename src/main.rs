@@ -62,7 +62,10 @@ struct ConfigArgs {
 #[derive(Subcommand)]
 enum ConfigSubcommands {
     /// Create default configuration file
-    Init,
+    Init {
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
     /// Show current configuration
     Show,
     /// Set configuration value
@@ -286,8 +289,8 @@ async fn run_upload() -> Result<()> {
 
 async fn handle_config_subcommand(config_args: ConfigArgs) {
     match config_args.subcommand {
-        ConfigSubcommands::Init => {
-            if let Err(e) = config::create_default_config() {
+        ConfigSubcommands::Init { overwrite } => {
+            if let Err(e) = config::create_default_config(overwrite) {
                 eprintln!("Error creating config: {e}");
                 std::process::exit(1);
             }
