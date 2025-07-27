@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
-use crate::models::MODEL_PRICING;
+use crate::models::get_model_pricing;
 use crate::types::{
     AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
@@ -468,7 +468,7 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> Stats {
 }
 
 fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
-    match MODEL_PRICING.get(model_name) {
+    match get_model_pricing().get(model_name) {
         Some(pricing) => {
             usage.input_tokens as f64 * pricing.input_cost_per_token
                 + usage.output_tokens as f64 * pricing.output_cost_per_token

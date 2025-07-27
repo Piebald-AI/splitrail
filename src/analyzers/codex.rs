@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
-use crate::models::MODEL_PRICING;
+use crate::models::get_model_pricing;
 use crate::types::{
     AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats
 };
@@ -487,7 +487,7 @@ fn extract_line_count_from_sed(command: &str) -> Option<u64> {
 }
 
 fn calculate_cost_from_tokens(usage: &CodexTokenUsage, model_name: &str) -> f64 {
-    match MODEL_PRICING.get(model_name) {
+    match get_model_pricing().get(model_name) {
         Some(pricing) => {
             // For Codex, we have cached_input_tokens instead of separate creation/read
             let regular_input_cost = usage.input_tokens as f64 * pricing.input_cost_per_token;

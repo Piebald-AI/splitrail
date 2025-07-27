@@ -206,7 +206,7 @@ async fn run_background_upload(
         }
     }
 
-    set_status(&upload_status, tui::UploadStatus::Uploading);
+    // Don't set initial upload status - let it get set by the first progress callback
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let upload_result = async {
@@ -219,10 +219,22 @@ async fn run_background_upload(
             messages.extend(analyzer_stats.messages);
         }
         let mut config = config;
-        let messages = utils::get_messages_later_than(config.last_date_uploaded, messages)
+        let messages = utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
             .await
             .ok()?;
-        Some(upload::upload_message_stats(&messages, &mut config).await)
+        Some(upload::upload_message_stats(&messages, &mut config, |current, total| {
+            // Preserve the current dots value when updating
+            if let Ok(mut status) = upload_status.lock() {
+                match &*status {
+                    tui::UploadStatus::Uploading { dots, .. } => {
+                        *status = tui::UploadStatus::Uploading { current, total, dots: *dots };
+                    }
+                    _ => {
+                        *status = tui::UploadStatus::Uploading { current, total, dots: 0 };
+                    }
+                }
+            }
+        }).await)
     }
     .await;
 
@@ -245,10 +257,12 @@ async fn run_upload() -> Result<()> {
     }
     match config::Config::load() {
         Ok(Some(mut config)) if config.is_configured() => {
-            let messages = utils::get_messages_later_than(config.last_date_uploaded, messages)
+            let messages = utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
                 .await
                 .context("Failed to get messages later than last saved date")?;
-            upload::upload_message_stats(&messages, &mut config)
+            upload::upload_message_stats(&messages, &mut config, |current, total| {
+                println!("Uploading {}/{} messages...", current, total);
+            })
                 .await
                 .context("Failed to upload messages")?;
             Ok(())

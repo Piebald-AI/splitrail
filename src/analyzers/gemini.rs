@@ -1,5 +1,5 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::models::MODEL_PRICING;
+use crate::models::get_model_pricing;
 use crate::types::{
     AgenticCodingToolStats, Application, ConversationMessage, DailyStats, FileCategory,
     MessageRole, Stats,
@@ -178,7 +178,7 @@ fn extract_and_hash_project_id_gemini(file_path: &Path) -> String {
 
 // Cost calculation with tiered pricing support
 fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
-    match MODEL_PRICING.get(model_name) {
+    match get_model_pricing().get(model_name) {
         Some(pricing) => {
             let total_input_tokens = tokens.input + tokens.thoughts + tokens.tool;
             let total_output_tokens = tokens.output;
@@ -458,11 +458,6 @@ impl Analyzer for GeminiAnalyzer {
                     stats,
                     ..
                 } => {
-                    daily_stats_entry.stats.cost += stats.cost;
-                    daily_stats_entry.stats.input_tokens += stats.input_tokens;
-                    daily_stats_entry.stats.output_tokens += stats.output_tokens;
-                    daily_stats_entry.stats.tool_calls += stats.tool_calls;
-
                     // Aggregate all stats into daily stats
                     daily_stats_entry.stats.cost += stats.cost;
                     daily_stats_entry.stats.input_tokens += stats.input_tokens;

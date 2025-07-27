@@ -8,7 +8,6 @@ pub struct Config {
     pub server: ServerConfig,
     pub upload: UploadConfig,
     pub formatting: FormattingConfig,
-    pub last_date_uploaded: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -23,6 +22,7 @@ pub struct UploadConfig {
     pub upload_today_only: bool,
     pub retry_attempts: u32,
     pub timeout_seconds: u64,
+    pub last_date_uploaded: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -45,6 +45,7 @@ impl Default for Config {
                 upload_today_only: false,
                 retry_attempts: 3,
                 timeout_seconds: 30,
+                last_date_uploaded: 0,
             },
             formatting: FormattingConfig {
                 number_comma: false,
@@ -52,7 +53,6 @@ impl Default for Config {
                 locale: "en".to_string(),
                 decimal_places: 2,
             },
-            last_date_uploaded: 0,
         }
     }
 }
@@ -116,7 +116,7 @@ impl Config {
     }
 
     pub fn set_last_date_uploaded(&mut self, date: i64) {
-        self.last_date_uploaded = date;
+        self.upload.last_date_uploaded = date;
     }
 }
 
@@ -126,7 +126,9 @@ pub fn create_default_config() -> Result<()> {
     config.save(true)?;
 
     println!("📝 Created default configuration file.");
-    println!("📍 Edit it with your server URL and API token:");
+    println!("📍 Edit it with your Splitrail Cloud API token:");
+    println!("   splitrail config set api-token ...");
+    println!("or");
     println!("   {}", Config::config_path()?.display());
 
     Ok(())

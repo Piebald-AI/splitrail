@@ -21,7 +21,7 @@ use tokio::sync::watch;
 #[derive(Debug, Clone)]
 pub enum UploadStatus {
     None,
-    Uploading,
+    Uploading { current: usize, total: usize, dots: usize },
     Uploaded,
     Failed(String), // Include error message
     MissingApiToken,
@@ -94,6 +94,7 @@ async fn run_app(
         let status = upload_status.lock().unwrap();
         format!("{:?}", *status)
     };
+    let mut dots_counter = 0; // Counter for dots animation (advance every 5 frames = 500ms)
 
     // Filter analyzer stats to only include those with data - calculate once and update when stats change
     let mut filtered_stats: Vec<&AgenticCodingToolStats> = current_stats
@@ -123,9 +124,22 @@ async fn run_app(
             }
         }
 
-        // Check if upload status has changed
+        // Check if upload status has changed or advance dots animation
         let current_upload_status = {
-            let status = upload_status.lock().unwrap();
+            let mut status = upload_status.lock().unwrap();
+            // Advance dots animation for uploading status every 500ms (5 frames at 100ms)
+            if let UploadStatus::Uploading { current: _, total: _, dots } = &mut *status {
+                // Always animate dots during upload
+                dots_counter += 1;
+                if dots_counter >= 5 {
+                    *dots = (*dots + 1) % 4;
+                    dots_counter = 0;
+                    needs_redraw = true;
+                }
+            } else {
+                // Reset counter when not uploading
+                dots_counter = 0;
+            }
             format!("{:?}", *status)
         };
         if current_upload_status != last_upload_status {
@@ -391,10 +405,19 @@ fn draw_ui(
         if let Ok(status) = upload_status.lock() {
             let (status_text, status_style) = match &*status {
                 UploadStatus::None => (String::new(), Style::default()),
-                UploadStatus::Uploading => (
-                    "Uploading...".to_string(),
-                    Style::default().add_modifier(Modifier::DIM),
-                ),
+                UploadStatus::Uploading { current, total, dots } => {
+                    // Always show animated dots - ignore is_counting
+                    let dots_str = match dots % 4 {
+                        0 => "   ",
+                        1 => ".  ",
+                        2 => ".. ",
+                        _ => "...",
+                    };
+                    (
+                        format!("Uploading {}/{} messages{}", current, total, dots_str),
+                        Style::default().add_modifier(Modifier::DIM),
+                    )
+                },
                 UploadStatus::Uploaded => (
                     "✓ Uploaded successfully".to_string(),
                     Style::default().fg(Color::Green),
