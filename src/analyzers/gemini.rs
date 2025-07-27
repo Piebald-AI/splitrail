@@ -35,25 +35,29 @@ struct GeminiSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "camelCase")]
 enum GeminiMessage {
-    #[serde(rename = "user")]
     User {
         id: String,
         timestamp: String,
         content: String,
     },
-    #[serde(rename = "gemini")]
     Gemini {
         id: String,
         timestamp: String,
         content: String,
+        model: String,
         #[serde(default)]
         thoughts: Vec<serde_json::Value>,
         tokens: Option<GeminiTokens>,
         #[serde(rename = "toolCalls", default)]
         tool_calls: Vec<serde_json::Value>,
     },
+    System {
+        id: String,
+        timestamp: String,
+        content: String,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +312,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                 id: _,
                 timestamp,
                 content: _,
+                model,
                 thoughts: _,
                 tokens,
                 tool_calls,
@@ -316,21 +321,18 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                     let mut stats = extract_tool_stats(&tool_calls);
                     let hash = generate_conversation_hash(&conversation_file, &timestamp);
 
-                    // Use a reasonable fallback model - Gemini 2.5 Flash is most common and cost-effective
-                    let fallback_model = "gemini-2.5-flash";
-
                     // Update stats with token information
                     stats.input_tokens = tokens.input;
                     stats.output_tokens = tokens.output;
                     stats.cache_creation_tokens = 0;
                     stats.cache_read_tokens = 0;
                     stats.cached_tokens = tokens.cached;
-                    stats.cost = calculate_gemini_cost(&tokens, fallback_model);
+                    stats.cost = calculate_gemini_cost(&tokens, &model);
                     stats.tool_calls = tool_calls.len() as u32;
 
                     entries.push(ConversationMessage {
                         application: Application::GeminiCli,
-                        model: Some(fallback_model.to_string()), // TODO: Extract actual model from session
+                        model: Some(model),
                         timestamp,
                         hash,
                         project_hash: project_hash.clone(),
@@ -339,6 +341,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                     });
                 }
             }
+            _ => {}
         }
     }
 
