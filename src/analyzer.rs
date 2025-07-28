@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 
 use crate::types::{AgenticCodingToolStats, ConversationMessage};
-use crate::utils::ModelAbbreviations;
 
 /// Represents a data source for an analyzer
 #[derive(Debug, Clone)]
@@ -16,9 +15,6 @@ pub struct DataSource {
 pub trait Analyzer: Send + Sync {
     /// Get the display name for this analyzer
     fn display_name(&self) -> &'static str;
-
-    /// Get model abbreviations for this analyzer
-    fn get_model_abbreviations(&self) -> ModelAbbreviations;
 
     /// Get glob patterns for discovering data sources
     fn get_data_glob_patterns(&self) -> Vec<String>;

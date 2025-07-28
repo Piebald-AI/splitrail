@@ -314,7 +314,6 @@ fn draw_ui(
         Layout::vertical([
             Constraint::Length(3),                             // Header
             Constraint::Length(1),                             // Tabs
-            Constraint::Length(4),                             // Models info
             Constraint::Min(3),                                // Main table
             Constraint::Length(6),                             // Summary stats
             Constraint::Length(if has_error { 3 } else { 1 }), // Help text
@@ -367,45 +366,21 @@ fn draw_ui(
         if let Some(current_stats) = filtered_stats.get(selected_tab)
             && let Some(current_table_state) = table_states.get_mut(selected_tab)
         {
-            // Models info
-            let mut model_lines = vec![Line::styled(
-                "Models:",
-                Style::default().add_modifier(Modifier::DIM),
-            )];
-            for (k, v) in &current_stats.model_abbrs.abbr_to_desc {
-                // Only show the abbreviation if this model is used
-                for day_stats in current_stats.daily_stats.values() {
-                    if day_stats
-                        .models
-                        .contains_key(&current_stats.model_abbrs.abbr_to_model[k])
-                    {
-                        model_lines.push(Line::from(Span::styled(
-                            format!("  {k}: {v}"),
-                            Style::default().add_modifier(Modifier::DIM),
-                        )));
-                        break;
-                    }
-                }
-            }
-            let models_widget =
-                Paragraph::new(Text::from(model_lines)).block(Block::default().title(""));
-            frame.render_widget(models_widget, chunks[2]);
-
             // Main table
             draw_daily_stats_table(
                 frame,
-                chunks[3],
+                chunks[2],
                 current_stats,
                 format_options,
                 current_table_state,
             );
 
             // Summary stats
-            draw_summary_stats(frame, chunks[4], current_stats, format_options);
+            draw_summary_stats(frame, chunks[3], current_stats, format_options);
         }
 
         // Help text for data view with upload status
-        let help_area = chunks[5];
+        let help_area = chunks[4];
 
         // Split help area horizontally: help text on left, upload status on right
         let help_chunks = Layout::horizontal([
@@ -507,10 +482,7 @@ fn draw_daily_stats_table(
         Cell::new(Text::from("Convs").right_aligned()),
         Cell::new(Text::from("Tools").right_aligned()),
         Cell::new(Text::from("Lines").right_aligned()),
-        Cell::new(Line::from(vec![
-            Span::from("Models "),
-            Span::from("(see above)").dim(),
-        ])),
+        Cell::new("Models"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
@@ -572,19 +544,13 @@ fn draw_daily_stats_table(
         total_output += day_stats.stats.output_tokens;
         total_tool_calls += day_stats.stats.tool_calls;
 
-        let models = day_stats
+        let mut models_vec = day_stats
             .models
             .keys()
-            .map(|k| {
-                stats
-                    .model_abbrs
-                    .model_to_abbr
-                    .get(k)
-                    .unwrap_or(&k.clone())
-                    .clone()
-            })
-            .collect::<Vec<String>>()
-            .join(", ");
+            .cloned()
+            .collect::<Vec<String>>();
+        models_vec.sort();
+        let models = models_vec.join(", ");
 
         let lines_summary = format!(
             "{}/{}/{}",
@@ -776,7 +742,7 @@ fn draw_daily_stats_table(
     }
     let mut all_models_vec = all_models
         .iter()
-        .map(|k| stats.model_abbrs.model_to_abbr.get(*k).unwrap_or(k).clone())
+        .map(|k| k.to_string())
         .collect::<Vec<String>>();
     all_models_vec.sort();
     let all_models_text = all_models_vec.join(", ");

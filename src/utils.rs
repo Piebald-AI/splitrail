@@ -359,28 +359,6 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
     daily_stats
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelAbbreviations {
-    pub abbr_to_desc: BTreeMap<String, String>,
-    pub model_to_abbr: BTreeMap<String, String>,
-    pub abbr_to_model: BTreeMap<String, String>,
-}
-
-impl ModelAbbreviations {
-    pub fn new() -> Self {
-        Self {
-            abbr_to_desc: BTreeMap::new(),
-            model_to_abbr: BTreeMap::new(),
-            abbr_to_model: BTreeMap::new(),
-        }
-    }
-
-    pub fn add(&mut self, model: String, abbr: String, desc: String) {
-        self.abbr_to_desc.insert(abbr.clone(), desc.clone());
-        self.model_to_abbr.insert(model.clone(), abbr.clone());
-        self.abbr_to_model.insert(abbr.clone(), model.clone());
-    }
-}
 
 /// Filters messages to only include those created after a specific date
 pub async fn get_messages_later_than(

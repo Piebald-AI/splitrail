@@ -1,18 +1,16 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::models::get_model_pricing;
+use crate::models::{calculate_input_cost, calculate_output_cost, calculate_cache_cost};
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, DailyStats, FileCategory,
+    AgenticCodingToolStats, Application, ConversationMessage, FileCategory,
     MessageRole, Stats,
 };
-use crate::utils::ModelAbbreviations;
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::DateTime;
 use glob::glob;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 pub struct GeminiAnalyzer;
@@ -180,82 +178,15 @@ fn extract_and_hash_project_id_gemini(file_path: &Path) -> String {
     hex::encode(&result[..8])
 }
 
-// Cost calculation with tiered pricing support
+// Cost calculation using the centralized model system
 fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
-    match get_model_pricing().get(model_name) {
-        Some(pricing) => {
-            let total_input_tokens = tokens.input + tokens.thoughts + tokens.tool;
-            let total_output_tokens = tokens.output;
-
-            // Check if this model has Gemini-specific tiered pricing rules
-            let input_cost = match &pricing.model_rules {
-                crate::models::ModelSpecificRules::Gemini {
-                    high_volume_input_cost_per_token,
-                    high_volume_threshold,
-                    ..
-                } => {
-                    if total_input_tokens > *high_volume_threshold {
-                        if let Some(high_volume_rate) = high_volume_input_cost_per_token {
-                            // First threshold amount at normal rate, rest at high volume rate
-                            (*high_volume_threshold as f64 * pricing.input_cost_per_token)
-                                + ((total_input_tokens - *high_volume_threshold) as f64
-                                    * high_volume_rate)
-                        } else {
-                            // No tiered pricing, use normal rate for all tokens
-                            total_input_tokens as f64 * pricing.input_cost_per_token
-                        }
-                    } else {
-                        // Under threshold, use normal rate
-                        total_input_tokens as f64 * pricing.input_cost_per_token
-                    }
-                }
-                crate::models::ModelSpecificRules::OpenAI { .. }
-                | crate::models::ModelSpecificRules::None => {
-                    // No tiered pricing, use normal rate for all tokens
-                    total_input_tokens as f64 * pricing.input_cost_per_token
-                }
-            };
-
-            // Calculate output cost with tiered pricing
-            let output_cost = match &pricing.model_rules {
-                crate::models::ModelSpecificRules::Gemini {
-                    high_volume_output_cost_per_token,
-                    high_volume_threshold,
-                    ..
-                } => {
-                    if total_output_tokens > *high_volume_threshold {
-                        if let Some(high_volume_rate) = high_volume_output_cost_per_token {
-                            // First threshold amount at normal rate, rest at high volume rate
-                            (*high_volume_threshold as f64 * pricing.output_cost_per_token)
-                                + ((total_output_tokens - *high_volume_threshold) as f64
-                                    * high_volume_rate)
-                        } else {
-                            // No tiered pricing, use normal rate for all tokens
-                            total_output_tokens as f64 * pricing.output_cost_per_token
-                        }
-                    } else {
-                        // Under threshold, use normal rate
-                        total_output_tokens as f64 * pricing.output_cost_per_token
-                    }
-                }
-                crate::models::ModelSpecificRules::OpenAI { .. }
-                | crate::models::ModelSpecificRules::None => {
-                    // No tiered pricing, use normal rate for all tokens
-                    total_output_tokens as f64 * pricing.output_cost_per_token
-                }
-            };
-
-            // Cache cost (always at cache read rate)
-            let cache_cost = tokens.cached as f64 * pricing.cache_read_input_token_cost;
-
-            input_cost + output_cost + cache_cost
-        }
-        None => {
-            eprintln!("WARNING: Unknown Gemini model: {model_name}. Using default pricing.",);
-            // Fallback to default Gemini 2.5 Flash pricing (more conservative)
-            calculate_gemini_cost(tokens, "gemini-2.5-flash")
-        }
-    }
+    let total_input_tokens = tokens.input + tokens.thoughts + tokens.tool;
+    
+    let input_cost = calculate_input_cost(model_name, total_input_tokens);
+    let output_cost = calculate_output_cost(model_name, tokens.output);
+    let cache_cost = calculate_cache_cost(model_name, 0, tokens.cached); // Gemini doesn't have cache creation
+    
+    input_cost + output_cost + cache_cost
 }
 
 // JSON session parsing (not JSONL)
@@ -354,31 +285,6 @@ impl Analyzer for GeminiAnalyzer {
         "Gemini CLI"
     }
 
-    fn get_model_abbreviations(&self) -> ModelAbbreviations {
-        let mut abbreviations = ModelAbbreviations::new();
-        abbreviations.add(
-            "gemini-2.5-pro".to_string(),
-            "G2.5P".to_string(),
-            "Gemini 2.5 Pro".to_string(),
-        );
-        abbreviations.add(
-            "gemini-2.5-flash".to_string(),
-            "G2.5F".to_string(),
-            "Gemini 2.5 Flash".to_string(),
-        );
-        abbreviations.add(
-            "gemini-1.5-pro".to_string(),
-            "G1.5P".to_string(),
-            "Gemini 1.5 Pro".to_string(),
-        );
-        abbreviations.add(
-            "gemini-1.5-flash".to_string(),
-            "G1.5F".to_string(),
-            "Gemini 1.5 Flash".to_string(),
-        );
-        abbreviations
-    }
-
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
@@ -436,83 +342,18 @@ impl Analyzer for GeminiAnalyzer {
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
         let sources = self.discover_data_sources()?;
         let messages = self.parse_conversations(sources).await?;
+        let daily_stats = crate::utils::aggregate_by_date(&messages);
 
-        // Group messages by date and calculate daily stats (reusing existing logic)
-        let mut daily_stats: BTreeMap<String, DailyStats> = BTreeMap::new();
-
-        for message in &messages {
-            let date = if let Ok(parsed_time) = DateTime::parse_from_rfc3339(&message.timestamp) {
-                parsed_time.format("%Y-%m-%d").to_string()
-            } else {
-                // Fallback date parsing
-                message
-                    .timestamp
-                    .split('T')
-                    .next()
-                    .unwrap_or("unknown")
-                    .to_string()
-            };
-
-            let daily_stats_entry = daily_stats.entry(date).or_default();
-
-            match message {
-                ConversationMessage {
-                    model: Some(_),
-                    stats,
-                    ..
-                } => {
-                    // Aggregate all stats into daily stats
-                    daily_stats_entry.stats.cost += stats.cost;
-                    daily_stats_entry.stats.input_tokens += stats.input_tokens;
-                    daily_stats_entry.stats.output_tokens += stats.output_tokens;
-                    daily_stats_entry.stats.cache_creation_tokens += stats.cache_creation_tokens;
-                    daily_stats_entry.stats.cache_read_tokens += stats.cache_read_tokens;
-                    daily_stats_entry.stats.cached_tokens += stats.cached_tokens;
-                    daily_stats_entry.stats.tool_calls += stats.tool_calls;
-                    daily_stats_entry.stats.terminal_commands += stats.terminal_commands;
-                    daily_stats_entry.stats.file_searches += stats.file_searches;
-                    daily_stats_entry.stats.file_content_searches += stats.file_content_searches;
-                    daily_stats_entry.stats.files_read += stats.files_read;
-                    daily_stats_entry.stats.files_added += stats.files_added;
-                    daily_stats_entry.stats.files_edited += stats.files_edited;
-                    daily_stats_entry.stats.files_deleted += stats.files_deleted;
-                    daily_stats_entry.stats.lines_read += stats.lines_read;
-                    daily_stats_entry.stats.lines_added += stats.lines_added;
-                    daily_stats_entry.stats.lines_edited += stats.lines_edited;
-                    daily_stats_entry.stats.lines_deleted += stats.lines_deleted;
-                    daily_stats_entry.stats.bytes_read += stats.bytes_read;
-                    daily_stats_entry.stats.bytes_added += stats.bytes_added;
-                    daily_stats_entry.stats.bytes_edited += stats.bytes_edited;
-                    daily_stats_entry.stats.bytes_deleted += stats.bytes_deleted;
-                    daily_stats_entry.stats.todos_created += stats.todos_created;
-                    daily_stats_entry.stats.todos_completed += stats.todos_completed;
-                    daily_stats_entry.stats.todos_in_progress += stats.todos_in_progress;
-                    daily_stats_entry.stats.todo_writes += stats.todo_writes;
-                    daily_stats_entry.stats.todo_reads += stats.todo_reads;
-                    daily_stats_entry.stats.code_lines += stats.code_lines;
-                    daily_stats_entry.stats.docs_lines += stats.docs_lines;
-                    daily_stats_entry.stats.data_lines += stats.data_lines;
-                    daily_stats_entry.stats.media_lines += stats.media_lines;
-                    daily_stats_entry.stats.config_lines += stats.config_lines;
-                    daily_stats_entry.stats.other_lines += stats.other_lines;
-                }
-                ConversationMessage { model: None, .. } => {
-                    daily_stats_entry.conversations += 1;
-                }
-            }
-        }
-
-        let num_conversations = messages
-            .iter()
-            .filter(|m| m.role == MessageRole::User)
-            .count() as u64;
+        let num_conversations = daily_stats
+            .values()
+            .map(|stats| stats.conversations as u64)
+            .sum();
 
         Ok(AgenticCodingToolStats {
             analyzer_name: self.display_name().to_string(),
             daily_stats,
             messages,
             num_conversations,
-            model_abbrs: self.get_model_abbreviations(),
         })
     }
 

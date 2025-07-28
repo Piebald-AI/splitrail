@@ -8,12 +8,11 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
-use crate::models::get_model_pricing;
+use crate::models::calculate_total_cost;
 use crate::types::{
     AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
 use crate::upload::{estimate_lines_added, estimate_lines_deleted};
-use crate::utils::ModelAbbreviations;
 
 pub struct ClaudeCodeAnalyzer;
 
@@ -27,21 +26,6 @@ impl ClaudeCodeAnalyzer {
 impl Analyzer for ClaudeCodeAnalyzer {
     fn display_name(&self) -> &'static str {
         "Claude Code"
-    }
-
-    fn get_model_abbreviations(&self) -> ModelAbbreviations {
-        let mut abbrs = ModelAbbreviations::new();
-        abbrs.add(
-            "claude-sonnet-4-20250514".to_string(),
-            "CS4".to_string(),
-            "Claude Sonnet 4".to_string(),
-        );
-        abbrs.add(
-            "claude-opus-4-20250514".to_string(),
-            "CO4".to_string(),
-            "Claude Opus 4".to_string(),
-        );
-        abbrs
     }
 
     fn get_data_glob_patterns(&self) -> Vec<String> {
@@ -116,7 +100,6 @@ impl Analyzer for ClaudeCodeAnalyzer {
         Ok(AgenticCodingToolStats {
             daily_stats,
             num_conversations,
-            model_abbrs: self.get_model_abbreviations(),
             messages,
             analyzer_name: self.display_name().to_string(),
         })
@@ -468,18 +451,13 @@ fn extract_tool_stats(data: &ClaudeCodeEntry) -> Stats {
 }
 
 fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
-    match get_model_pricing().get(model_name) {
-        Some(pricing) => {
-            usage.input_tokens as f64 * pricing.input_cost_per_token
-                + usage.output_tokens as f64 * pricing.output_cost_per_token
-                + usage.cache_creation_tokens as f64 * pricing.cache_creation_input_token_cost
-                + usage.cache_read_tokens as f64 * pricing.cache_read_input_token_cost
-        }
-        None => {
-            println!("WARNING: Unknown model name: {model_name}. Ignoring this model's usage.",);
-            0.0
-        }
-    }
+    calculate_total_cost(
+        model_name,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_creation_tokens,
+        usage.cache_read_tokens,
+    )
 }
 
 fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {

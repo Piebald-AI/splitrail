@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::utils::ModelAbbreviations;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,14 +43,6 @@ pub struct DailyStats {
     pub max_flow_length_seconds: u64, // Longest autonomous AI operation in seconds
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelPricing {
-    pub input_cost_per_token: f64,
-    pub output_cost_per_token: f64,
-    pub cache_creation_input_token_cost: f64,
-    pub cache_read_input_token_cost: f64,
-    pub model_rules: crate::models::ModelSpecificRules,
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,7 +124,6 @@ impl FileCategory {
 pub struct AgenticCodingToolStats {
     pub daily_stats: BTreeMap<String, DailyStats>,
     pub num_conversations: u64,
-    pub model_abbrs: ModelAbbreviations,
     pub messages: Vec<ConversationMessage>,
     pub analyzer_name: String,
 }

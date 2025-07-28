@@ -22,6 +22,7 @@ notify = "8.1"
 notify-types = "2.0"
 sha2 = "0.10"
 hex = "0.4"
+phf = { version = "0.11", features = ["macros"] }
 
 [dependencies.clap]
 version = "4.5.41"

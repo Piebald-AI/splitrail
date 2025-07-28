@@ -1,420 +1,779 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::OnceLock;
+use phf::phf_map;
 
-use crate::types::ModelPricing;
-
+/// Represents different pricing tier structures for various models
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ModelSpecificRules {
+pub struct PricingTier {
+    /// Maximum tokens for this tier (None means unlimited - highest tier)
+    pub max_tokens: Option<u64>,
+    /// Input cost per 1M tokens
+    pub input_per_1m: f64,
+    /// Output cost per 1M tokens  
+    pub output_per_1m: f64,
+}
+
+/// Different pricing structures supported by various model providers
+#[derive(Debug, Clone)]
+pub enum PricingStructure {
+    /// Flat rate pricing (same cost regardless of token count)
+    Flat {
+        input_per_1m: f64,
+        output_per_1m: f64,
+    },
+    /// Tiered pricing (different costs based on token thresholds)
+    Tiered {
+        tiers: &'static [PricingTier],
+    },
+}
+
+/// Caching tier for models with tiered cache pricing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachingTier {
+    /// Maximum tokens for this caching tier (None means unlimited)
+    pub max_tokens: Option<u64>,
+    /// Cached input cost per 1M tokens
+    pub cached_input_per_1m: f64,
+}
+
+/// Different caching support models
+#[derive(Debug, Clone)]
+pub enum CachingSupport {
+    /// Model does not support caching
     None,
+    /// OpenAI-style caching (simple cached input pricing)
     OpenAI {
-        // OpenAI only has cached input pricing, no cache creation cost
-        cached_input_only: bool,
+        cached_input_per_1m: f64,
     },
-    Gemini {
-        high_volume_input_cost_per_token: Option<f64>,
-        high_volume_output_cost_per_token: Option<f64>,
-        high_volume_threshold: u64, // Default to 200k tokens
-        // Gemini's context caching pricing (per 1M tokens)
-        context_caching_less_200k: Option<f64>,
-        context_caching_greater_200k: Option<f64>,
+    /// Anthropic-style caching (separate write and read costs)
+    Anthropic {
+        cache_write_per_1m: f64,
+        cache_read_per_1m: f64,
+    },
+    /// Google-style caching (may have tiers like input/output)
+    Google {
+        tiers: &'static [CachingTier],
     },
 }
 
-static MODEL_PRICING: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
-
-fn init_model_pricing() -> HashMap<String, ModelPricing> {
-    let mut m = HashMap::new();
-
-    // Claude.
-    m.insert("claude-sonnet-4-20250514".to_string(), ModelPricing {
-        input_cost_per_token: 0.000003,
-        output_cost_per_token: 0.000015,
-        cache_creation_input_token_cost: 0.00000375,
-        cache_read_input_token_cost: 0.0000003,
-        model_rules: ModelSpecificRules::None,
-    });
-    m.insert("claude-opus-4-20250514".to_string(), ModelPricing {
-        input_cost_per_token: 0.000015,
-        output_cost_per_token: 0.000075,
-        cache_creation_input_token_cost: 0.00001875,
-        cache_read_input_token_cost: 0.0000015,
-        model_rules: ModelSpecificRules::None,
-    });
-
-    // OpenAI.
-
-    // GPT-4.1 series
-    m.insert("gpt-4.1-2025-04-14".to_string(), ModelPricing {
-        input_cost_per_token: 0.000002,      // $2.00.
-        output_cost_per_token: 0.000008,     // $8.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000005, // $0.50.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4.1-mini-2025-04-14".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000004,     // $0.40.
-        output_cost_per_token: 0.0000016,    // $1.60.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000001, // $0.10.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4.1-nano-2025-04-14".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000001,     // $0.10.
-        output_cost_per_token: 0.0000004,    // $0.40.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.000000025, // $0.025.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4.5-preview-2025-02-27".to_string(), ModelPricing {
-        input_cost_per_token: 0.000075,      // $75.00.
-        output_cost_per_token: 0.00015,      // $150.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000375, // $37.50.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-
-    // GPT-4o series
-    m.insert("gpt-4o-2024-08-06".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000025,     // $2.50.
-        output_cost_per_token: 0.00001,      // $10.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.00000125, // $1.25.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4o".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000025, // $2.50.
-        output_cost_per_token: 0.00001, // $10.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.00000125, // $1.25.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4o-audio-preview-2024-12-17".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000025,     // $2.50.
-        output_cost_per_token: 0.00001,      // $10.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000025, // No specific cached rate, using input rate.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4o-realtime-preview-2025-06-03".to_string(), ModelPricing {
-        input_cost_per_token: 0.000005,      // $5.00.
-        output_cost_per_token: 0.00002,      // $20.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000025, // $2.50.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4o-mini-2024-07-18".to_string(), ModelPricing {
-        input_cost_per_token: 0.00000015,    // $0.15.
-        output_cost_per_token: 0.0000006,    // $0.60.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.000000075, // $0.075.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4o-mini".to_string(), ModelPricing {
-        input_cost_per_token: 0.00000015,
-        output_cost_per_token: 0.0000006,
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.000000075, // $0.075.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4o-mini-audio-preview-2024-12-17".to_string(), ModelPricing {
-        input_cost_per_token: 0.00000015,    // $0.15.
-        output_cost_per_token: 0.0000006,    // $0.60.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.00000015, // No specific cached rate, using input rate.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4o-mini-realtime-preview-2024-12-17".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000006,     // $0.60.
-        output_cost_per_token: 0.0000024,    // $2.40.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000003, // $0.30.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4o-search-preview-2025-03-11".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000025,     // $2.50.
-        output_cost_per_token: 0.00001,      // $10.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000025, // No specific cached rate, using input rate.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("gpt-4o-mini-search-preview-2025-03-11".to_string(), ModelPricing {
-        input_cost_per_token: 0.00000015,    // $0.15.
-        output_cost_per_token: 0.0000006,    // $0.60.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.00000015, // No specific cached rate, using input rate.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-
-    // o1 series
-    m.insert("o1-2024-12-17".to_string(), ModelPricing {
-        input_cost_per_token: 0.000015,      // $15.00.
-        output_cost_per_token: 0.00006,      // $60.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000075, // $7.50.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("o1".to_string(), ModelPricing {
-        input_cost_per_token: 0.000015,  // $15.00.
-        output_cost_per_token: 0.00006,  // $60.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000075, // $7.50.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("o1-pro-2025-03-19".to_string(), ModelPricing {
-        input_cost_per_token: 0.00015,       // $150.00.
-        output_cost_per_token: 0.0006,       // $600.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.00015, // No specific cached rate, using input rate.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("o1-mini-2024-09-12".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000011,     // $1.10.
-        output_cost_per_token: 0.0000044,    // $4.40.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.00000055, // $0.55.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("o1-mini".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000011,   // $1.10.
-        output_cost_per_token: 0.0000044,  // $4.40.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.00000055, // $0.55.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-
-    // o3 series
-    m.insert("o3-pro-2025-06-10".to_string(), ModelPricing {
-        input_cost_per_token: 0.00002,       // $20.00.
-        output_cost_per_token: 0.00008,      // $80.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.00002, // No specific cached rate, using input rate.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("o3-2025-04-16".to_string(), ModelPricing {
-        input_cost_per_token: 0.000002,      // $2.00.
-        output_cost_per_token: 0.000008,     // $8.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000005, // $0.50.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("o3-deep-research-2025-06-26".to_string(), ModelPricing {
-        input_cost_per_token: 0.00001,       // $10.00.
-        output_cost_per_token: 0.00004,      // $40.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000025, // $2.50.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("o3-mini-2025-01-31".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000011,     // $1.10.
-        output_cost_per_token: 0.0000044,    // $4.40.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.00000055, // $0.55.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-
-    // o4 series
-    m.insert("o4-mini-2025-04-16".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000011,     // $1.10.
-        output_cost_per_token: 0.0000044,    // $4.40.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.000000275, // $0.275.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-    m.insert("o4-mini-deep-research-2025-06-26".to_string(), ModelPricing {
-        input_cost_per_token: 0.000002,      // $2.00.
-        output_cost_per_token: 0.000008,     // $8.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.0000005, // $0.50.
-        model_rules: ModelSpecificRules::OpenAI { cached_input_only: true },
-    });
-
-    // Codex models
-    m.insert("codex-mini-latest".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000015,     // $1.50.
-        output_cost_per_token: 0.000006,     // $6.00.
-        cache_creation_input_token_cost: 0.0, // Outwardly, OpenAI doesn't do cache creation.
-        cache_read_input_token_cost: 0.000000375, // $0.375.
-        model_rules: ModelSpecificRules::None,
-    });
-
-    // Gemini models - Updated pricing from provided JSON data
-    m.insert("gemini-2.5-pro".to_string(), ModelPricing {
-        input_cost_per_token: 0.00000125,    // $1.25 per 1M
-        output_cost_per_token: 0.000003,     // $3.00 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.00000125),  // $1.25 per 1M for >200k
-            high_volume_output_cost_per_token: Some(0.000003),   // $3.00 per 1M for >200k
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: Some(0.00000031),         // $0.31 per 1M for <200k
-            context_caching_greater_200k: Some(0.000000625),     // $0.625 per 1M for >200k
-        },
-    });
-
-    m.insert("gemini-2.5-flash".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000003,     // $0.30 per 1M
-        output_cost_per_token: 0.0000015,    // $1.50 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.0000003),   // Same price for all volumes
-            high_volume_output_cost_per_token: Some(0.0000015),  // Same price for all volumes
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: Some(0.000000075),        // $0.075 per 1M
-            context_caching_greater_200k: Some(0.000000075),     // $0.075 per 1M (same)
-        },
-    });
-
-    m.insert("gemini-2.5-flash-lite-preview".to_string(), ModelPricing {
-        input_cost_per_token: 0.000000075,   // $0.075 per 1M
-        output_cost_per_token: 0.0000003,    // $0.30 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.000000075), // Same price for all volumes
-            high_volume_output_cost_per_token: Some(0.0000003),  // Same price for all volumes
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: Some(0.000000025),        // $0.025 per 1M
-            context_caching_greater_200k: Some(0.000000025),     // $0.025 per 1M (same)
-        },
-    });
-
-    m.insert("gemini-2.5-flash-native-audio".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000005,     // $0.50 per 1M
-        output_cost_per_token: 0.000002,     // $2.00 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.0000005),  // Same pricing - no tiered pricing in JSON
-            high_volume_output_cost_per_token: Some(0.000002),  // Same pricing - no tiered pricing in JSON
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: None,     // No context caching for this model
-            context_caching_greater_200k: None,  // No context caching for this model
-        },
-    });
-
-    m.insert("gemini-2.5-flash-preview-tts".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000005,     // $0.50 per 1M
-        output_cost_per_token: 0.00001,      // $10.00 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.0000005),  // Same pricing - no tiered pricing in JSON
-            high_volume_output_cost_per_token: Some(0.00001),   // Same pricing - no tiered pricing in JSON
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: None,     // No context caching for this model
-            context_caching_greater_200k: None,  // No context caching for this model
-        },
-    });
-
-    m.insert("gemini-2.5-pro-preview-tts".to_string(), ModelPricing {
-        input_cost_per_token: 0.000001,      // $1.00 per 1M
-        output_cost_per_token: 0.00002,      // $20.00 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.000001),   // Same pricing - no tiered pricing in JSON
-            high_volume_output_cost_per_token: Some(0.00002),   // Same pricing - no tiered pricing in JSON
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: None,     // No context caching for this model
-            context_caching_greater_200k: None,  // No context caching for this model
-        },
-    });
-
-    m.insert("gemini-2.0-flash".to_string(), ModelPricing {
-        input_cost_per_token: 0.000000075,   // $0.075 per 1M
-        output_cost_per_token: 0.0000003,    // $0.30 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.000000075), // Same pricing for all volumes
-            high_volume_output_cost_per_token: Some(0.0000003),  // Same pricing for all volumes
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: Some(0.000000025),        // $0.025 per 1M
-            context_caching_greater_200k: Some(0.000000025),     // $0.025 per 1M (same)
-        },
-    });
-
-    m.insert("gemini-2.0-flash-lite".to_string(), ModelPricing {
-        input_cost_per_token: 0.000000075,   // $0.075 per 1M
-        output_cost_per_token: 0.0000003,    // $0.30 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.000000075), // Same pricing for all volumes
-            high_volume_output_cost_per_token: Some(0.0000003),  // Same pricing for all volumes
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: None,     // No context caching for this model
-            context_caching_greater_200k: None,  // No context caching for this model
-        },
-    });
-
-    // Free Google models.  Gemini 1 and Gemma.
-    m.insert("gemma-3".to_string(), ModelPricing {
-        input_cost_per_token: 0.0,           // Free
-        output_cost_per_token: 0.0,          // Free
-        cache_creation_input_token_cost: 0.0,
-        cache_read_input_token_cost: 0.0,
-        model_rules: ModelSpecificRules::None,
-    });
-
-    m.insert("gemma-3n".to_string(), ModelPricing {
-        input_cost_per_token: 0.0,           // Free
-        output_cost_per_token: 0.0,          // Free
-        cache_creation_input_token_cost: 0.0,
-        cache_read_input_token_cost: 0.0,
-        model_rules: ModelSpecificRules::None,
-    });
-
-    // Older Gemini models.
-
-    m.insert("gemini-1.5-flash".to_string(), ModelPricing {
-        input_cost_per_token: 0.000000075,   // $0.075 per 1M
-        output_cost_per_token: 0.0000003,    // $0.30 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.00000015), // $0.15 per 1M for >200k
-            high_volume_output_cost_per_token: Some(0.0000006), // $0.60 per 1M for >200k
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: Some(0.00000001875),     // $0.01875 per 1M for <200k
-            context_caching_greater_200k: Some(0.0000000375),   // $0.0375 per 1M for >200k
-        },
-    });
-
-    m.insert("gemini-1.5-flash-8b".to_string(), ModelPricing {
-        input_cost_per_token: 0.0000000375,  // $0.0375 per 1M
-        output_cost_per_token: 0.00000015,   // $0.15 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.000000075), // $0.075 per 1M for >200k
-            high_volume_output_cost_per_token: Some(0.0000003),  // $0.30 per 1M for >200k
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: Some(0.00000001),         // $0.01 per 1M for <200k
-            context_caching_greater_200k: Some(0.00000002),      // $0.02 per 1M for >200k
-        },
-    });
-
-    m.insert("gemini-1.5-pro".to_string(), ModelPricing {
-        input_cost_per_token: 0.00000125,    // $1.25 per 1M
-        output_cost_per_token: 0.000005,     // $5.00 per 1M
-        cache_creation_input_token_cost: 0.0, // Not applicable for Gemini
-        cache_read_input_token_cost: 0.0,     // Not applicable for Gemini
-        model_rules: ModelSpecificRules::Gemini {
-            high_volume_input_cost_per_token: Some(0.0000025),  // $2.5 per 1M for >200k
-            high_volume_output_cost_per_token: Some(0.00001),   // $10.0 per 1M for >200k
-            high_volume_threshold: 200_000,
-            context_caching_less_200k: Some(0.0000003125),      // $0.3125 per 1M for <200k
-            context_caching_greater_200k: Some(0.000000625),    // $0.625 per 1M for >200k
-        },
-    });
-
-    m
+/// Complete model information with all pricing details
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    /// Canonical model name
+    pub canonical_name: &'static str,
+    /// Alternative names and versions for this model
+    pub aliases: &'static [&'static str],
+    /// Pricing structure (flat or tiered)
+    pub pricing: PricingStructure,
+    /// Caching support and pricing
+    pub caching: CachingSupport,
 }
 
-pub fn get_model_pricing() -> &'static HashMap<String, ModelPricing> {
-    MODEL_PRICING.get_or_init(init_model_pricing)
+
+static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
+    // OpenAI Models
+    "o4-mini" => ModelInfo {
+        canonical_name: "o4-mini",
+        aliases: &["o4-mini-2025-04-16"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.1,
+            output_per_1m: 4.4,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.275,
+        },
+    },
+    "o3" => ModelInfo {
+        canonical_name: "o3",
+        aliases: &["o3-2025-04-16"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 2.0,
+            output_per_1m: 8.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.5,
+        },
+    },
+    "o3-pro" => ModelInfo {
+        canonical_name: "o3-pro",
+        aliases: &["o3-pro-2025-06-10"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 20.0,
+            output_per_1m: 80.0,
+        },
+        caching: CachingSupport::None,
+    },
+    "o3-mini" => ModelInfo {
+        canonical_name: "o3-mini",
+        aliases: &["o3-mini-2025-01-31"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.1,
+            output_per_1m: 4.4,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.55,
+        },
+    },
+    "o1" => ModelInfo {
+        canonical_name: "o1",
+        aliases: &["o1-2024-12-17"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 15.0,
+            output_per_1m: 60.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 7.5,
+        },
+    },
+    "o1-preview" => ModelInfo {
+        canonical_name: "o1-preview",
+        aliases: &["o1-preview-2024-09-12"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 15.0,
+            output_per_1m: 60.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 7.5,
+        },
+    },
+    "o1-mini" => ModelInfo {
+        canonical_name: "o1-mini",
+        aliases: &["o1-mini-2024-09-12"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.1,
+            output_per_1m: 4.4,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.55,
+        },
+    },
+    "o1-pro" => ModelInfo {
+        canonical_name: "o1-pro",
+        aliases: &["o1-pro-2025-03-19"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 150.0,
+            output_per_1m: 600.0,
+        },
+        caching: CachingSupport::None,
+    },
+    "gpt-4.1" => ModelInfo {
+        canonical_name: "gpt-4.1",
+        aliases: &["gpt-4.1-2025-04-14"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 2.0,
+            output_per_1m: 8.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.5,
+        },
+    },
+    "gpt-4o" => ModelInfo {
+        canonical_name: "gpt-4o",
+        aliases: &["gpt-4o-2024-11-20", "gpt-4o-2024-08-06"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 2.5,
+            output_per_1m: 10.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 1.25,
+        },
+    },
+    "gpt-4o-2024-05-13" => ModelInfo {
+        canonical_name: "gpt-4o-2024-05-13",
+        aliases: &[],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 5.0,
+            output_per_1m: 10.0,
+        },
+        caching: CachingSupport::None,
+    },
+    "gpt-4.1-mini" => ModelInfo {
+        canonical_name: "gpt-4.1-mini",
+        aliases: &["gpt-4.1-mini-2025-04-14"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.4,
+            output_per_1m: 1.6,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.1,
+        },
+    },
+    "gpt-4.1-nano" => ModelInfo {
+        canonical_name: "gpt-4.1-nano",
+        aliases: &["gpt-4.1-nano-2025-04-14"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.1,
+            output_per_1m: 0.4,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.025,
+        },
+    },
+    "gpt-4o-mini" => ModelInfo {
+        canonical_name: "gpt-4o-mini",
+        aliases: &["gpt-4o-mini-2024-07-18"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.15,
+            output_per_1m: 0.6,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.075,
+        },
+    },
+    "codex-mini-latest" => ModelInfo {
+        canonical_name: "codex-mini-latest",
+        aliases: &[],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.5,
+            output_per_1m: 6.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.375,
+        },
+    },
+    "gpt-4-turbo" => ModelInfo {
+        canonical_name: "gpt-4-turbo",
+        aliases: &["gpt-4-turbo-2024-04-09"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 10.0,
+            output_per_1m: 30.0,
+        },
+        caching: CachingSupport::None,
+    },
+
+    // Anthropic Models
+    "claude-opus-4" => ModelInfo {
+        canonical_name: "claude-opus-4",
+        aliases: &["claude-opus-4-20250514", "claude-opus-4-0"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 15.0,
+            output_per_1m: 75.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 18.75,
+            cache_read_per_1m: 1.5,
+        },
+    },
+    "claude-sonnet-4" => ModelInfo {
+        canonical_name: "claude-sonnet-4",
+        aliases: &["claude-sonnet-4-20250514", "claude-sonnet-4-0"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 3.0,
+            output_per_1m: 15.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 3.75,
+            cache_read_per_1m: 0.3,
+        },
+    },
+    "claude-3.7-sonnet" => ModelInfo {
+        canonical_name: "claude-3.7-sonnet",
+        aliases: &["claude-3-7-sonnet-20250219", "claude-3-7-sonnet-latest"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 3.0,
+            output_per_1m: 15.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 3.75,
+            cache_read_per_1m: 0.3,
+        },
+    },
+    "claude-3.5-sonnet" => ModelInfo {
+        canonical_name: "claude-3.5-sonnet",
+        aliases: &[
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-sonnet-latest",
+            "claude-3-5-sonnet-20240620",
+        ],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 3.0,
+            output_per_1m: 15.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 3.75,
+            cache_read_per_1m: 0.3,
+        },
+    },
+    "claude-3.5-haiku" => ModelInfo {
+        canonical_name: "claude-3.5-haiku",
+        aliases: &["claude-3-5-haiku-20241022", "claude-3-5-haiku-latest"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.8,
+            output_per_1m: 4.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 1.0,
+            cache_read_per_1m: 0.08,
+        },
+    },
+    "claude-3-opus" => ModelInfo {
+        canonical_name: "claude-3-opus",
+        aliases: &["claude-3-opus-20240229"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 15.0,
+            output_per_1m: 75.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 18.75,
+            cache_read_per_1m: 1.5,
+        },
+    },
+    "claude-3-haiku" => ModelInfo {
+        canonical_name: "claude-3-haiku",
+        aliases: &["claude-3-haiku-20240307"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.25,
+            output_per_1m: 1.25,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 0.3,
+            cache_read_per_1m: 0.03,
+        },
+    },
+
+    // Google Models
+    "gemini-2.5-pro" => ModelInfo {
+        canonical_name: "gemini-2.5-pro",
+        aliases: &[
+            "gemini-2.5-pro-preview-06-05",
+            "gemini-2.5-pro-preview-05-06",
+            "gemini-2.5-pro-preview-03-25",
+        ],
+        pricing: PricingStructure::Tiered {
+            tiers: &[
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 1.25,
+                    output_per_1m: 10.0,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.5,
+                    output_per_1m: 15.0,
+                },
+            ],
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.31,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.625,
+                },
+            ],
+        },
+    },
+    "gemini-2.5-flash" => ModelInfo {
+        canonical_name: "gemini-2.5-flash",
+        aliases: &[
+            "gemini-2.5-flash-preview-05-20",
+            "gemini-2.5-flash-preview-04-17",
+        ],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.3,
+            output_per_1m: 2.5,
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.075,
+                },
+            ],
+        },
+    },
+    "gemini-2.5-flash-lite" => ModelInfo {
+        canonical_name: "gemini-2.5-flash-lite",
+        aliases: &["gemini-2.5-flash-lite-06-17"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.1,
+            output_per_1m: 0.4,
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.025,
+                },
+            ],
+        },
+    },
+    "gemini-2.0-pro-exp-02-05" => ModelInfo {
+        canonical_name: "gemini-2.0-pro-exp-02-05",
+        aliases: &["gemini-exp-1206"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.0,
+            output_per_1m: 0.0,
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.0,
+                },
+            ],
+        },
+    },
+    "gemini-2.0-flash" => ModelInfo {
+        canonical_name: "gemini-2.0-flash",
+        aliases: &["gemini-2.0-flash-001", "gemini-2.0-flash-exp"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.1,
+            output_per_1m: 0.4,
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.025,
+                },
+            ],
+        },
+    },
+    "gemini-2.0-flash-lite" => ModelInfo {
+        canonical_name: "gemini-2.0-flash-lite",
+        aliases: &["gemini-2.0-flash-lite-001"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.075,
+            output_per_1m: 0.3,
+        },
+        caching: CachingSupport::None,
+    },
+    "gemini-1.5-flash" => ModelInfo {
+        canonical_name: "gemini-1.5-flash",
+        aliases: &[
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-flash-001",
+            "gemini-1.5-flash-002",
+        ],
+        pricing: PricingStructure::Tiered {
+            tiers: &[
+                PricingTier {
+                    max_tokens: Some(128_000),
+                    input_per_1m: 0.075,
+                    output_per_1m: 0.3,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 0.15,
+                    output_per_1m: 0.6,
+                },
+            ],
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: Some(128_000),
+                    cached_input_per_1m: 0.01875,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.0375,
+                },
+            ],
+        },
+    },
+    "gemini-1.5-flash-8b" => ModelInfo {
+        canonical_name: "gemini-1.5-flash-8b",
+        aliases: &[
+            "gemini-1.5-flash-8b-latest",
+            "gemini-1.5-flash-8b-001",
+            "gemini-1.5-flash-8b-exp-0924",
+            "gemini-1.5-flash-8b-exp-0827",
+        ],
+        pricing: PricingStructure::Tiered {
+            tiers: &[
+                PricingTier {
+                    max_tokens: Some(128_000),
+                    input_per_1m: 0.0375,
+                    output_per_1m: 0.15,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 0.075,
+                    output_per_1m: 0.3,
+                },
+            ],
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: Some(128_000),
+                    cached_input_per_1m: 0.01,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.02,
+                },
+            ],
+        },
+    },
+    "gemini-1.5-pro" => ModelInfo {
+        canonical_name: "gemini-1.5-pro",
+        aliases: &[
+            "gemini-1.5-pro-latest",
+            "gemini-1.5-pro-001",
+            "gemini-1.5-pro-002",
+            "gemini-1.5-pro-exp-0827",
+            "gemini-1.5-pro-exp-0801",
+        ],
+        pricing: PricingStructure::Tiered {
+            tiers: &[
+                PricingTier {
+                    max_tokens: Some(128_000),
+                    input_per_1m: 1.25,
+                    output_per_1m: 5.0,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.5,
+                    output_per_1m: 10.0,
+                },
+            ],
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: Some(128_000),
+                    cached_input_per_1m: 0.3125,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.625,
+                },
+            ],
+        },
+    },
+};
+
+static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
+    // OpenAI aliases
+    "o4-mini" => "o4-mini",
+    "o4-mini-2025-04-16" => "o4-mini",
+    "o3" => "o3",
+    "o3-2025-04-16" => "o3",
+    "o3-pro" => "o3-pro",
+    "o3-pro-2025-06-10" => "o3-pro",
+    "o3-mini" => "o3-mini",
+    "o3-mini-2025-01-31" => "o3-mini",
+    "o1" => "o1",
+    "o1-2024-12-17" => "o1",
+    "o1-preview" => "o1-preview",
+    "o1-preview-2024-09-12" => "o1-preview",
+    "o1-mini" => "o1-mini",
+    "o1-mini-2024-09-12" => "o1-mini",
+    "o1-pro" => "o1-pro",
+    "o1-pro-2025-03-19" => "o1-pro",
+    "gpt-4.1" => "gpt-4.1",
+    "gpt-4.1-2025-04-14" => "gpt-4.1",
+    "gpt-4o" => "gpt-4o",
+    "gpt-4o-2024-11-20" => "gpt-4o",
+    "gpt-4o-2024-08-06" => "gpt-4o",
+    "gpt-4o-2024-05-13" => "gpt-4o-2024-05-13",
+    "gpt-4.1-mini" => "gpt-4.1-mini",
+    "gpt-4.1-mini-2025-04-14" => "gpt-4.1-mini",
+    "gpt-4.1-nano" => "gpt-4.1-nano",
+    "gpt-4.1-nano-2025-04-14" => "gpt-4.1-nano",
+    "gpt-4o-mini" => "gpt-4o-mini",
+    "gpt-4o-mini-2024-07-18" => "gpt-4o-mini",
+    "codex-mini-latest" => "codex-mini-latest",
+    "gpt-4-turbo" => "gpt-4-turbo",
+    "gpt-4-turbo-2024-04-09" => "gpt-4-turbo",
+
+    // Anthropic aliases
+    "claude-opus-4" => "claude-opus-4",
+    "claude-opus-4-20250514" => "claude-opus-4",
+    "claude-opus-4-0" => "claude-opus-4",
+    "claude-sonnet-4" => "claude-sonnet-4",
+    "claude-sonnet-4-20250514" => "claude-sonnet-4",
+    "claude-sonnet-4-0" => "claude-sonnet-4",
+    "claude-3.7-sonnet" => "claude-3.7-sonnet",
+    "claude-3-7-sonnet-20250219" => "claude-3.7-sonnet",
+    "claude-3-7-sonnet-latest" => "claude-3.7-sonnet",
+    "claude-3.5-sonnet" => "claude-3.5-sonnet",
+    "claude-3-5-sonnet-20241022" => "claude-3.5-sonnet",
+    "claude-3-5-sonnet-latest" => "claude-3.5-sonnet",
+    "claude-3-5-sonnet-20240620" => "claude-3.5-sonnet",
+    "claude-3.5-haiku" => "claude-3.5-haiku",
+    "claude-3-5-haiku-20241022" => "claude-3.5-haiku",
+    "claude-3-5-haiku-latest" => "claude-3.5-haiku",
+    "claude-3-opus" => "claude-3-opus",
+    "claude-3-opus-20240229" => "claude-3-opus",
+    "claude-3-haiku" => "claude-3-haiku",
+    "claude-3-haiku-20240307" => "claude-3-haiku",
+
+    // Google aliases
+    "gemini-2.5-pro" => "gemini-2.5-pro",
+    "gemini-2.5-pro-preview-06-05" => "gemini-2.5-pro",
+    "gemini-2.5-pro-preview-05-06" => "gemini-2.5-pro",
+    "gemini-2.5-pro-preview-03-25" => "gemini-2.5-pro",
+    "gemini-2.5-flash" => "gemini-2.5-flash",
+    "gemini-2.5-flash-preview-05-20" => "gemini-2.5-flash",
+    "gemini-2.5-flash-preview-04-17" => "gemini-2.5-flash",
+    "gemini-2.5-flash-lite" => "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-lite-06-17" => "gemini-2.5-flash-lite",
+    "gemini-2.0-pro-exp-02-05" => "gemini-2.0-pro-exp-02-05",
+    "gemini-exp-1206" => "gemini-2.0-pro-exp-02-05",
+    "gemini-2.0-flash" => "gemini-2.0-flash",
+    "gemini-2.0-flash-001" => "gemini-2.0-flash",
+    "gemini-2.0-flash-exp" => "gemini-2.0-flash",
+    "gemini-2.0-flash-lite" => "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-lite-001" => "gemini-2.0-flash-lite",
+    "gemini-1.5-flash" => "gemini-1.5-flash",
+    "gemini-1.5-flash-latest" => "gemini-1.5-flash",
+    "gemini-1.5-flash-001" => "gemini-1.5-flash",
+    "gemini-1.5-flash-002" => "gemini-1.5-flash",
+    "gemini-1.5-flash-8b" => "gemini-1.5-flash-8b",
+    "gemini-1.5-flash-8b-latest" => "gemini-1.5-flash-8b",
+    "gemini-1.5-flash-8b-001" => "gemini-1.5-flash-8b",
+    "gemini-1.5-flash-8b-exp-0924" => "gemini-1.5-flash-8b",
+    "gemini-1.5-flash-8b-exp-0827" => "gemini-1.5-flash-8b",
+    "gemini-1.5-pro" => "gemini-1.5-pro",
+    "gemini-1.5-pro-latest" => "gemini-1.5-pro",
+    "gemini-1.5-pro-001" => "gemini-1.5-pro",
+    "gemini-1.5-pro-002" => "gemini-1.5-pro",
+    "gemini-1.5-pro-exp-0827" => "gemini-1.5-pro",
+    "gemini-1.5-pro-exp-0801" => "gemini-1.5-pro",
+};
+
+
+/// Get model info by any valid name (canonical or alias)
+pub fn get_model_info(model_name: &str) -> Option<&ModelInfo> {
+    // First try direct lookup in model index
+    if let Some(model_info) = MODEL_INDEX.get(model_name) {
+        return Some(model_info);
+    }
+    
+    // Then try alias lookup
+    if let Some(&canonical_name) = MODEL_ALIASES.get(model_name) {
+        return MODEL_INDEX.get(canonical_name);
+    }
+    
+    None
+}
+
+/// Calculate cost for input tokens using the model's pricing structure
+pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
+    match get_model_info(model_name) {
+        Some(model_info) => {
+            match &model_info.pricing {
+                PricingStructure::Flat { input_per_1m, .. } => {
+                    (input_tokens as f64 / 1_000_000.0) * input_per_1m
+                }
+                PricingStructure::Tiered { tiers } => {
+                    calculate_tiered_cost(input_tokens, tiers, true)
+                }
+            }
+        }
+        None => {
+            eprintln!("WARNING: Unknown model: {model_name}. Using fallback pricing.");
+            (input_tokens as f64 / 1_000_000.0) * 1.0 // $1 per 1M tokens fallback
+        }
+    }
+}
+
+/// Calculate cost for output tokens using the model's pricing structure
+pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
+    match get_model_info(model_name) {
+        Some(model_info) => {
+            match &model_info.pricing {
+                PricingStructure::Flat { output_per_1m, .. } => {
+                    (output_tokens as f64 / 1_000_000.0) * output_per_1m
+                }
+                PricingStructure::Tiered { tiers } => {
+                    calculate_tiered_cost(output_tokens, tiers, false)
+                }
+            }
+        }
+        None => {
+            eprintln!("WARNING: Unknown model: {model_name}. Using fallback pricing.");
+            (output_tokens as f64 / 1_000_000.0) * 5.0 // $5 per 1M tokens fallback
+        }
+    }
+}
+
+/// Calculate cost for cached tokens
+pub fn calculate_cache_cost(model_name: &str, cache_creation_tokens: u64, cache_read_tokens: u64) -> f64 {
+    match get_model_info(model_name) {
+        Some(model_info) => {
+            match &model_info.caching {
+                CachingSupport::None => 0.0,
+                CachingSupport::OpenAI { cached_input_per_1m } => {
+                    // OpenAI only has cached input cost, no creation cost
+                    (cache_read_tokens as f64 / 1_000_000.0) * cached_input_per_1m
+                }
+                CachingSupport::Anthropic { cache_write_per_1m, cache_read_per_1m } => {
+                    let creation_cost = (cache_creation_tokens as f64 / 1_000_000.0) * cache_write_per_1m;
+                    let read_cost = (cache_read_tokens as f64 / 1_000_000.0) * cache_read_per_1m;
+                    creation_cost + read_cost
+                }
+                CachingSupport::Google { tiers } => {
+                    // Google only has read cost, calculate based on tiers
+                    calculate_tiered_cache_cost(cache_read_tokens, tiers)
+                }
+            }
+        }
+        None => {
+            eprintln!("WARNING: Unknown model: {model_name}. Using fallback cache pricing.");
+            (cache_read_tokens as f64 / 1_000_000.0) * 0.1 // $0.1 per 1M tokens fallback
+        }
+    }
+}
+
+/// Calculate total cost for a model usage
+pub fn calculate_total_cost(
+    model_name: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+) -> f64 {
+    let input_cost = calculate_input_cost(model_name, input_tokens);
+    let output_cost = calculate_output_cost(model_name, output_tokens);
+    let cache_cost = calculate_cache_cost(model_name, cache_creation_tokens, cache_read_tokens);
+    
+    input_cost + output_cost + cache_cost
+}
+
+fn calculate_tiered_cost(tokens: u64, tiers: &[PricingTier], is_input: bool) -> f64 {
+    let mut total_cost = 0.0;
+    let mut remaining_tokens = tokens;
+    
+    for tier in tiers {
+        if remaining_tokens == 0 {
+            break;
+        }
+        
+        let tier_limit = tier.max_tokens.unwrap_or(u64::MAX);
+        let tokens_in_tier = remaining_tokens.min(tier_limit);
+        
+        let rate = if is_input { tier.input_per_1m } else { tier.output_per_1m };
+        total_cost += (tokens_in_tier as f64 / 1_000_000.0) * rate;
+        
+        remaining_tokens = remaining_tokens.saturating_sub(tokens_in_tier);
+    }
+    
+    total_cost
+}
+
+fn calculate_tiered_cache_cost(tokens: u64, tiers: &[CachingTier]) -> f64 {
+    let mut total_cost = 0.0;
+    let mut remaining_tokens = tokens;
+    
+    for tier in tiers {
+        if remaining_tokens == 0 {
+            break;
+        }
+        
+        let tier_limit = tier.max_tokens.unwrap_or(u64::MAX);
+        let tokens_in_tier = remaining_tokens.min(tier_limit);
+        
+        total_cost += (tokens_in_tier as f64 / 1_000_000.0) * tier.cached_input_per_1m;
+        
+        remaining_tokens = remaining_tokens.saturating_sub(tokens_in_tier);
+    }
+    
+    total_cost
 }

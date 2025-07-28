@@ -8,11 +8,10 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
-use crate::models::get_model_pricing;
+use crate::models::calculate_total_cost;
 use crate::types::{
     AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats
 };
-use crate::utils::ModelAbbreviations;
 
 pub struct CodexAnalyzer;
 
@@ -26,49 +25,6 @@ impl CodexAnalyzer {
 impl Analyzer for CodexAnalyzer {
     fn display_name(&self) -> &'static str {
         "Codex"
-    }
-
-    #[rustfmt::skip]
-    fn get_model_abbreviations(&self) -> ModelAbbreviations {
-        let mut abbrs = ModelAbbreviations::new();
-
-        // GPT-4 series
-        abbrs.add("gpt-4.1-2025-04-14".to_string(), "GPT4.1".to_string(), "GPT-4.1".to_string());
-        abbrs.add("gpt-4.1-mini-2025-04-14".to_string(), "GPT4.1m".to_string(), "GPT-4.1 Mini".to_string());
-        abbrs.add("gpt-4.1-nano-2025-04-14".to_string(), "GPT4.1n".to_string(), "GPT-4.1 Nano".to_string());
-        abbrs.add("gpt-4.5-preview-2025-02-27".to_string(), "GPT4.5".to_string(), "GPT-4.5 Preview".to_string());
-        abbrs.add("gpt-4o-2024-08-06".to_string(), "GPT4o".to_string(), "GPT-4o".to_string());
-        abbrs.add("gpt-4o".to_string(), "GPT4o".to_string(), "GPT-4o".to_string());
-        abbrs.add("gpt-4o-mini-2024-07-18".to_string(), "GPT4om".to_string(), "GPT-4o Mini".to_string());
-        abbrs.add("gpt-4o-mini".to_string(), "GPT4om".to_string(), "GPT-4o Mini".to_string());
-        abbrs.add("gpt-4o-audio-preview-2024-12-17".to_string(), "GPT4oa".to_string(), "GPT-4o Audio".to_string());
-        abbrs.add("gpt-4o-realtime-preview-2025-06-03".to_string(), "GPT4or".to_string(), "GPT-4o Realtime".to_string());
-        abbrs.add("gpt-4o-mini-audio-preview-2024-12-17".to_string(), "GPT4oma".to_string(), "GPT-4o Mini Audio".to_string());
-        abbrs.add("gpt-4o-mini-realtime-preview-2024-12-17".to_string(), "GPT4omr".to_string(), "GPT-4o Mini Realtime".to_string());
-        abbrs.add("gpt-4o-search-preview-2025-03-11".to_string(), "GPT4os".to_string(), "GPT-4o Search".to_string());
-        abbrs.add("gpt-4o-mini-search-preview-2025-03-11".to_string(), "GPT4oms".to_string(), "GPT-4o Mini Search".to_string());
-
-        // o1 series
-        abbrs.add("o1-2024-12-17".to_string(), "O1".to_string(), "OpenAI o1".to_string());
-        abbrs.add("o1".to_string(), "O1".to_string(), "OpenAI o1".to_string());
-        abbrs.add("o1-pro-2025-03-19".to_string(), "O1p".to_string(), "OpenAI o1-pro".to_string());
-        abbrs.add("o1-mini-2024-09-12".to_string(), "O1m".to_string(), "OpenAI o1-mini".to_string());
-        abbrs.add("o1-mini".to_string(), "O1m".to_string(), "OpenAI o1-mini".to_string());
-
-        // o3 series
-        abbrs.add("o3-pro-2025-06-10".to_string(), "O3p".to_string(), "OpenAI o3-pro".to_string());
-        abbrs.add("o3-2025-04-16".to_string(), "O3".to_string(), "OpenAI o3".to_string());
-        abbrs.add("o3-deep-research-2025-06-26".to_string(), "O3d".to_string(), "OpenAI o3-deep-research".to_string());
-        abbrs.add("o3-mini-2025-01-31".to_string(), "O3m".to_string(), "OpenAI o3-mini".to_string());
-
-        // o4 series
-        abbrs.add("o4-mini-2025-04-16".to_string(), "O4m".to_string(), "OpenAI o4-mini".to_string());
-        abbrs.add("o4-mini-deep-research-2025-06-26".to_string(), "O4md".to_string(), "OpenAI o4-mini-deep-research".to_string());
-
-        // Codex models
-        abbrs.add("codex-mini-latest".to_string(), "CXm".to_string(), "Codex Mini Latest".to_string());
-
-        abbrs
     }
 
     fn get_data_glob_patterns(&self) -> Vec<String> {
@@ -138,7 +94,6 @@ impl Analyzer for CodexAnalyzer {
         Ok(AgenticCodingToolStats {
             daily_stats,
             num_conversations,
-            model_abbrs: self.get_model_abbreviations(),
             messages,
             analyzer_name: self.display_name().to_string(),
         })
@@ -487,26 +442,13 @@ fn extract_line_count_from_sed(command: &str) -> Option<u64> {
 }
 
 fn calculate_cost_from_tokens(usage: &CodexTokenUsage, model_name: &str) -> f64 {
-    match get_model_pricing().get(model_name) {
-        Some(pricing) => {
-            // For Codex, we have cached_input_tokens instead of separate creation/read
-            let regular_input_cost = usage.input_tokens as f64 * pricing.input_cost_per_token;
-            let output_cost = (usage.output_tokens + usage.reasoning_output_tokens) as f64
-                * pricing.output_cost_per_token;
-            let cached_input_cost =
-                usage.cached_input_tokens as f64 * pricing.cache_read_input_token_cost;
-
-            regular_input_cost + output_cost + cached_input_cost
-        }
-        None => {
-            println!("WARNING: Unknown model name: {model_name}. Using fallback pricing.",);
-            // Fallback pricing - use reasonable estimates
-            let input_cost = usage.input_tokens as f64 * 0.0000015; // $1.50 per 1M tokens
-            let output_cost =
-                (usage.output_tokens + usage.reasoning_output_tokens) as f64 * 0.000006; // $6.00 per 1M tokens
-            let cached_cost = usage.cached_input_tokens as f64 * 0.000000375; // $0.375 per 1M tokens
-
-            input_cost + output_cost + cached_cost
-        }
-    }
+    let total_output_tokens = usage.output_tokens + usage.reasoning_output_tokens;
+    
+    calculate_total_cost(
+        model_name,
+        usage.input_tokens,
+        total_output_tokens,
+        0, // Codex doesn't have separate cache creation tokens
+        usage.cached_input_tokens,
+    )
 }
