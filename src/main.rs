@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use analyzer::AnalyzerRegistry;
-use analyzers::{ClaudeCodeAnalyzer, CodexAnalyzer, GeminiAnalyzer};
+use analyzers::{ClaudeCodeAnalyzer, CodexAnalyzer, GeminiCliAnalyzer};
 
 use crate::types::MultiAnalyzerStats;
 
@@ -118,7 +118,7 @@ fn create_analyzer_registry() -> AnalyzerRegistry {
     // Register available analyzers
     registry.register(ClaudeCodeAnalyzer::new());
     registry.register(CodexAnalyzer::new());
-    registry.register(GeminiAnalyzer::new());
+    registry.register(GeminiCliAnalyzer::new());
 
     registry
 }

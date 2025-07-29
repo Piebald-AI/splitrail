@@ -12,28 +12,28 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
 
-pub struct GeminiAnalyzer;
+pub struct GeminiCliAnalyzer;
 
-impl GeminiAnalyzer {
+impl GeminiCliAnalyzer {
     pub fn new() -> Self {
         Self
     }
 }
 
-// Gemini-specific data structures following the plan's simplified flat approach
+// Gemini CLI-specific data structures following the plan's simplified flat approach
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiSession {
+struct GeminiCliSession {
     session_id: String,
     project_hash: String,
     start_time: String,
     last_updated: String,
-    messages: Vec<GeminiMessage>,
+    messages: Vec<GeminiCliMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
-enum GeminiMessage {
+enum GeminiCliMessage {
     User {
         id: String,
         timestamp: String,
@@ -46,7 +46,7 @@ enum GeminiMessage {
         model: String,
         #[serde(default)]
         thoughts: Vec<serde_json::Value>,
-        tokens: Option<GeminiTokens>,
+        tokens: Option<GeminiCliTokens>,
         #[serde(rename = "toolCalls", default)]
         tool_calls: Vec<serde_json::Value>,
     },
@@ -58,7 +58,7 @@ enum GeminiMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct GeminiTokens {
+struct GeminiCliTokens {
     #[serde(default)]
     input: u64,
     #[serde(default)]
@@ -149,9 +149,9 @@ fn generate_conversation_hash(conversation_file: &str, timestamp: &str) -> Strin
     hex::encode(&result[..8]) // Use first 8 bytes (16 hex chars) for consistency
 }
 
-// Helper function to extract project ID from Gemini file path and hash it
-fn extract_and_hash_project_id_gemini(file_path: &Path) -> String {
-    // Gemini path format: ~/.gemini/tmp/{PROJECT_ID}/chats/{session}.json
+// Helper function to extract project ID from Gemini CLI file path and hash it
+fn extract_and_hash_project_id_gemini_cli(file_path: &Path) -> String {
+    // Gemini CLI path format: ~/.gemini/tmp/{PROJECT_ID}/chats/{session}.json
     // Example: "/home/user/.gemini/tmp/project-abc123/chats/session.json"
 
     let path_components: Vec<_> = file_path.components().collect();
@@ -178,12 +178,12 @@ fn extract_and_hash_project_id_gemini(file_path: &Path) -> String {
 }
 
 // Cost calculation using the centralized model system
-fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
+fn calculate_gemini_cost(tokens: &GeminiCliTokens, model_name: &str) -> f64 {
     let total_input_tokens = tokens.input + tokens.thoughts + tokens.tool;
 
     let input_cost = calculate_input_cost(model_name, total_input_tokens);
     let output_cost = calculate_output_cost(model_name, tokens.output);
-    let cache_cost = calculate_cache_cost(model_name, 0, tokens.cached); // Gemini doesn't have cache creation
+    let cache_cost = calculate_cache_cost(model_name, 0, tokens.cached); // Gemini CLI doesn't have cache creation
 
     input_cost + output_cost + cache_cost
 }
@@ -191,7 +191,7 @@ fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
 // JSON session parsing (not JSONL)
 fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
     let conversation_file = file_path.to_string_lossy().to_string();
-    let project_hash = extract_and_hash_project_id_gemini(file_path);
+    let project_hash = extract_and_hash_project_id_gemini_cli(file_path);
     let mut entries = Vec::new();
 
     // Read entire file (not line-by-line like JSONL)
@@ -199,7 +199,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
         Ok(content) => content,
         Err(e) => {
             eprintln!(
-                "Failed to read Gemini session file {}: {}",
+                "Failed to read Gemini CLI session file {}: {}",
                 file_path.display(),
                 e
             );
@@ -208,11 +208,11 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
     };
 
     // Parse the complete session JSON
-    let session: GeminiSession = match serde_json::from_str(&file_content) {
+    let session: GeminiCliSession = match serde_json::from_str(&file_content) {
         Ok(session) => session,
         Err(e) => {
             eprintln!(
-                "Failed to parse Gemini session JSON {}: {}",
+                "Failed to parse Gemini CLI session JSON {}: {}",
                 file_path.display(),
                 e
             );
@@ -223,7 +223,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
     // Process each message in the session
     for message in session.messages {
         match message {
-            GeminiMessage::User {
+            GeminiCliMessage::User {
                 id: _,
                 timestamp,
                 content: _,
@@ -238,7 +238,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                     role: MessageRole::User,
                 });
             }
-            GeminiMessage::Gemini {
+            GeminiCliMessage::Gemini {
                 id: _,
                 timestamp,
                 content: _,
@@ -277,7 +277,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
 }
 
 #[async_trait]
-impl Analyzer for GeminiAnalyzer {
+impl Analyzer for GeminiCliAnalyzer {
     fn display_name(&self) -> &'static str {
         "Gemini CLI"
     }

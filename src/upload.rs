@@ -91,11 +91,11 @@ where
                     break;
                 }
 
-                // Counter animation tick - much faster now!
+                // Counter animation tick
                 _ = tokio::time::sleep(Duration::from_micros(100)) => {
                     if current_count < target_count {
                         // Jump multiple messages at once for very fast counting
-                        let jump_size = ((target_count - current_count) / 50).clamp(1, 100);
+                        let jump_size = ((target_count - current_count) / 50).max(1).min(100);
                         current_count = (current_count + jump_size).min(target_count);
                         progress_callback(current_count, total_messages);
                     } else {
