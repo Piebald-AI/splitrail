@@ -554,7 +554,7 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
                 ai_stats.output_tokens = usage.output_tokens;
                 ai_stats.cache_creation_tokens = usage.cache_creation_tokens;
                 ai_stats.cache_read_tokens = usage.cache_read_tokens;
-                ai_stats.cached_tokens = 0;
+                ai_stats.cached_tokens = usage.cache_creation_tokens + usage.cache_read_tokens;
                 ai_stats.cost = match data.cost_usd {
                     Some(precalc_cost) => precalc_cost,
                     None => calculate_cost_from_tokens(&usage, &model_name),
