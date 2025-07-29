@@ -19,15 +19,37 @@ Also check out our developer-first agentic AI experience, [Piebald](https://pieb
 
 ## Development
 
+### Windows
+
 On Windows, we use `lld-link.exe` from LLVM to significantly speed up compilation, so you'll need to install it to compile Splitrail.  Example for `winget`:
 
 ```shell
 winget install --id LLVM.LLVM
 ```
 
+Then add it to your system PATH:
+```cmd
+:: Command prompt
+setx /M PATH "%PATH%;C:\Program Files\LLVM\bin\"
+set "PATH=%PATH%;C:\Program Files\LLVM\bin"
+```
+or
+```pwsh
+# PowerShell
+setx /M PATH "$env:PATH;C:\Program Files\LLVM\bin\"
+$env:PATH = "$env:PATH;C:\Program Files\LLVM\bin\"
+```
+
 Then use standard Cargo commands to build and run:
 
 ```shell
+cargo run
+```
+
+### macOS/Linux
+
+Build as normal:
+```
 cargo run
 ```
 
