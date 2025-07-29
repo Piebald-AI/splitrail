@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike};
 use num_format::{Locale, ToFormattedString};
-use serde::{Deserialize, Serialize};
 
 use crate::types::{ConversationMessage, DailyStats};
 
@@ -98,9 +97,7 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
     // Process each conversation to find flow lengths
     for messages in conversations.values() {
         let mut sorted_messages = messages.clone();
-        sorted_messages.sort_by_key(|msg| {
-            parse_timestamp_to_seconds(&msg.timestamp).unwrap_or(0)
-        });
+        sorted_messages.sort_by_key(|msg| parse_timestamp_to_seconds(&msg.timestamp).unwrap_or(0));
 
         let mut flow_start: Option<i64> = None;
         let mut last_ai_timestamp: Option<i64> = None;
@@ -144,10 +141,7 @@ fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<Strin
 
         // Handle case where conversation ends with AI messages (no final user message)
         if let (Some(start), Some(end)) = (flow_start, last_ai_timestamp)
-            && let Some(last_ai_msg) = sorted_messages
-                .iter()
-                .rev()
-                .find(|msg| msg.model.is_some())
+            && let Some(last_ai_msg) = sorted_messages.iter().rev().find(|msg| msg.model.is_some())
         {
             let flow_duration = (end - start) as u64;
             // Use the last AI message's date
@@ -246,7 +240,10 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
             Some(model) => {
                 // AI message
                 daily_stats_entry.ai_messages += 1;
-                *daily_stats_entry.models.entry(model.to_string()).or_insert(0) += 1;
+                *daily_stats_entry
+                    .models
+                    .entry(model.to_string())
+                    .or_insert(0) += 1;
 
                 // Aggregate all stats
                 daily_stats_entry.stats.cost += entry.stats.cost;
@@ -358,7 +355,6 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
 
     daily_stats
 }
-
 
 /// Filters messages to only include those created after a specific date
 pub async fn get_messages_later_than(

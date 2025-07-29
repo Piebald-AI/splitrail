@@ -544,11 +544,7 @@ fn draw_daily_stats_table(
         total_output += day_stats.stats.output_tokens;
         total_tool_calls += day_stats.stats.tool_calls;
 
-        let mut models_vec = day_stats
-            .models
-            .keys()
-            .cloned()
-            .collect::<Vec<String>>();
+        let mut models_vec = day_stats.models.keys().cloned().collect::<Vec<String>>();
         models_vec.sort();
         let models = models_vec.join(", ");
 

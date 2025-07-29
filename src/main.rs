@@ -252,7 +252,7 @@ async fn run_background_upload(
             // Keep error messages visible permanently (don't auto-hide)
             set_status(&upload_status, tui::UploadStatus::Failed(format!("{e:#}")));
         }
-        None => return, // Config not available or not configured - skip upload
+        None => (), // Config not available or not configured - skip upload
     }
 }
 
@@ -263,7 +263,7 @@ async fn run_upload() -> Result<()> {
     for analyzer_stats in stats.analyzer_stats {
         messages.extend(analyzer_stats.messages);
     }
-    
+
     // Load config file to get formatting options
     let config_file = config::Config::load().unwrap_or(None).unwrap_or_default();
     let format_options = utils::NumberFormatOptions {
@@ -272,7 +272,7 @@ async fn run_upload() -> Result<()> {
         locale: config_file.formatting.locale,
         decimal_places: config_file.formatting.decimal_places,
     };
-    
+
     match config::Config::load() {
         Ok(Some(mut config)) if config.is_configured() => {
             let messages =
@@ -281,8 +281,8 @@ async fn run_upload() -> Result<()> {
                     .context("Failed to get messages later than last saved date")?;
             let progress_callback = tui::create_upload_progress_callback(&format_options);
             upload::upload_message_stats(&messages, &mut config, progress_callback)
-            .await
-            .context("Failed to upload messages")?;
+                .await
+                .context("Failed to upload messages")?;
             tui::show_upload_success(messages.len(), &format_options);
             Ok(())
         }

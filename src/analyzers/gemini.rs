@@ -1,8 +1,7 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::models::{calculate_input_cost, calculate_output_cost, calculate_cache_cost};
+use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output_cost};
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileCategory,
-    MessageRole, Stats,
+    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -55,7 +54,7 @@ enum GeminiMessage {
         id: String,
         timestamp: String,
         content: String,
-    }
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,11 +180,11 @@ fn extract_and_hash_project_id_gemini(file_path: &Path) -> String {
 // Cost calculation using the centralized model system
 fn calculate_gemini_cost(tokens: &GeminiTokens, model_name: &str) -> f64 {
     let total_input_tokens = tokens.input + tokens.thoughts + tokens.tool;
-    
+
     let input_cost = calculate_input_cost(model_name, total_input_tokens);
     let output_cost = calculate_output_cost(model_name, tokens.output);
     let cache_cost = calculate_cache_cost(model_name, 0, tokens.cached); // Gemini doesn't have cache creation
-    
+
     input_cost + output_cost + cache_cost
 }
 
@@ -245,32 +244,30 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                 content: _,
                 model,
                 thoughts: _,
-                tokens,
+                tokens: Some(tokens),
                 tool_calls,
             } => {
-                if let Some(tokens) = tokens {
-                    let mut stats = extract_tool_stats(&tool_calls);
-                    let hash = generate_conversation_hash(&conversation_file, &timestamp);
+                let mut stats = extract_tool_stats(&tool_calls);
+                let hash = generate_conversation_hash(&conversation_file, &timestamp);
 
-                    // Update stats with token information
-                    stats.input_tokens = tokens.input;
-                    stats.output_tokens = tokens.output;
-                    stats.cache_creation_tokens = 0;
-                    stats.cache_read_tokens = 0;
-                    stats.cached_tokens = tokens.cached;
-                    stats.cost = calculate_gemini_cost(&tokens, &model);
-                    stats.tool_calls = tool_calls.len() as u32;
+                // Update stats with token information
+                stats.input_tokens = tokens.input;
+                stats.output_tokens = tokens.output;
+                stats.cache_creation_tokens = 0;
+                stats.cache_read_tokens = 0;
+                stats.cached_tokens = tokens.cached;
+                stats.cost = calculate_gemini_cost(&tokens, &model);
+                stats.tool_calls = tool_calls.len() as u32;
 
-                    entries.push(ConversationMessage {
-                        application: Application::GeminiCli,
-                        model: Some(model),
-                        timestamp,
-                        hash,
-                        project_hash: project_hash.clone(),
-                        stats,
-                        role: MessageRole::Assistant,
-                    });
-                }
+                entries.push(ConversationMessage {
+                    application: Application::GeminiCli,
+                    model: Some(model),
+                    timestamp,
+                    hash,
+                    project_hash: project_hash.clone(),
+                    stats,
+                    role: MessageRole::Assistant,
+                });
             }
             _ => {}
         }

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use phf::phf_map;
+use serde::{Deserialize, Serialize};
 
 /// Represents different pricing tier structures for various models
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,9 +21,7 @@ pub enum PricingStructure {
         output_per_1m: f64,
     },
     /// Tiered pricing (different costs based on token thresholds)
-    Tiered {
-        tiers: &'static [PricingTier],
-    },
+    Tiered { tiers: &'static [PricingTier] },
 }
 
 /// Caching tier for models with tiered cache pricing
@@ -41,33 +39,30 @@ pub enum CachingSupport {
     /// Model does not support caching
     None,
     /// OpenAI-style caching (simple cached input pricing)
-    OpenAI {
-        cached_input_per_1m: f64,
-    },
+    OpenAI { cached_input_per_1m: f64 },
     /// Anthropic-style caching (separate write and read costs)
     Anthropic {
         cache_write_per_1m: f64,
         cache_read_per_1m: f64,
     },
     /// Google-style caching (may have tiers like input/output)
-    Google {
-        tiers: &'static [CachingTier],
-    },
+    Google { tiers: &'static [CachingTier] },
 }
 
 /// Complete model information with all pricing details
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
     /// Canonical model name
+    #[allow(dead_code)]
     pub canonical_name: &'static str,
     /// Alternative names and versions for this model
+    #[allow(dead_code)]
     pub aliases: &'static [&'static str],
     /// Pricing structure (flat or tiered)
     pub pricing: PricingStructure,
     /// Caching support and pricing
     pub caching: CachingSupport,
 }
-
 
 static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
     // OpenAI Models
@@ -638,35 +633,30 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gemini-1.5-pro-exp-0801" => "gemini-1.5-pro",
 };
 
-
 /// Get model info by any valid name (canonical or alias)
 pub fn get_model_info(model_name: &str) -> Option<&ModelInfo> {
     // First try direct lookup in model index
     if let Some(model_info) = MODEL_INDEX.get(model_name) {
         return Some(model_info);
     }
-    
+
     // Then try alias lookup
     if let Some(&canonical_name) = MODEL_ALIASES.get(model_name) {
         return MODEL_INDEX.get(canonical_name);
     }
-    
+
     None
 }
 
 /// Calculate cost for input tokens using the model's pricing structure
 pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
     match get_model_info(model_name) {
-        Some(model_info) => {
-            match &model_info.pricing {
-                PricingStructure::Flat { input_per_1m, .. } => {
-                    (input_tokens as f64 / 1_000_000.0) * input_per_1m
-                }
-                PricingStructure::Tiered { tiers } => {
-                    calculate_tiered_cost(input_tokens, tiers, true)
-                }
+        Some(model_info) => match &model_info.pricing {
+            PricingStructure::Flat { input_per_1m, .. } => {
+                (input_tokens as f64 / 1_000_000.0) * input_per_1m
             }
-        }
+            PricingStructure::Tiered { tiers } => calculate_tiered_cost(input_tokens, tiers, true),
+        },
         None => {
             eprintln!("WARNING: Unknown model: {model_name}. Using fallback pricing.");
             (input_tokens as f64 / 1_000_000.0) * 1.0 // $1 per 1M tokens fallback
@@ -677,16 +667,14 @@ pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
 /// Calculate cost for output tokens using the model's pricing structure
 pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
     match get_model_info(model_name) {
-        Some(model_info) => {
-            match &model_info.pricing {
-                PricingStructure::Flat { output_per_1m, .. } => {
-                    (output_tokens as f64 / 1_000_000.0) * output_per_1m
-                }
-                PricingStructure::Tiered { tiers } => {
-                    calculate_tiered_cost(output_tokens, tiers, false)
-                }
+        Some(model_info) => match &model_info.pricing {
+            PricingStructure::Flat { output_per_1m, .. } => {
+                (output_tokens as f64 / 1_000_000.0) * output_per_1m
             }
-        }
+            PricingStructure::Tiered { tiers } => {
+                calculate_tiered_cost(output_tokens, tiers, false)
+            }
+        },
         None => {
             eprintln!("WARNING: Unknown model: {model_name}. Using fallback pricing.");
             (output_tokens as f64 / 1_000_000.0) * 5.0 // $5 per 1M tokens fallback
@@ -695,17 +683,27 @@ pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
 }
 
 /// Calculate cost for cached tokens
-pub fn calculate_cache_cost(model_name: &str, cache_creation_tokens: u64, cache_read_tokens: u64) -> f64 {
+pub fn calculate_cache_cost(
+    model_name: &str,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
             match &model_info.caching {
                 CachingSupport::None => 0.0,
-                CachingSupport::OpenAI { cached_input_per_1m } => {
+                CachingSupport::OpenAI {
+                    cached_input_per_1m,
+                } => {
                     // OpenAI only has cached input cost, no creation cost
                     (cache_read_tokens as f64 / 1_000_000.0) * cached_input_per_1m
                 }
-                CachingSupport::Anthropic { cache_write_per_1m, cache_read_per_1m } => {
-                    let creation_cost = (cache_creation_tokens as f64 / 1_000_000.0) * cache_write_per_1m;
+                CachingSupport::Anthropic {
+                    cache_write_per_1m,
+                    cache_read_per_1m,
+                } => {
+                    let creation_cost =
+                        (cache_creation_tokens as f64 / 1_000_000.0) * cache_write_per_1m;
                     let read_cost = (cache_read_tokens as f64 / 1_000_000.0) * cache_read_per_1m;
                     creation_cost + read_cost
                 }
@@ -733,47 +731,51 @@ pub fn calculate_total_cost(
     let input_cost = calculate_input_cost(model_name, input_tokens);
     let output_cost = calculate_output_cost(model_name, output_tokens);
     let cache_cost = calculate_cache_cost(model_name, cache_creation_tokens, cache_read_tokens);
-    
+
     input_cost + output_cost + cache_cost
 }
 
 fn calculate_tiered_cost(tokens: u64, tiers: &[PricingTier], is_input: bool) -> f64 {
     let mut total_cost = 0.0;
     let mut remaining_tokens = tokens;
-    
+
     for tier in tiers {
         if remaining_tokens == 0 {
             break;
         }
-        
+
         let tier_limit = tier.max_tokens.unwrap_or(u64::MAX);
         let tokens_in_tier = remaining_tokens.min(tier_limit);
-        
-        let rate = if is_input { tier.input_per_1m } else { tier.output_per_1m };
+
+        let rate = if is_input {
+            tier.input_per_1m
+        } else {
+            tier.output_per_1m
+        };
         total_cost += (tokens_in_tier as f64 / 1_000_000.0) * rate;
-        
+
         remaining_tokens = remaining_tokens.saturating_sub(tokens_in_tier);
     }
-    
+
     total_cost
 }
 
 fn calculate_tiered_cache_cost(tokens: u64, tiers: &[CachingTier]) -> f64 {
     let mut total_cost = 0.0;
     let mut remaining_tokens = tokens;
-    
+
     for tier in tiers {
         if remaining_tokens == 0 {
             break;
         }
-        
+
         let tier_limit = tier.max_tokens.unwrap_or(u64::MAX);
         let tokens_in_tier = remaining_tokens.min(tier_limit);
-        
+
         total_cost += (tokens_in_tier as f64 / 1_000_000.0) * tier.cached_input_per_1m;
-        
+
         remaining_tokens = remaining_tokens.saturating_sub(tokens_in_tier);
     }
-    
+
     total_cost
 }

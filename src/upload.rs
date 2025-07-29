@@ -35,29 +35,31 @@ where
         // For smooth counting, we calculate the current message position based on chunk progress
         let messages_in_chunk = chunk.len();
         let chunk_start = messages_processed;
-        
+
         // Run fast counter with non-blocking HTTP request
         let mut current_count = chunk_start;
         let target_count = chunk_start + messages_in_chunk;
-        
+
         // Start the HTTP request
-        let mut http_request = Box::pin(client
-            .post(format!("{}/api/upload-stats", config.server.url))
-            .header(
-                "Authorization",
-                format!("Bearer {}", config.server.api_token),
-            )
-            .header("Content-Type", "application/json")
-            .json(&chunk)
-            .send());
-        
+        let mut http_request = Box::pin(
+            client
+                .post(format!("{}/api/upload-stats", config.server.url))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", config.server.api_token),
+                )
+                .header("Content-Type", "application/json")
+                .json(&chunk)
+                .send(),
+        );
+
         // Counter animation loop
         loop {
             tokio::select! {
                 // HTTP request completed
                 response = &mut http_request => {
                     let response = response?;
-                    
+
                     // Process response
                     if response.status().is_success() {
                         let upload_response: UploadResponse =
@@ -83,17 +85,17 @@ where
 
                         anyhow::bail!("{}", error_text);
                     }
-                    
+
                     // Show final state and exit
                     progress_callback(target_count, total_messages);
                     break;
                 }
-                
+
                 // Counter animation tick - much faster now!
                 _ = tokio::time::sleep(Duration::from_micros(100)) => {
                     if current_count < target_count {
                         // Jump multiple messages at once for very fast counting
-                        let jump_size = ((target_count - current_count) / 50).max(1).min(100);
+                        let jump_size = ((target_count - current_count) / 50).clamp(1, 100);
                         current_count = (current_count + jump_size).min(target_count);
                         progress_callback(current_count, total_messages);
                     } else {
@@ -105,7 +107,7 @@ where
                 }
             }
         }
-        
+
         messages_processed += messages_in_chunk;
     }
 

@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Application {
@@ -43,7 +42,6 @@ pub struct DailyStats {
     pub max_flow_length_seconds: u64, // Longest autonomous AI operation in seconds
 }
 
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
@@ -55,7 +53,7 @@ pub struct Stats {
     pub cached_tokens: u64,
     pub cost: f64,
     pub tool_calls: u32,
-    
+
     // File operation stats
     pub terminal_commands: u64,
     pub file_searches: u64,
@@ -72,14 +70,14 @@ pub struct Stats {
     pub bytes_added: u64,
     pub bytes_edited: u64,
     pub bytes_deleted: u64,
-    
+
     // Todo stats
     pub todos_created: u64,
     pub todos_completed: u64,
     pub todos_in_progress: u64,
     pub todo_writes: u64,
     pub todo_reads: u64,
-    
+
     // Composition stats
     pub code_lines: u64,
     pub docs_lines: u64,
@@ -142,5 +140,5 @@ pub struct UploadResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct ErrorResponse {
-    pub error: String
+    pub error: String,
 }

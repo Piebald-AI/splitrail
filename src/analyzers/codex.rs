@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats
+    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
 
 pub struct CodexAnalyzer;
@@ -229,7 +229,10 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                             entries.push(ConversationMessage {
                                 timestamp: message.timestamp.clone(),
                                 application: Application::CodexCli,
-                                hash: generate_conversation_hash(&conversation_file, &message.timestamp),
+                                hash: generate_conversation_hash(
+                                    &conversation_file,
+                                    &message.timestamp,
+                                ),
                                 project_hash: "".to_string(),
                                 model: None,
                                 stats: Stats::default(),
@@ -261,7 +264,10 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                     application: Application::CodexCli,
                                     model: Some(model_name),
                                     timestamp: timestamp.clone(),
-                                    hash: generate_conversation_hash(&conversation_file, &timestamp),
+                                    hash: generate_conversation_hash(
+                                        &conversation_file,
+                                        &timestamp,
+                                    ),
                                     project_hash: "".to_string(),
                                     stats,
                                     role: MessageRole::Assistant,
@@ -420,7 +426,6 @@ fn extract_file_paths_from_command(command: &str, stats: &mut Stats) {
     }
 }
 
-
 fn extract_line_count_from_sed(command: &str) -> Option<u64> {
     // Try to extract line numbers from sed -n 'X,Yp' commands
     if let Some(start) = command.find("sed -n '") {
@@ -443,7 +448,7 @@ fn extract_line_count_from_sed(command: &str) -> Option<u64> {
 
 fn calculate_cost_from_tokens(usage: &CodexTokenUsage, model_name: &str) -> f64 {
     let total_output_tokens = usage.output_tokens + usage.reasoning_output_tokens;
-    
+
     calculate_total_cost(
         model_name,
         usage.input_tokens,
