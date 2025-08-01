@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike};
+use anyhow::Result;
+use chrono::{Datelike, Local};
 use num_format::{Locale, ToFormattedString};
+use sha2::{Digest, Sha256};
 
 use crate::types::{ConversationMessage, DailyStats};
 
@@ -61,109 +62,6 @@ pub fn format_number(n: u64, options: &NumberFormatOptions) -> String {
     }
 }
 
-pub fn extract_date_from_timestamp(timestamp: &str) -> Option<String> {
-    if timestamp.is_empty() {
-        return None;
-    }
-
-    if let Ok(datetime_utc) = chrono::DateTime::parse_from_rfc3339(timestamp) {
-        let datetime_local = datetime_utc.with_timezone(&chrono::Local);
-        Some(datetime_local.format("%Y-%m-%d").to_string())
-    } else {
-        None
-    }
-}
-
-fn parse_timestamp_to_seconds(timestamp: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .ok()
-        .map(|dt| dt.timestamp())
-}
-
-/// Calculate the maximum flow length (autonomous AI operation duration) for each day
-fn calculate_max_flow_lengths(entries: &[ConversationMessage]) -> BTreeMap<String, u64> {
-    let mut daily_max_flows: BTreeMap<String, u64> = BTreeMap::new();
-
-    // Group messages by conversation file and sort by timestamp
-    let mut conversations: BTreeMap<String, Vec<&ConversationMessage>> = BTreeMap::new();
-    for entry in entries {
-        let project_hash = &entry.project_hash;
-        conversations
-            .entry(project_hash.clone())
-            .or_default()
-            .push(entry);
-    }
-
-    // Process each conversation to find flow lengths
-    for messages in conversations.values() {
-        let mut sorted_messages = messages.clone();
-        sorted_messages.sort_by_key(|msg| parse_timestamp_to_seconds(&msg.timestamp).unwrap_or(0));
-
-        let mut flow_start: Option<i64> = None;
-        let mut last_ai_timestamp: Option<i64> = None;
-
-        for message in &sorted_messages {
-            match message.model {
-                Some(_) => {
-                    // AI message
-                    let ts = parse_timestamp_to_seconds(&message.timestamp);
-                    if let Some(ts) = ts {
-                        if flow_start.is_none() {
-                            flow_start = Some(ts); // Start of new flow
-                        }
-                        last_ai_timestamp = Some(ts); // Update last AI message time
-                    }
-                }
-                None => {
-                    // User message ends the current flow
-                    if let (Some(start), Some(end)) = (flow_start, last_ai_timestamp) {
-                        let flow_duration = (end - start) as u64;
-                        let date = match extract_date_from_timestamp(&message.timestamp) {
-                            Some(d) => d,
-                            None => continue,
-                        };
-
-                        // Cap flows at 4 hours (14400 seconds) to filter out data artifacts
-                        // Anything longer likely represents conversations left open rather than active work
-                        let capped_duration = flow_duration.min(14400);
-
-                        let current_max = daily_max_flows.get(&date).unwrap_or(&0);
-                        if capped_duration > *current_max {
-                            daily_max_flows.insert(date, capped_duration);
-                        }
-                    }
-                    // Reset for next flow
-                    flow_start = None;
-                    last_ai_timestamp = None;
-                }
-            }
-        }
-
-        // Handle case where conversation ends with AI messages (no final user message)
-        if let (Some(start), Some(end)) = (flow_start, last_ai_timestamp)
-            && let Some(last_ai_msg) = sorted_messages.iter().rev().find(|msg| msg.model.is_some())
-        {
-            let flow_duration = (end - start) as u64;
-            // Use the last AI message's date
-            let date = match extract_date_from_timestamp(&last_ai_msg.timestamp) {
-                Some(d) => d,
-                None => continue,
-            };
-
-            // Cap flows at 4 hours (14400 seconds) to filter out data artifacts
-            // Anything longer likely represents conversations left open rather than active work
-            let capped_duration = flow_duration.min(14400);
-
-            let current_max = daily_max_flows.get(&date).unwrap_or(&0);
-            if capped_duration > *current_max {
-                daily_max_flows.insert(date, capped_duration);
-            }
-        }
-    }
-
-    daily_max_flows
-}
-
 pub fn format_date_for_display(date: &str) -> String {
     if date == "unknown" {
         return "Unknown".to_string();
@@ -190,44 +88,24 @@ pub fn format_date_for_display(date: &str) -> String {
 
 pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, DailyStats> {
     let mut daily_stats: BTreeMap<String, DailyStats> = BTreeMap::new();
-
-    // Calculate max flow lengths for each day
-    let max_flows = calculate_max_flow_lengths(entries);
-
-    // First, find the start date for each conversation
     let mut conversation_start_dates: BTreeMap<String, String> = BTreeMap::new();
-    for entry in entries {
-        let timestamp = &entry.timestamp;
-        let project_hash = &entry.project_hash;
-        let date = match extract_date_from_timestamp(timestamp) {
-            Some(d) => d,
-            None => continue, // Skip entries with invalid timestamps
-        };
 
-        // Only update if this is earlier than what we've seen, or if we haven't seen this conversation
+    for entry in entries {
+        let timestamp = &entry.timestamp.with_timezone(&Local);
+        let conversation_hash = &entry.conversation_hash;
+        let date = timestamp.format("%Y-%m-%d").to_string();
+
+        // Only update if this is earlier than what we've seen, or if we haven't seen this
+        // conversation before.  This is to handle the case where a conversation spans
+        // multiple days, we'd want to ascribe it to the day on which it was started.
         conversation_start_dates
-            .entry(project_hash.clone())
+            .entry(conversation_hash.clone())
             .and_modify(|existing_date| {
                 if date < *existing_date {
                     *existing_date = date.clone();
                 }
             })
-            .or_insert(date);
-    }
-
-    // Track conversations started on each date
-    let mut daily_conversations_started: BTreeMap<String, u32> = BTreeMap::new();
-    for start_date in conversation_start_dates.values() {
-        *daily_conversations_started
-            .entry(start_date.clone())
-            .or_insert(0) += 1;
-    }
-
-    for entry in entries {
-        let date = match extract_date_from_timestamp(&entry.timestamp) {
-            Some(d) => d,
-            None => continue, // Skip entries with invalid timestamps
-        };
+            .or_insert(date.clone());
 
         let daily_stats_entry = daily_stats
             .entry(date.clone())
@@ -294,17 +172,10 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
         };
     }
 
-    // Put the number of conversations started on each day on the daily stats.
-    for (date, count) in daily_conversations_started {
-        if let Some(daily_stats_entry) = daily_stats.get_mut(&date) {
-            daily_stats_entry.conversations = count;
-        }
-    }
-
-    // Set max flow lengths for each day
-    for (date, max_flow) in max_flows {
-        if let Some(daily_stats_entry) = daily_stats.get_mut(&date) {
-            daily_stats_entry.max_flow_length_seconds = max_flow;
+    // Track conversations started on each date and update daily stats
+    for start_date in conversation_start_dates.values() {
+        if let Some(daily_stats_entry) = daily_stats.get_mut(start_date) {
+            daily_stats_entry.conversations += 1;
         }
     }
 
@@ -363,14 +234,16 @@ pub async fn get_messages_later_than(
 ) -> Result<Vec<ConversationMessage>> {
     let mut messages_later_than_date = Vec::new();
     for msg in messages {
-        let timestamp = &msg.timestamp;
-        if let Ok(timestamp) = DateTime::parse_from_rfc3339(timestamp)
-            .with_context(|| format!("Failed to parse timestamp: {timestamp}"))
-            && timestamp.timestamp_millis() >= date
-        {
+        if msg.timestamp.timestamp_millis() >= date {
             messages_later_than_date.push(msg);
         }
     }
 
     Ok(messages_later_than_date)
+}
+
+pub fn hash_text(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text);
+    format!("{:x}", hasher.finalize())
 }

@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::types::{ConversationMessage, ErrorResponse, Stats, UploadResponse};
+use crate::types::{ConversationMessage, ErrorResponse, UploadResponse};
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -116,16 +116,6 @@ where
     config.save(true)?;
 
     Ok(())
-}
-
-pub fn estimate_lines_added(stats: &Stats) -> u64 {
-    // Estimate that edited files are mostly new content
-    stats.lines_edited + (stats.lines_edited / 3)
-}
-
-pub fn estimate_lines_deleted(stats: &Stats) -> u64 {
-    // Estimate that some edited content was deleted
-    stats.lines_edited / 4
 }
 
 pub fn show_upload_help() {

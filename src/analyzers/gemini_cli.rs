@@ -3,12 +3,13 @@ use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output
 use crate::types::{
     AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
-use anyhow::Result;
+use crate::utils::hash_text;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
+use chrono::DateTime;
 use glob::glob;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -55,6 +56,11 @@ enum GeminiCliMessage {
         timestamp: String,
         content: String,
     },
+    Error {
+        id: String,
+        timestamp: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,58 +84,65 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> Stats {
     let mut stats = Stats::default();
 
     for tool_call in tool_calls {
-        if let Some(tool_name) = tool_call.get("name").and_then(|v| v.as_str()) {
-            match tool_name {
-                "read_many_files" => {
-                    if let Some(paths) = tool_call
-                        .get("args")
-                        .and_then(|v| v.get("paths"))
-                        .and_then(|v| v.as_array())
-                    {
-                        stats.files_read += paths.len() as u64;
+        let tool_name = if let Some(tool_name) = tool_call.get("name").and_then(|v| v.as_str()) {
+            tool_name
+        } else {
+            continue;
+        };
+        match tool_name {
+            "read_many_files" => {
+                let paths = if let Some(paths) = tool_call
+                    .get("args")
+                    .and_then(|v| v.get("paths"))
+                    .and_then(|v| v.as_array())
+                {
+                    paths
+                } else {
+                    continue;
+                };
+                stats.files_read += paths.len() as u64;
 
-                        // Categorize files and estimate composition stats
-                        for path in paths {
-                            if let Some(path_str) = path.as_str() {
-                                let ext = std::path::Path::new(path_str)
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("");
-                                let category = FileCategory::from_extension(ext);
-                                let estimated_lines = 100; // Estimate lines per file
-                                match category {
-                                    FileCategory::SourceCode => stats.code_lines += estimated_lines,
-                                    FileCategory::Documentation => {
-                                        stats.docs_lines += estimated_lines
-                                    }
-                                    FileCategory::Data => stats.data_lines += estimated_lines,
-                                    FileCategory::Media => stats.media_lines += estimated_lines,
-                                    FileCategory::Config => stats.config_lines += estimated_lines,
-                                    FileCategory::Other => stats.other_lines += estimated_lines,
-                                }
-                            }
-                        }
-
-                        // Simple estimation without complex heuristics
-                        stats.lines_read += (paths.len() as u64) * 100;
-                        stats.bytes_read += (paths.len() as u64) * 8000;
+                // Categorize files and estimate composition stats
+                for path in paths {
+                    let path_str = if let Some(path_str) = path.as_str() {
+                        path_str
+                    } else {
+                        continue;
+                    };
+                    let ext = std::path::Path::new(path_str)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    let category = FileCategory::from_extension(ext);
+                    let estimated_lines = 100; // Estimate lines per file
+                    match category {
+                        FileCategory::SourceCode => stats.code_lines += estimated_lines,
+                        FileCategory::Documentation => stats.docs_lines += estimated_lines,
+                        FileCategory::Data => stats.data_lines += estimated_lines,
+                        FileCategory::Media => stats.media_lines += estimated_lines,
+                        FileCategory::Config => stats.config_lines += estimated_lines,
+                        FileCategory::Other => stats.other_lines += estimated_lines,
                     }
                 }
-                "replace" => {
-                    stats.files_edited += 1;
-                    // Simple counting without complex content analysis
-                    stats.lines_edited += 10; // Conservative estimate
-                    stats.bytes_edited += 800;
-                }
-                "run_shell_command" => {
-                    stats.terminal_commands += 1;
-                }
-                "list_directory" => {
-                    // Treat as a lightweight read operation
-                    stats.files_read += 1;
-                }
-                _ => {} // Unknown tools - just skip
+
+                // Simple estimation without complex heuristics
+                stats.lines_read += (paths.len() as u64) * 100;
+                stats.bytes_read += (paths.len() as u64) * 8000;
             }
+            "replace" => {
+                stats.files_edited += 1;
+                // Simple counting without complex content analysis
+                stats.lines_edited += 10; // Conservative estimate
+                stats.bytes_edited += 800;
+            }
+            "run_shell_command" => {
+                stats.terminal_commands += 1;
+            }
+            "list_directory" => {
+                // Treat as a lightweight read operation
+                stats.files_read += 1;
+            }
+            _ => {} // Unknown tools - just skip
         }
     }
 
@@ -138,15 +151,6 @@ fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> Stats {
     stats.lines_deleted = (stats.lines_edited / 3).max(1); // Simple estimate
 
     stats
-}
-
-// Helper function to generate hash from conversation file path and timestamp
-fn generate_conversation_hash(conversation_file: &str, timestamp: &str) -> String {
-    let input = format!("{conversation_file}:{timestamp}");
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8]) // Use first 8 bytes (16 hex chars) for consistency
 }
 
 // Helper function to extract project ID from Gemini CLI file path and hash it
@@ -162,19 +166,11 @@ fn extract_and_hash_project_id_gemini_cli(file_path: &Path) -> String {
             && let std::path::Component::Normal(project_id) = &path_components[i + 1]
             && let Some(project_id_str) = project_id.to_str()
         {
-            // Hash the project ID using the same algorithm as the rest of the app
-            let mut hasher = Sha256::new();
-            hasher.update(project_id_str.as_bytes());
-            let result = hasher.finalize();
-            return hex::encode(&result[..8]); // Use first 8 bytes (16 hex chars) for consistency
+            return hash_text(project_id_str);
         }
     }
 
-    // Fallback: hash the full file path if we can't extract project ID
-    let mut hasher = Sha256::new();
-    hasher.update(file_path.to_string_lossy().as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8])
+    return hash_text(&file_path.to_string_lossy());
 }
 
 // Cost calculation using the centralized model system
@@ -189,36 +185,13 @@ fn calculate_gemini_cost(tokens: &GeminiCliTokens, model_name: &str) -> f64 {
 }
 
 // JSON session parsing (not JSONL)
-fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
-    let conversation_file = file_path.to_string_lossy().to_string();
+fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
     let project_hash = extract_and_hash_project_id_gemini_cli(file_path);
+    let file_path_str = file_path.to_string_lossy();
     let mut entries = Vec::new();
 
-    // Read entire file (not line-by-line like JSONL)
-    let file_content = match std::fs::read_to_string(file_path) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!(
-                "Failed to read Gemini CLI session file {}: {}",
-                file_path.display(),
-                e
-            );
-            return entries;
-        }
-    };
-
     // Parse the complete session JSON
-    let session: GeminiCliSession = match serde_json::from_str(&file_content) {
-        Ok(session) => session,
-        Err(e) => {
-            eprintln!(
-                "Failed to parse Gemini CLI session JSON {}: {}",
-                file_path.display(),
-                e
-            );
-            return entries;
-        }
-    };
+    let session: GeminiCliSession = serde_json::from_str(&std::fs::read_to_string(file_path)?)?;
 
     // Process each message in the session
     for message in session.messages {
@@ -229,10 +202,14 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                 content: _,
             } => {
                 entries.push(ConversationMessage {
-                    timestamp: timestamp.clone(),
+                    timestamp: DateTime::parse_from_rfc3339(&timestamp)
+                        .with_context(|| format!("Failed to parse timestamp: {timestamp}"))?
+                        .into(),
                     application: Application::GeminiCli,
-                    hash: generate_conversation_hash(&conversation_file, &timestamp),
                     project_hash: project_hash.clone(),
+                    local_hash: None,
+                    global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp)),
+                    conversation_hash: hash_text(&file_path.to_string_lossy()),
                     model: None,
                     stats: Stats::default(),
                     role: MessageRole::User,
@@ -248,7 +225,6 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                 tool_calls,
             } => {
                 let mut stats = extract_tool_stats(&tool_calls);
-                let hash = generate_conversation_hash(&conversation_file, &timestamp);
 
                 // Update stats with token information
                 stats.input_tokens = tokens.input;
@@ -262,9 +238,13 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
                 entries.push(ConversationMessage {
                     application: Application::GeminiCli,
                     model: Some(model),
-                    timestamp,
-                    hash,
+                    local_hash: None,
+                    global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp)),
+                    timestamp: DateTime::parse_from_rfc3339(&timestamp)
+                        .with_context(|| format!("Failed to parse timestamp: {timestamp}"))?
+                        .into(),
                     project_hash: project_hash.clone(),
+                    conversation_hash: hash_text(&file_path.to_string_lossy()),
                     stats,
                     role: MessageRole::Assistant,
                 });
@@ -273,7 +253,7 @@ fn parse_json_session_file(file_path: &Path) -> Vec<ConversationMessage> {
         }
     }
 
-    entries
+    Ok(entries)
 }
 
 #[async_trait]
@@ -316,7 +296,17 @@ impl Analyzer for GeminiCliAnalyzer {
         // Parse all session files in parallel
         let all_entries: Vec<ConversationMessage> = sources
             .into_par_iter()
-            .flat_map(|source| parse_json_session_file(&source.path))
+            .filter_map(|source| match parse_json_session_file(&source.path) {
+                Ok(messages) => Some(messages),
+                Err(e) => {
+                    eprintln!(
+                        "Failed to parse Gemini session file {}: {e:#}",
+                        source.path.display(),
+                    );
+                    None
+                }
+            })
+            .flat_map(|messages| messages)
             .collect();
 
         // Deduplicate based on hash
@@ -324,12 +314,13 @@ impl Analyzer for GeminiCliAnalyzer {
         let deduplicated_entries: Vec<ConversationMessage> = all_entries
             .into_iter()
             .filter(|entry| {
-                if seen_hashes.contains(&entry.hash) {
-                    false
-                } else {
-                    seen_hashes.insert(entry.hash.clone());
-                    true
+                if let Some(local_hash) = &entry.local_hash {
+                    if seen_hashes.contains(local_hash) {
+                        return false;
+                    }
+                    seen_hashes.insert(local_hash.clone());
                 }
+                true
             })
             .collect();
 

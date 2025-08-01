@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,9 +23,19 @@ pub enum MessageRole {
 #[serde(rename_all = "camelCase")]
 pub struct ConversationMessage {
     pub application: Application,
-    pub timestamp: String,
-    pub hash: String,
+    pub timestamp: DateTime<Utc>,
     pub project_hash: String,
+    pub conversation_hash: String,
+    /// The hash of this message, local to the application that we're gathering data from.  E.g.,
+    /// in the Claude Code analyzer, this will be set to the message's hash within Claude Code.
+    /// This is an Option because sometimes there's no way to generate, and so no need for,
+    /// a local hash.
+    pub local_hash: Option<String>,
+    /// The hash of this message, global to the Splitrail instance.  This is used on the server to
+    /// ensure that, in the event that messages that have been previously uploaded to the server
+    /// are reuploaded, they are not redundantly inserted into the database and cause incorrectly
+    /// inflated pre-aggregated metrics.
+    pub global_hash: String,
     pub model: Option<String>, // None for user messages
     pub stats: Stats,
     pub role: MessageRole,
@@ -39,7 +50,6 @@ pub struct DailyStats {
     pub conversations: u32,
     pub models: BTreeMap<String, u32>,
     pub stats: Stats,
-    pub max_flow_length_seconds: u64, // Longest autonomous AI operation in seconds
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

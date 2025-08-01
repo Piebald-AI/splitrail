@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -12,6 +12,7 @@ use crate::models::calculate_total_cost;
 use crate::types::{
     AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
+use crate::utils::hash_text;
 
 pub struct CodexAnalyzer;
 
@@ -105,17 +106,6 @@ impl Analyzer for CodexAnalyzer {
     }
 }
 
-// Codex specific implementation functions
-
-// Helper function to generate hash from conversation file path and timestamp
-fn generate_conversation_hash(conversation_file: &str, timestamp: &str) -> String {
-    let input = format!("{conversation_file}:{timestamp}");
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8]) // Use first 8 bytes (16 hex chars) for consistency
-}
-
 // CODEX JSONL FILES SCHEMA
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,8 +182,8 @@ enum CodexEntry {
 }
 
 fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
-    let conversation_file = file_path.to_string_lossy().to_string();
     let mut entries = Vec::new();
+    let file_path_str = file_path.to_string_lossy();
 
     let file = File::open(file_path)?;
 
@@ -227,12 +217,18 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                     match role.as_str() {
                         "user" => {
                             entries.push(ConversationMessage {
-                                timestamp: message.timestamp.clone(),
+                                timestamp: DateTime::parse_from_rfc3339(
+                                    &message.timestamp.clone(),
+                                )?
+                                .into(),
+                                global_hash: hash_text(&format!(
+                                    "{}_{}",
+                                    file_path_str,
+                                    message.timestamp.clone()
+                                )),
+                                local_hash: None,
+                                conversation_hash: hash_text(&file_path_str),
                                 application: Application::CodexCli,
-                                hash: generate_conversation_hash(
-                                    &conversation_file,
-                                    &message.timestamp,
-                                ),
                                 project_hash: "".to_string(),
                                 model: None,
                                 stats: Stats::default(),
@@ -263,11 +259,15 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                 entries.push(ConversationMessage {
                                     application: Application::CodexCli,
                                     model: Some(model_name),
-                                    timestamp: timestamp.clone(),
-                                    hash: generate_conversation_hash(
-                                        &conversation_file,
-                                        &timestamp,
-                                    ),
+                                    global_hash: hash_text(&format!(
+                                        "{}_{}",
+                                        file_path_str,
+                                        timestamp.clone()
+                                    )),
+                                    local_hash: None,
+                                    conversation_hash: hash_text(&file_path_str),
+                                    timestamp: DateTime::parse_from_rfc3339(&timestamp.clone())?
+                                        .into(),
                                     project_hash: "".to_string(),
                                     stats,
                                     role: MessageRole::Assistant,
@@ -297,9 +297,11 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                         .unwrap_or_else(|| "".to_string());
 
                     entries.push(ConversationMessage {
-                        timestamp: timestamp.clone(),
+                        global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp.clone())),
+                        local_hash: None,
+                        conversation_hash: hash_text(&file_path_str),
+                        timestamp: DateTime::parse_from_rfc3339(&timestamp.clone())?.into(),
                         application: Application::CodexCli,
-                        hash: generate_conversation_hash(&conversation_file, &timestamp),
                         project_hash: "".to_string(),
                         model: None,
                         stats,

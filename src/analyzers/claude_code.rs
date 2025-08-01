@@ -1,18 +1,16 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
-use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
-};
-use crate::upload::{estimate_lines_added, estimate_lines_deleted};
+use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::utils::hash_text;
 
 pub struct ClaudeCodeAnalyzer;
 
@@ -72,12 +70,13 @@ impl Analyzer for ClaudeCodeAnalyzer {
         let deduplicated_entries: Vec<ConversationMessage> = all_entries
             .into_iter()
             .filter(|entry| {
-                if seen_hashes.contains(&entry.hash) {
-                    false
-                } else {
-                    seen_hashes.insert(entry.hash.clone());
-                    true
+                if let Some(hash) = &entry.local_hash {
+                    if seen_hashes.contains(hash) {
+                        return false;
+                    }
+                    seen_hashes.insert(hash.clone());
                 }
+                true
             })
             .collect();
 
@@ -113,64 +112,44 @@ impl Analyzer for ClaudeCodeAnalyzer {
 
 // Claude Code specific implementation functions
 
-// Helper function to generate hash from conversation file path and timestamp
-fn generate_conversation_hash(conversation_file: &str, timestamp: &str) -> String {
-    let input = format!("{conversation_file}:{timestamp}");
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8]) // Use first 8 bytes (16 hex chars) for consistency
-}
-
 // Helper function to extract project ID from Claude Code file path and hash it
 fn extract_and_hash_project_id(file_path: &Path) -> String {
-    // Claude Code path format: ~/.claude/projects/{PROJECT_ID}/{conversation_file}.jsonl
-    // Example: "C:\Users\user\.claude\projects\D--splitrail-leaderboard\4d1b8bda-6d8c-4ee4-b480-a606953bc9c2.jsonl"
+    // Claude Code path format: ~/.claude/projects/{PROJECT_ID}/{conversation_uuid}.jsonl
 
     if let Some(parent) = file_path.parent()
         && let Some(project_id) = parent.file_name().and_then(|name| name.to_str())
     {
-        // Hash the project ID using the same algorithm as the rest of the app
-        let mut hasher = Sha256::new();
-        hasher.update(project_id.as_bytes());
-        let result = hasher.finalize();
-        return hex::encode(&result[..8]); // Use first 8 bytes (16 hex chars) for consistency
+        return hash_text(project_id);
     }
 
     // Fallback: hash the full file path if we can't extract project ID
-    let mut hasher = Sha256::new();
-    hasher.update(file_path.to_string_lossy().as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8])
+    hash_text(&file_path.to_string_lossy())
 }
 
 // CLAUDE CODE JSONL FILES SCHEMA
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Usage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default, rename = "cache_creation_input_tokens")]
-    cache_creation_tokens: u64,
-    #[serde(default, rename = "cache_read_input_tokens")]
-    cache_read_tokens: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Message {
-    id: Option<String>,
-    model: Option<String>,
-    usage: Option<Usage>,
-    content: Option<Content>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ContentBlock {
-    r#type: String,
-    name: Option<String>,
-    input: Option<serde_json::Value>,
+#[serde(tag = "type", rename_all = "snake_case")] // Inconsistently, this data is snake_case in the JSONL files.
+enum ContentBlock {
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value, // e.g. "toolu_01K7hbuwktKtti8mQb1wH2q8"
+    },
+    ToolResult {
+        tool_use_id: String, // e.g. "toolu_01K7hbuwktKtti8mQb1wH2q8"
+        content: Content,    // e.g. "Found 4 files\nC:\\..."
+    },
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    Image {
+        source: ImageSource,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,271 +160,170 @@ enum Content {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ToolUseResult {
-    #[serde(rename = "oldTodos")]
-    old_todos: Option<serde_json::Value>,
-    #[serde(rename = "newTodos")]
-    new_todos: Option<serde_json::Value>,
-    r#type: Option<String>,
-    file: Option<FileInfo>,
-    #[serde(flatten)]
-    extra: HashMap<String, serde_json::Value>,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ImageSource {
+    Base64 { media_type: String, data: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct FileInfo {
-    #[serde(rename = "filePath")]
-    file_path: Option<String>,
+struct Usage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ClaudeCodeEntry {
+// This does NOT get renamed to camelCase, inconsistently enough.
+struct Message {
+    id: Option<String>,
+    r#type: Option<String>, // "message"
+    role: Option<String>,   // "assistant" or "user"
+    model: Option<String>,  // e.g. "claude-sonnet-4-20250514"
+    content: Option<Content>,
+    stop_reason: Option<String>,
+    stop_sequence: Option<String>,
+    usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCodeSummaryEntry {
+    summary: String,
+    leaf_uuid: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCodeMessageEntry {
+    r#type: Option<String>,      // "assistant" or "user"
+    parent_uuid: Option<String>, // e.g. "773f9fdc-51ed-41cc-b107-19e5418bcf13"
+    is_sidechain: Option<bool>,
+    user_type: Option<String>,  // e.g. "external"
+    cwd: Option<String>,        // e.g. "C:\test"
+    session_id: Option<String>, // e.g. "92a07d6b-b12d-40d7-b184-aa04762ba0d6"
+    version: Option<String>,    // e.g. "1.0.61"
     message: Option<Message>,
-    #[serde(rename = "requestId")]
-    request_id: Option<String>,
-    #[serde(rename = "costUSD")]
-    cost_usd: Option<f64>,
-    timestamp: Option<String>,
-    r#type: Option<String>,
-    #[serde(rename = "toolUseResult")]
-    tool_use_result: Option<ToolUseResult>,
-    #[serde(flatten)]
-    extra_fields: HashMap<String, serde_json::Value>,
+    tool_use_result: Option<serde_json::Value>, // For user messages only.
+    request_id: Option<String>,                 // e.g. "req_0191C3ttfWOg3zRCDNdSFGv3"
+    uuid: Option<String>,                       // e.g. "a6ae4765-8274-4d00-8433-4fb28f4b387b"
+    timestamp: DateTime<Utc>,                   // e.g. "2025-07-12T22:12:00.572Z"
 }
 
-fn hash_cc_entry(data: &ClaudeCodeEntry) -> Option<String> {
-    let message_id = data.message.as_ref().and_then(|m| m.id.clone());
-    let request_id = data.request_id.clone();
-    match (message_id, request_id) {
-        (Some(msg_id), Some(req_id)) => Some(format!("{msg_id}:{req_id}")),
-        _ => None,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum ClaudeCodeEntry {
+    #[serde(alias = "summary")]
+    Summary(ClaudeCodeSummaryEntry),
+    #[serde(alias = "user", alias = "assistant")]
+    Message(ClaudeCodeMessageEntry),
+}
+
+mod tool_schema {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct TodoWriteInputTodo {
+        pub id: String,       // e.g. "1"
+        pub title: String,    // e.g. "Explore current directory structure"
+        pub status: String,   // e.g. "completed"
+        pub priority: String, // e.g. "high"
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[allow(dead_code)]
+    pub struct TodoWriteInput {
+        pub todos: Vec<TodoWriteInputTodo>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[allow(dead_code)]
+    pub struct TodoWriteResultTodo {
+        pub content: String,
+        pub status: String,
+        pub priority: String,
+        pub id: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct TodoWriteResult {
+        pub old_todos: Vec<TodoWriteInputTodo>,
+        pub new_todos: Vec<TodoWriteInputTodo>,
     }
 }
 
-fn is_synthetic_entry(data: &ClaudeCodeEntry) -> bool {
-    // Check if this is a synthetic message generated by Claude Code itself
-    if let Some(message) = &data.message {
-        // Check if model is synthetic
-        if let Some(model) = &message.model {
-            if model == "<synthetic>" || model.is_empty() {
-                return true;
-            }
-        } else {
-            // No model specified could indicate synthetic content
-            return true;
-        }
-
-        // Check if content contains synthetic markers
-        if let Some(Content::String(content_str)) = &message.content
-            && content_str.contains("<synthetic>")
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn extract_tool_stats(data: &ClaudeCodeEntry) -> Stats {
+fn extract_tool_stats(
+    message_content: &Content,
+    tool_use_result: &Option<serde_json::Value>,
+) -> Stats {
     let mut stats = Stats::default();
-    let mut _has_todo_activity = false;
 
-    if let Some(message) = &data.message
-        && let Some(Content::Blocks(blocks)) = &message.content
-    {
+    if let Content::Blocks(blocks) = message_content {
         for block in blocks {
-            if block.r#type != "tool_use" {
-                continue;
-            }
-            let tool_name = if let Some(tool_name) = &block.name {
-                tool_name
-            } else {
-                continue;
+            let tool_name = match block {
+                ContentBlock::ToolUse { name, .. } => name,
+                _ => continue,
             };
 
             match tool_name.as_str() {
-                "Read" => {
-                    stats.files_read += 1;
-                    let input = if let Some(input) = &block.input {
-                        input
-                    } else {
-                        continue;
-                    };
-
-                    if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
-                        let ext = Path::new(file_path)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("");
-                        let category = FileCategory::from_extension(ext);
-                        let lines_read = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
-                        match category {
-                            FileCategory::SourceCode => stats.code_lines += lines_read,
-                            FileCategory::Documentation => stats.docs_lines += lines_read,
-                            FileCategory::Data => stats.data_lines += lines_read,
-                            FileCategory::Media => stats.media_lines += lines_read,
-                            FileCategory::Config => stats.config_lines += lines_read,
-                            FileCategory::Other => stats.other_lines += lines_read,
-                        }
-                    }
-                    let lines_read = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
-                    stats.lines_read += lines_read;
-                    // TODO 7/26/2025: This is a poor estimate!
-                    stats.bytes_read += lines_read * 80;
-                }
-                "Edit" | "MultiEdit" => {
-                    stats.files_edited += 1;
-                    let input = if let Some(input) = &block.input {
-                        input
-                    } else {
-                        continue;
-                    };
-                    if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
-                        let ext = Path::new(file_path)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("");
-                        let category = FileCategory::from_extension(ext);
-                        let lines_edited = if tool_name == "MultiEdit" {
-                            input
-                                .get("edits")
-                                .and_then(|v| v.as_array())
-                                // TODO 7/26/2025: This is a poor estimate!
-                                .map(|edits| edits.len() as u64 * 5)
-                                .unwrap_or(10)
-                        } else {
-                            input
-                                .get("new_string")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.lines().count() as u64)
-                                .unwrap_or(5)
-                        };
-                        match category {
-                            FileCategory::SourceCode => stats.code_lines += lines_edited,
-                            FileCategory::Documentation => stats.docs_lines += lines_edited,
-                            FileCategory::Data => stats.data_lines += lines_edited,
-                            FileCategory::Media => stats.media_lines += lines_edited,
-                            FileCategory::Config => stats.config_lines += lines_edited,
-                            FileCategory::Other => stats.other_lines += lines_edited,
-                        }
-                    }
-                    let lines_edited = if tool_name == "MultiEdit" {
-                        input
-                            .get("edits")
-                            .and_then(|v| v.as_array())
-                            // TODO 7/26/2025: This is a poor estimate!
-                            .map(|edits| edits.len() as u64 * 5)
-                            .unwrap_or(10)
-                    } else {
-                        input
-                            .get("new_string")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.lines().count() as u64)
-                            .unwrap_or(5)
-                    };
-                    stats.lines_edited += lines_edited;
-                    // TODO 7/26/2025: This is a poor estimate!
-                    stats.bytes_edited += lines_edited * 80;
-                }
-                "Write" => {
-                    stats.files_edited += 1;
-                    let input = if let Some(input) = &block.input {
-                        input
-                    } else {
-                        continue;
-                    };
-
-                    if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
-                        let ext = Path::new(file_path)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("");
-                        let category = FileCategory::from_extension(ext);
-                        let lines_written = input
-                            .get("content")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.lines().count() as u64)
-                            .unwrap_or(50);
-                        match category {
-                            FileCategory::SourceCode => stats.code_lines += lines_written,
-                            FileCategory::Documentation => stats.docs_lines += lines_written,
-                            FileCategory::Data => stats.data_lines += lines_written,
-                            FileCategory::Media => stats.media_lines += lines_written,
-                            FileCategory::Config => stats.config_lines += lines_written,
-                            FileCategory::Other => stats.other_lines += lines_written,
-                        }
-                    }
-                    let lines_written = input
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.lines().count() as u64)
-                        .unwrap_or(50);
-                    stats.lines_added += lines_written;
-                    stats.bytes_added += lines_written * 80;
-                }
+                "Read" => stats.files_read += 1,
+                "Edit" | "MultiEdit" => stats.files_edited += 1,
+                "Write" => stats.files_edited += 1,
                 "Bash" => stats.terminal_commands += 1,
                 "Glob" => stats.file_searches += 1,
                 "Grep" => stats.file_content_searches += 1,
-                "TodoWrite" => {
-                    stats.todo_writes += 1;
-                    _has_todo_activity = true;
-                }
-                "TodoRead" => {
-                    stats.todo_reads += 1;
-                    _has_todo_activity = true;
-                }
+                "TodoWrite" => stats.todo_writes += 1,
+                "TodoRead" => stats.todo_reads += 1,
                 _ => {}
             }
         }
     }
 
-    if let Some(tool_result) = &data.tool_use_result
-        && let (Some(old_todos), Some(new_todos)) = (&tool_result.old_todos, &tool_result.new_todos)
-        && let (Ok(old_array), Ok(new_array)) = (
-            serde_json::from_value::<Vec<serde_json::Value>>(old_todos.clone()),
-            serde_json::from_value::<Vec<serde_json::Value>>(new_todos.clone()),
-        )
+    if let Some(tool_result) = &tool_use_result
+        && let Ok(todo_write_result) =
+            serde_json::from_value::<tool_schema::TodoWriteResult>(tool_result.clone())
     {
-        if new_array.len() > old_array.len() {
-            let created = (new_array.len() - old_array.len()) as u64;
+        let old_todos = todo_write_result.old_todos;
+        let new_todos = todo_write_result.new_todos;
+
+        if new_todos.len() > old_todos.len() {
+            let created = (new_todos.len() - old_todos.len()) as u64;
             stats.todos_created += created;
-            _has_todo_activity = true;
         }
 
-        let old_completed = old_array
+        let old_completed = old_todos
             .iter()
-            .filter(|todo| todo.get("status").and_then(|s| s.as_str()) == Some("completed"))
+            .filter(|todo| todo.status == "completed")
             .count();
-        let new_completed = new_array
+        let new_completed = new_todos
             .iter()
-            .filter(|todo| todo.get("status").and_then(|s| s.as_str()) == Some("completed"))
+            .filter(|todo| todo.status == "completed")
             .count();
 
         if new_completed > old_completed {
             let completed = (new_completed - old_completed) as u64;
             stats.todos_completed += completed;
-            _has_todo_activity = true;
         }
 
-        let old_in_progress = old_array
+        let old_in_progress = old_todos
             .iter()
-            .filter(|todo| todo.get("status").and_then(|s| s.as_str()) == Some("in_progress"))
+            .filter(|todo| todo.status == "in_progress")
             .count();
-        let new_in_progress = new_array
+        let new_in_progress = new_todos
             .iter()
-            .filter(|todo| todo.get("status").and_then(|s| s.as_str()) == Some("in_progress"))
+            .filter(|todo| todo.status == "in_progress")
             .count();
 
         if new_in_progress > old_in_progress {
             let in_progress = (new_in_progress - old_in_progress) as u64;
             stats.todos_in_progress += in_progress;
-            _has_todo_activity = true;
         }
     }
-
-    // TODO 7/26/2025: These are poor estimates!
-    stats.lines_added = estimate_lines_added(&stats);
-    stats.lines_deleted = estimate_lines_deleted(&stats);
 
     stats
 }
@@ -455,155 +333,123 @@ fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
         model_name,
         usage.input_tokens,
         usage.output_tokens,
-        usage.cache_creation_tokens,
-        usage.cache_read_tokens,
+        usage.cache_creation_input_tokens,
+        usage.cache_read_input_tokens,
     )
 }
 
 fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
-    let conversation_file = file_path.to_string_lossy().to_string();
     let project_hash = extract_and_hash_project_id(file_path);
     let mut entries = Vec::new();
-    let mut has_non_summary_messages = false;
-    let mut temp_messages = Vec::new();
+    let file_path_str = file_path.to_string_lossy();
 
-    let file = match File::open(file_path) {
-        Ok(f) => f,
-        Err(_) => return entries,
-    };
-
-    let reader = BufReader::with_capacity(64 * 1024, file);
+    // Open the file.
+    let reader = BufReader::with_capacity(
+        64 * 1024,
+        match File::open(file_path) {
+            Ok(f) => f,
+            Err(_) => return entries,
+        },
+    );
 
     for line_result in reader.lines() {
+        // Skip empty lines and errors.
         let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue,
+            Ok(l) if !l.trim().is_empty() => l,
+            _ => continue,
         };
 
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let data = match serde_json::from_str::<ClaudeCodeEntry>(&line) {
-            Ok(data) => data,
-            Err(_) => {
-                if let Ok(basic_json) = serde_json::from_str::<serde_json::Value>(&line) {
-                    let entry_type = basic_json
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let timestamp = basic_json
-                        .get("timestamp")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let request_id = basic_json
-                        .get("requestId")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    ClaudeCodeEntry {
-                        message: None,
-                        request_id,
-                        cost_usd: None,
+        // Parse the line, filtering various invalid scenarios.
+        let parsed_line = serde_json::from_str::<ClaudeCodeEntry>(&line);
+        let (message_id, model, content, usage, timestamp, request_id, tool_use_result) =
+            match parsed_line {
+                // Only get real user/AI messages; filter out summaries and any garbage message entries.
+                Ok(ClaudeCodeEntry::Message(ClaudeCodeMessageEntry {
+                    message:
+                        Some(Message {
+                            id: message_id,
+                            model,
+                            content: Some(content),
+                            usage,
+                            ..
+                        }),
+                    timestamp,
+                    tool_use_result,
+                    request_id,
+                    ..
+                // Skip messages for which no model is specified, or the model is `<synthetic>`;
+                // i.e. Claude Code-generated system messages.  These have their token usage all
+                // 0 anyway.
+                })) if !matches!(model.as_deref(), Some("<synthetic>")) => {
+                    (
+                        message_id,
+                        model,
+                        content,
+                        usage,
                         timestamp,
-                        r#type: entry_type,
-                        tool_use_result: None,
-                        extra_fields: HashMap::new(),
-                    }
-                } else {
+                        request_id,
+                        tool_use_result,
+                    )
+                }
+                Err(e) => {
+                    println!("Skipping invalid entry: {}", e);
                     continue;
                 }
-            }
+                _ => continue,
+            };
+
+        let mut msg = ConversationMessage {
+            global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp)),
+            local_hash: None,
+            application: Application::ClaudeCode,
+            model: model.clone(),
+            timestamp,
+            project_hash: project_hash.clone(),
+            conversation_hash: hash_text(&file_path_str),
+            stats: extract_tool_stats(&content, &tool_use_result),
+            // Default to AI.
+            role: MessageRole::Assistant,
         };
-
-        // Skip synthetic messages entirely
-        if is_synthetic_entry(&data) {
-            continue;
-        }
-
-        // Track if we find any non-summary messages
-        if data.r#type.as_deref() != Some("summary") {
-            has_non_summary_messages = true;
-        }
-
-        let _hash = hash_cc_entry(&data);
-        let stats = extract_tool_stats(&data);
-
-        if data.message.is_none() {
-            let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
-            temp_messages.push(ConversationMessage {
-                timestamp: timestamp.clone(),
-                application: Application::ClaudeCode,
-                hash: generate_conversation_hash(&conversation_file, &timestamp),
-                project_hash: project_hash.clone(),
-                model: None,
-                stats,
-                role: MessageRole::User,
-            });
-            continue;
-        }
-
-        let message = data.message.unwrap();
-        let model_name = message.model.unwrap_or_else(|| "unknown".to_string());
-
-        let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
-        match message.usage {
+        match usage {
             Some(usage) => {
-                let mut ai_stats = stats;
-                ai_stats.input_tokens = usage.input_tokens;
-                ai_stats.output_tokens = usage.output_tokens;
-                ai_stats.cache_creation_tokens = usage.cache_creation_tokens;
-                ai_stats.cache_read_tokens = usage.cache_read_tokens;
-                ai_stats.cached_tokens = usage.cache_creation_tokens + usage.cache_read_tokens;
-                ai_stats.cost = match data.cost_usd {
-                    Some(precalc_cost) => precalc_cost,
-                    None => calculate_cost_from_tokens(&usage, &model_name),
+                let model = match &model {
+                    Some(m) => m.to_owned(),
+                    None => continue, // Invalid entry.
                 };
-                ai_stats.tool_calls = match message.content {
-                    Some(Content::Blocks(blocks)) => {
-                        blocks.iter().filter(|c| c.r#type == "tool_use").count() as u32
-                    }
+
+                msg.stats.input_tokens = usage.input_tokens;
+                msg.stats.output_tokens = usage.output_tokens;
+                msg.stats.cache_creation_tokens = usage.cache_creation_input_tokens;
+                msg.stats.cache_read_tokens = usage.cache_read_input_tokens;
+                msg.stats.cached_tokens =
+                    usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
+                msg.stats.cost = calculate_cost_from_tokens(&usage, &model);
+                msg.stats.tool_calls = match content {
+                    Content::Blocks(blocks) => blocks
+                        .iter()
+                        .filter(|c| matches!(c, ContentBlock::ToolUse { .. }))
+                        .count() as u32,
                     _ => 0,
                 };
 
-                temp_messages.push(ConversationMessage {
-                    application: Application::ClaudeCode,
-                    model: Some(model_name),
-                    timestamp: timestamp.clone(),
-                    hash: generate_conversation_hash(&conversation_file, &timestamp),
-                    project_hash: project_hash.clone(),
-                    stats: ai_stats,
-                    role: MessageRole::Assistant,
-                });
+                if let Some(request_id) = request_id
+                    && let Some(message_id) = message_id
+                {
+                    // Claude Code stores the different parts of a message--thinking, tool calls, and normal
+                    // text--each in their own row in the JSONL file, with the same request ID and, redundantly,
+                    // the same token usage for each; therefore, we skip ones we've seen before to avoid
+                    // accumulating the redundant token counts.  It would be simpler to just skip
+                    // them here, but actually some message _across files_ can have the same
+                    // message ID and request ID (probably due to resuming sessions), so we need to
+                    // do it later when we have a complete pool of messages.
+                    msg.local_hash = Some(hash_text(&format!("{}_{}", request_id, message_id)));
+                }
             }
             None => {
-                let timestamp = data.timestamp.clone().unwrap_or_else(|| "".to_string());
-                temp_messages.push(ConversationMessage {
-                    timestamp: timestamp.clone(),
-                    application: Application::ClaudeCode,
-                    hash: generate_conversation_hash(&conversation_file, &timestamp),
-                    project_hash: project_hash.clone(),
-                    model: None,
-                    stats,
-                    role: MessageRole::User,
-                });
+                msg.role = MessageRole::User;
             }
         }
-    }
-
-    // Skip conversations that only contain summaries or have no valid timestamps
-    if !has_non_summary_messages && !temp_messages.is_empty() {
-        return entries; // Return empty vector for summary-only conversations
-    }
-
-    // Filter out messages with invalid timestamps and only add valid ones
-    for message in temp_messages {
-        // Skip messages with unknown dates
-        if crate::utils::extract_date_from_timestamp(&message.timestamp).is_none() {
-            continue;
-        }
-
-        entries.push(message);
+        entries.push(msg);
     }
 
     entries
@@ -612,28 +458,6 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_date_from_timestamp_valid() {
-        let timestamp = "2023-12-01T10:30:00Z";
-        let result = crate::utils::extract_date_from_timestamp(timestamp);
-        assert!(result.is_some());
-        assert!(result.unwrap().starts_with("2023-12-01"));
-    }
-
-    #[test]
-    fn test_extract_date_from_timestamp_empty() {
-        let timestamp = "";
-        let result = crate::utils::extract_date_from_timestamp(timestamp);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_extract_date_from_timestamp_invalid() {
-        let timestamp = "invalid-timestamp";
-        let result = crate::utils::extract_date_from_timestamp(timestamp);
-        assert!(result.is_none());
-    }
 
     #[test]
     fn test_summary_only_conversation_filtered() {
