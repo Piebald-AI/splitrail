@@ -156,7 +156,7 @@ pub enum Content {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ImageSource {
+pub enum ImageSource {
     Base64 { media_type: String, data: String },
 }
 
