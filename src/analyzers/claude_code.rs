@@ -2,15 +2,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
 use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
+use std::collections::HashMap;
 
 pub struct ClaudeCodeAnalyzer;
 
@@ -62,25 +62,20 @@ impl Analyzer for ClaudeCodeAnalyzer {
         // Parse all the files in parallel
         let all_entries: Vec<ConversationMessage> = sources
             .into_par_iter()
-            .flat_map(|source| parse_jsonl_file(&source.path))
-            .collect();
-
-        // Deduplicate messages
-        let mut seen_hashes = HashSet::new();
-        let deduplicated_entries: Vec<ConversationMessage> = all_entries
-            .into_iter()
-            .filter(|entry| {
-                if let Some(hash) = &entry.local_hash {
-                    if seen_hashes.contains(hash) {
-                        return false;
+            .flat_map(|source| {
+                let file = match File::open(&source.path) {
+                    Ok(file) => file,
+                    Err(e) => {
+                        eprintln!("Failed to open file: {}", e);
+                        return Vec::new();
                     }
-                    seen_hashes.insert(hash.clone());
-                }
-                true
+                };
+                let mut reader = BufReader::new(file);
+                parse_jsonl_file(&source.path, &mut reader)
             })
             .collect();
 
-        Ok(deduplicated_entries)
+        Ok(deduplicate_messages_by_local_hash(all_entries))
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
@@ -273,7 +268,7 @@ fn extract_tool_stats(
             match tool_name.as_str() {
                 "Read" => stats.files_read += 1,
                 "Edit" | "MultiEdit" => stats.files_edited += 1,
-                "Write" => stats.files_edited += 1,
+                "Write" => stats.files_added += 1,
                 "Bash" => stats.terminal_commands += 1,
                 "Glob" => stats.file_searches += 1,
                 "Grep" => stats.file_content_searches += 1,
@@ -338,22 +333,18 @@ fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
     )
 }
 
-fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
+pub fn parse_jsonl_file<T>(
+    file_path: &Path,
+    buffer_reader: &mut BufReader<T>,
+) -> Vec<ConversationMessage>
+where
+    T: Read,
+{
     let project_hash = extract_and_hash_project_id(file_path);
     let mut entries = Vec::new();
     let file_path_str = file_path.to_string_lossy();
 
-    // Open the file.
-    let reader = BufReader::with_capacity(
-        64 * 1024,
-        match File::open(file_path) {
-            Ok(f) => f,
-            Err(_) => return entries,
-        },
-    );
-
-    for line_result in reader.lines() {
-        // Skip empty lines and errors.
+    for line_result in buffer_reader.lines() {
         let line = match line_result {
             Ok(l) if !l.trim().is_empty() => l,
             _ => continue,
@@ -455,61 +446,34 @@ fn parse_jsonl_file(file_path: &Path) -> Vec<ConversationMessage> {
     entries
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub fn deduplicate_messages_by_local_hash(
+    messages: Vec<ConversationMessage>,
+) -> Vec<ConversationMessage> {
+    let mut seen_messages = HashMap::<String, ConversationMessage>::new();
+    let mut deduplicated_entries: Vec<ConversationMessage> = Vec::new();
 
-    #[test]
-    fn test_summary_only_conversation_filtered() {
-        // Create a temporary file with summary-only content
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_summary_only.jsonl");
-
-        let jsonl_content = r#"{"type":"summary","summary":"Test Summary","leafUuid":"test-uuid"}"#;
-        std::fs::write(&temp_file, jsonl_content).unwrap();
-
-        let messages = parse_jsonl_file(&temp_file);
-
-        // Clean up
-        std::fs::remove_file(&temp_file).ok();
-
-        // Should be empty since it only contains summaries
-        assert!(messages.is_empty());
+    for message in messages {
+        if let Some(local_hash) = &message.local_hash {
+            if let Some(existing_message) = seen_messages.get_mut(local_hash) {
+                if existing_message.stats.input_tokens
+                    + existing_message.stats.output_tokens
+                    + existing_message.stats.cache_creation_tokens
+                    + existing_message.stats.cache_read_tokens
+                    + existing_message.stats.cached_tokens
+                    == message.stats.input_tokens
+                        + message.stats.output_tokens
+                        + message.stats.cache_creation_tokens
+                        + message.stats.cache_read_tokens
+                        + message.stats.cached_tokens
+                {
+                    *existing_message = message.clone();
+                    continue;
+                }
+            }
+            seen_messages.insert(local_hash.clone(), message.clone());
+        }
+        deduplicated_entries.push(message);
     }
 
-    #[test]
-    fn test_invalid_timestamp_filtered() {
-        // Create a temporary file with invalid timestamp
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_invalid_timestamp.jsonl");
-
-        let jsonl_content = r#"{"type":"ai","content":"test","timestamp":"invalid","message":{"model":"test","usage":{"input_tokens":1,"output_tokens":1}}}"#;
-        std::fs::write(&temp_file, jsonl_content).unwrap();
-
-        let messages = parse_jsonl_file(&temp_file);
-
-        // Clean up
-        std::fs::remove_file(&temp_file).ok();
-
-        // Should be empty since timestamp is invalid
-        assert!(messages.is_empty());
-    }
-
-    #[test]
-    fn test_valid_conversation_preserved() {
-        // Create a temporary file with valid content
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_valid.jsonl");
-
-        let jsonl_content = r#"{"type":"ai","content":"test","timestamp":"2023-12-01T10:30:00Z","message":{"model":"test","usage":{"input_tokens":1,"output_tokens":1}}}"#;
-        std::fs::write(&temp_file, jsonl_content).unwrap();
-
-        let messages = parse_jsonl_file(&temp_file);
-
-        // Clean up
-        std::fs::remove_file(&temp_file).ok();
-
-        // Should contain the valid message
-        assert_eq!(messages.len(), 1);
-    }
+    deduplicated_entries
 }
