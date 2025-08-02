@@ -4,7 +4,8 @@
       "Bash(cargo run:*)",
       "WebFetch(domain:docs.rs)",
       "Bash(cargo check:*)",
-      "Bash(cargo test)"
+      "Bash(cargo test)",
+      "Bash(cargo test:*)"
     ],
     "deny": []
   }

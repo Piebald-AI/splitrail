@@ -108,7 +108,7 @@ impl Analyzer for ClaudeCodeAnalyzer {
 // Claude Code specific implementation functions
 
 // Helper function to extract project ID from Claude Code file path and hash it
-fn extract_and_hash_project_id(file_path: &Path) -> String {
+pub fn extract_and_hash_project_id(file_path: &Path) -> String {
     // Claude Code path format: ~/.claude/projects/{PROJECT_ID}/{conversation_uuid}.jsonl
 
     if let Some(parent) = file_path.parent()
@@ -125,7 +125,7 @@ fn extract_and_hash_project_id(file_path: &Path) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")] // Inconsistently, this data is snake_case in the JSONL files.
-enum ContentBlock {
+pub enum ContentBlock {
     ToolUse {
         id: String,
         name: String,
@@ -149,7 +149,7 @@ enum ContentBlock {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-enum Content {
+pub enum Content {
     String(String),
     Blocks(Vec<ContentBlock>),
 }
@@ -161,15 +161,15 @@ enum ImageSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Usage {
+pub struct Usage {
     #[serde(default)]
-    input_tokens: u64,
+    pub input_tokens: u64,
     #[serde(default)]
-    output_tokens: u64,
+    pub output_tokens: u64,
     #[serde(default)]
-    cache_creation_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     #[serde(default)]
-    cache_read_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,7 +218,7 @@ enum ClaudeCodeEntry {
     Message(ClaudeCodeMessageEntry),
 }
 
-mod tool_schema {
+pub mod tool_schema {
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,7 +252,7 @@ mod tool_schema {
     }
 }
 
-fn extract_tool_stats(
+pub fn extract_tool_stats(
     message_content: &Content,
     tool_use_result: &Option<serde_json::Value>,
 ) -> Stats {
@@ -323,7 +323,7 @@ fn extract_tool_stats(
     stats
 }
 
-fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
+pub fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
     calculate_total_cost(
         model_name,
         usage.input_tokens,
