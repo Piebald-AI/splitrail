@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::reqwest_simd_json::{ReqwestSimdJsonExt, ResponseSimdJsonExt};
 use crate::types::{ConversationMessage, ErrorResponse, UploadResponse};
 use anyhow::{Context, Result};
 use std::sync::OnceLock;
@@ -14,14 +15,14 @@ pub async fn upload_message_stats<F>(
 where
     F: FnMut(usize, usize),
 {
-    const CHUNK_SIZE: usize = 6000;
+    const CHUNK_SIZE: usize = 4500;
     if messages.is_empty() {
         return Ok(());
     }
 
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.upload.timeout_seconds))
+            .timeout(Duration::from_secs(30))
             .danger_accept_invalid_certs(true)
             .build()
             .expect("Failed to create HTTP client")
@@ -49,7 +50,7 @@ where
                     format!("Bearer {}", config.server.api_token),
                 )
                 .header("Content-Type", "application/json")
-                .json(&chunk)
+                .simd_json(&chunk)
                 .send(),
         );
 
@@ -63,7 +64,7 @@ where
                     // Process response
                     if response.status().is_success() {
                         let upload_response: UploadResponse =
-                            response.json().await.context("Failed to parse response")?;
+                            response.simd_json().await.context("Failed to parse response")?;
 
                         if !upload_response.success {
                             anyhow::bail!(
@@ -79,7 +80,7 @@ where
                             .await
                             .unwrap_or_else(|_| "Unknown error".to_string());
 
-                        if let Ok(error_res) = serde_json::from_str::<ErrorResponse>(&error_text) {
+                        if let Ok(error_res) = simd_json::from_slice::<ErrorResponse>(&mut error_text.clone().into_bytes()) {
                             anyhow::bail!("{}", error_res.error);
                         }
 

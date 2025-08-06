@@ -3,13 +3,14 @@ use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output
 use crate::types::{
     AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
-use crate::utils::hash_text;
-use anyhow::{Context, Result};
+use crate::utils::{deserialize_utc_timestamp, hash_text};
+use anyhow::Result;
 use async_trait::async_trait;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use glob::glob;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use simd_json::prelude::*;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -37,28 +38,32 @@ struct GeminiCliSession {
 enum GeminiCliMessage {
     User {
         id: String,
-        timestamp: String,
+        #[serde(deserialize_with = "deserialize_utc_timestamp")]
+        timestamp: DateTime<Utc>,
         content: String,
     },
     Gemini {
         id: String,
-        timestamp: String,
+        #[serde(deserialize_with = "deserialize_utc_timestamp")]
+        timestamp: DateTime<Utc>,
         content: String,
         model: String,
         #[serde(default)]
-        thoughts: Vec<serde_json::Value>,
+        thoughts: Vec<simd_json::OwnedValue>,
         tokens: Option<GeminiCliTokens>,
         #[serde(rename = "toolCalls", default)]
-        tool_calls: Vec<serde_json::Value>,
+        tool_calls: Vec<simd_json::OwnedValue>,
     },
     System {
         id: String,
-        timestamp: String,
+        #[serde(deserialize_with = "deserialize_utc_timestamp")]
+        timestamp: DateTime<Utc>,
         content: String,
     },
     Error {
         id: String,
-        timestamp: String,
+        #[serde(deserialize_with = "deserialize_utc_timestamp")]
+        timestamp: DateTime<Utc>,
         content: String,
     },
 }
@@ -80,7 +85,7 @@ struct GeminiCliTokens {
 }
 
 // Tool extraction and file operation mapping
-fn extract_tool_stats(tool_calls: &[serde_json::Value]) -> Stats {
+fn extract_tool_stats(tool_calls: &[simd_json::OwnedValue]) -> Stats {
     let mut stats = Stats::default();
 
     for tool_call in tool_calls {
@@ -191,7 +196,7 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
     let mut entries = Vec::new();
 
     // Parse the complete session JSON
-    let session: GeminiCliSession = serde_json::from_str(&std::fs::read_to_string(file_path)?)?;
+    let session: GeminiCliSession = simd_json::from_slice(&mut std::fs::read_to_string(file_path)?.into_bytes())?;
 
     // Process each message in the session
     for message in session.messages {
@@ -202,13 +207,11 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                 content: _,
             } => {
                 entries.push(ConversationMessage {
-                    timestamp: DateTime::parse_from_rfc3339(&timestamp)
-                        .with_context(|| format!("Failed to parse timestamp: {timestamp}"))?
-                        .into(),
+                    date: timestamp,
                     application: Application::GeminiCli,
                     project_hash: project_hash.clone(),
                     local_hash: None,
-                    global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp)),
+                    global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp.to_rfc3339())),
                     conversation_hash: hash_text(&file_path.to_string_lossy()),
                     model: None,
                     stats: Stats::default(),
@@ -239,10 +242,8 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                     application: Application::GeminiCli,
                     model: Some(model),
                     local_hash: None,
-                    global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp)),
-                    timestamp: DateTime::parse_from_rfc3339(&timestamp)
-                        .with_context(|| format!("Failed to parse timestamp: {timestamp}"))?
-                        .into(),
+                    global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp.to_rfc3339())),
+                    date: timestamp,
                     project_hash: project_hash.clone(),
                     conversation_hash: hash_text(&file_path.to_string_lossy()),
                     stats,

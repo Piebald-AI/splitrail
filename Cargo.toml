@@ -6,8 +6,7 @@ license = "MIT"
 authors = ["Piebald LLC <support@piebald.ai>"]
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.0.219", features = ["derive"] }
 anyhow = "1.0"
 glob = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
@@ -21,8 +20,9 @@ async-trait = "0.1"
 notify = "8.1"
 notify-types = "2.0"
 sha2 = "0.10"
-hex = "0.4"
-phf = { version = "0.11", features = ["macros"] }
+phf = { version = "0.12.1", features = ["macros"] }
+serde_bytes = "0.11.17"
+simd-json = { version = "0.15.1", features = ["serde"] }
 
 [dependencies.clap]
 version = "4.5.41"
@@ -31,4 +31,4 @@ features = ["derive"]
 [dependencies.reqwest]
 version = "0.12.22"
 default-features = false
-features = ["json", "rustls-tls"]
+features = ["rustls-tls"]

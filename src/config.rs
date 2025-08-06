@@ -21,7 +21,6 @@ pub struct UploadConfig {
     pub auto_upload: bool,
     pub upload_today_only: bool,
     pub retry_attempts: u32,
-    pub timeout_seconds: u64,
     pub last_date_uploaded: i64,
 }
 
@@ -44,7 +43,6 @@ impl Default for Config {
                 auto_upload: false,
                 upload_today_only: false,
                 retry_attempts: 3,
-                timeout_seconds: 30,
                 last_date_uploaded: 0,
             },
             formatting: FormattingConfig {

@@ -4,7 +4,7 @@ use crate::analyzers::claude_code::{
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use chrono::{TimeZone, Utc};
-use serde_json::json;
+use simd_json::json;
 use std::io::{BufReader, Cursor};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -131,7 +131,7 @@ fn test_deduplicate_messages_by_local_hash() {
         local_hash: Some("local1".to_string()),
         application: Application::ClaudeCode,
         model: Some("test-model".to_string()),
-        timestamp: Utc.timestamp_opt(1609459200, 0).unwrap(),
+        date: Utc.timestamp_opt(1609459200, 0).unwrap(),
         project_hash: "project1".to_string(),
         conversation_hash: "conv1".to_string(),
         stats: Stats {
@@ -295,7 +295,7 @@ fn test_extract_tool_stats_with_todo_result() {
         ]
     });
     
-    let content = Content::String("Regular text content".to_string());
+    let content = Content::String(serde_bytes::ByteBuf::new());
     let stats = extract_tool_stats(&content, &Some(tool_result));
     
     // 2 new todos created (4 and 5)
@@ -310,7 +310,7 @@ fn test_extract_tool_stats_with_todo_result() {
 fn test_extract_tool_stats_text_content() {
     use crate::analyzers::claude_code::{extract_tool_stats, Content};
     
-    let content = Content::String("This is just text content".to_string());
+    let content = Content::String(serde_bytes::ByteBuf::new());
     let stats = extract_tool_stats(&content, &None);
     
     // Should be all zeros for text content

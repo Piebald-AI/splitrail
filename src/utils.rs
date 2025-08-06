@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use chrono::{Datelike, Local};
+use chrono::{DateTime, Datelike, Local, Utc};
 use num_format::{Locale, ToFormattedString};
+use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 use crate::types::{ConversationMessage, DailyStats};
@@ -91,7 +92,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
     let mut conversation_start_dates: BTreeMap<String, String> = BTreeMap::new();
 
     for entry in entries {
-        let timestamp = &entry.timestamp.with_timezone(&Local);
+        let timestamp = &entry.date.with_timezone(&Local);
         let conversation_hash = &entry.conversation_hash;
         let date = timestamp.format("%Y-%m-%d").to_string();
 
@@ -234,7 +235,7 @@ pub async fn get_messages_later_than(
 ) -> Result<Vec<ConversationMessage>> {
     let mut messages_later_than_date = Vec::new();
     for msg in messages {
-        if msg.timestamp.timestamp_millis() >= date {
+        if msg.date.timestamp_millis() >= date {
             messages_later_than_date.push(msg);
         }
     }
@@ -246,4 +247,29 @@ pub fn hash_text(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text);
     format!("{:x}", hasher.finalize())
+}
+
+/// Custom serde deserializer for RFC3339 timestamp strings to DateTime<Utc>
+pub fn deserialize_utc_timestamp<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    DateTime::parse_from_rfc3339(&s)
+        .map(|dt| dt.into())
+        .map_err(serde::de::Error::custom)
+}
+
+/// Custom serde deserializer for optional RFC3339 timestamp strings to Option<DateTime<Utc>>
+pub fn deserialize_optional_utc_timestamp<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    match opt {
+        Some(s) => DateTime::parse_from_rfc3339(&s)
+            .map(|dt| Some(dt.into()))
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
 }

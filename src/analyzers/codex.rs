@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -12,7 +12,7 @@ use crate::models::calculate_total_cost;
 use crate::types::{
     AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
-use crate::utils::hash_text;
+use crate::utils::{deserialize_optional_utc_timestamp, deserialize_utc_timestamp, hash_text};
 
 pub struct CodexAnalyzer;
 
@@ -127,9 +127,10 @@ struct CodexMessage {
     #[serde(rename = "type")]
     message_type: String,
     role: Option<String>,
-    content: Option<serde_json::Value>,
+    content: Option<simd_json::OwnedValue>,
     token_usage: Option<CodexTokenUsage>,
-    timestamp: String,
+    #[serde(deserialize_with = "deserialize_utc_timestamp")]
+    timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,7 +151,8 @@ struct CodexShellCall {
     call_id: Option<String>,
     status: Option<String>,
     action: Option<CodexShellAction>,
-    timestamp: Option<String>,
+    #[serde(deserialize_with = "deserialize_optional_utc_timestamp")]
+    timestamp: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,14 +160,16 @@ struct CodexFunctionOutput {
     #[serde(rename = "type")]
     output_type: String,
     call_id: Option<String>,
-    output: Option<serde_json::Value>,
-    timestamp: Option<String>,
+    output: Option<simd_json::OwnedValue>,
+    #[serde(deserialize_with = "deserialize_optional_utc_timestamp")]
+    timestamp: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexSessionHeader {
     id: String,
-    timestamp: String,
+    #[serde(deserialize_with = "deserialize_utc_timestamp")]
+    timestamp: DateTime<Utc>,
     instructions: Option<String>,
     model: Option<String>,
 }
@@ -178,7 +182,7 @@ enum CodexEntry {
     ShellCall(CodexShellCall),
     FunctionOutput(CodexFunctionOutput),
     // Fallback for unknown entries
-    Unknown(serde_json::Value),
+    Unknown(simd_json::OwnedValue),
 }
 
 fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
@@ -201,7 +205,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
             continue;
         }
 
-        let entry = match serde_json::from_str::<CodexEntry>(&line) {
+        let entry = match simd_json::from_slice::<CodexEntry>(&mut line.clone().into_bytes()) {
             Ok(entry) => entry,
             Err(_) => continue,
         };
@@ -217,14 +221,11 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                     match role.as_str() {
                         "user" => {
                             entries.push(ConversationMessage {
-                                timestamp: DateTime::parse_from_rfc3339(
-                                    &message.timestamp.clone(),
-                                )?
-                                .into(),
+                                date: message.timestamp,
                                 global_hash: hash_text(&format!(
                                     "{}_{}",
                                     file_path_str,
-                                    message.timestamp.clone()
+                                    message.timestamp.to_rfc3339()
                                 )),
                                 local_hash: None,
                                 conversation_hash: hash_text(&file_path_str),
@@ -244,7 +245,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                 let total_output_tokens =
                                     usage.output_tokens + usage.reasoning_output_tokens;
 
-                                let timestamp = message.timestamp.clone();
+                                let timestamp = message.timestamp;
                                 let stats = Stats {
                                     input_tokens: usage.input_tokens,
                                     output_tokens: total_output_tokens,
@@ -262,12 +263,11 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                                     global_hash: hash_text(&format!(
                                         "{}_{}",
                                         file_path_str,
-                                        timestamp.clone()
+                                        timestamp.to_rfc3339()
                                     )),
                                     local_hash: None,
                                     conversation_hash: hash_text(&file_path_str),
-                                    timestamp: DateTime::parse_from_rfc3339(&timestamp.clone())?
-                                        .into(),
+                                    date: timestamp,
                                     project_hash: "".to_string(),
                                     stats,
                                     role: MessageRole::Assistant,
@@ -291,16 +291,15 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                         Stats::default()
                     };
 
-                    let timestamp = shell_call
-                        .timestamp
-                        .clone()
-                        .unwrap_or_else(|| "".to_string());
+                    let timestamp = shell_call.timestamp.unwrap_or_else(|| {
+                        DateTime::parse_from_rfc3339("1970-01-01T00:00:00Z").unwrap().into()
+                    });
 
                     entries.push(ConversationMessage {
-                        global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp.clone())),
+                        global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp.to_rfc3339())),
                         local_hash: None,
                         conversation_hash: hash_text(&file_path_str),
-                        timestamp: DateTime::parse_from_rfc3339(&timestamp.clone())?.into(),
+                        date: timestamp,
                         application: Application::CodexCli,
                         project_hash: "".to_string(),
                         model: None,

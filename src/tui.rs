@@ -315,7 +315,7 @@ fn draw_ui(
             Constraint::Length(3),                             // Header
             Constraint::Length(1),                             // Tabs
             Constraint::Min(3),                                // Main table
-            Constraint::Length(6),                             // Summary stats
+            Constraint::Length(7),                             // Summary stats
             Constraint::Length(if has_error { 3 } else { 1 }), // Help text
         ])
         .split(frame.area())
@@ -375,8 +375,8 @@ fn draw_ui(
                 current_table_state,
             );
 
-            // Summary stats
-            draw_summary_stats(frame, chunks[3], current_stats, format_options);
+            // Summary stats - pass all filtered stats for aggregation
+            draw_summary_stats(frame, chunks[3], &filtered_stats, format_options);
         }
 
         // Help text for data view with upload status
@@ -909,31 +909,57 @@ fn draw_daily_stats_table(
 fn draw_summary_stats(
     frame: &mut Frame,
     area: Rect,
-    stats: &AgenticCodingToolStats,
+    filtered_stats: &[&AgenticCodingToolStats],
     format_options: &NumberFormatOptions,
 ) {
-    let total_cost: f64 = stats.daily_stats.values().map(|s| s.stats.cost).sum();
-    let total_cached: u64 = stats
-        .daily_stats
-        .values()
-        .map(|s| s.stats.cached_tokens)
-        .sum();
-    let total_input: u64 = stats
-        .daily_stats
-        .values()
-        .map(|s| s.stats.input_tokens)
-        .sum();
-    let total_output: u64 = stats
-        .daily_stats
-        .values()
-        .map(|s| s.stats.output_tokens)
-        .sum();
-    let total_tool_calls: u64 = stats
-        .daily_stats
-        .values()
-        .map(|s| s.stats.tool_calls as u64)
-        .sum();
+    // Aggregate stats from all tools
+    let mut total_cost: f64 = 0.0;
+    let mut total_cached: u64 = 0;
+    let mut total_input: u64 = 0;
+    let mut total_output: u64 = 0;
+    let mut total_tool_calls: u64 = 0;
+    let mut all_days = std::collections::HashSet::new();
+
+    for stats in filtered_stats {
+        total_cost += stats.daily_stats.values().map(|s| s.stats.cost).sum::<f64>();
+        total_cached += stats
+            .daily_stats
+            .values()
+            .map(|s| s.stats.cached_tokens)
+            .sum::<u64>();
+        total_input += stats
+            .daily_stats
+            .values()
+            .map(|s| s.stats.input_tokens)
+            .sum::<u64>();
+        total_output += stats
+            .daily_stats
+            .values()
+            .map(|s| s.stats.output_tokens)
+            .sum::<u64>();
+        total_tool_calls += stats
+            .daily_stats
+            .values()
+            .map(|s| s.stats.tool_calls as u64)
+            .sum::<u64>();
+        
+        // Collect unique days across all tools that have actual data
+        for (day, day_stats) in &stats.daily_stats {
+            if day_stats.stats.cost > 0.0
+                || day_stats.stats.input_tokens > 0
+                || day_stats.stats.output_tokens > 0
+                || day_stats.stats.cached_tokens > 0
+                || day_stats.stats.tool_calls > 0
+                || day_stats.ai_messages > 0
+                || day_stats.conversations > 0
+            {
+                all_days.insert(day);
+            }
+        }
+    }
+
     let total_tokens = total_cached + total_input + total_output;
+    let tools_count = filtered_stats.len();
 
     // Define summary rows with labels and values
     let summary_rows = vec![
@@ -950,8 +976,13 @@ fn draw_summary_stats(
         ("Cost:", format!("${total_cost:.2}"), Color::LightYellow),
         (
             "Days tracked:",
-            stats.daily_stats.len().to_string(),
+            all_days.len().to_string(),
             Color::White,
+        ),
+        (
+            "Tools:",
+            tools_count.to_string(),
+            Color::Cyan,
         ),
     ];
 

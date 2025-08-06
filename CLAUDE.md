@@ -103,7 +103,7 @@ Automatically categorizes files into:
 ### Dependencies
 
 Core dependencies:
-- `serde`/`serde_json` - JSON serialization and parsing
+- `serde`/`simd-json` - SIMD-optimized JSON serialization and parsing
 - `chrono`/`chrono-tz` - Timestamp handling and timezone conversion
 - `ratatui` - Rich terminal user interface framework
 - `crossterm` - Cross-platform terminal manipulation

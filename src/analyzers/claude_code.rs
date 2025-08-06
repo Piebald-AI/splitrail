@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use simd_json::prelude::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -129,17 +130,17 @@ pub enum ContentBlock {
     ToolUse {
         id: String,
         name: String,
-        input: serde_json::Value, // e.g. "toolu_01K7hbuwktKtti8mQb1wH2q8"
+        input: simd_json::OwnedValue, // e.g. "toolu_01K7hbuwktKtti8mQb1wH2q8"
     },
     ToolResult {
         tool_use_id: String, // e.g. "toolu_01K7hbuwktKtti8mQb1wH2q8"
         content: Content,    // e.g. "Found 4 files\nC:\\..."
     },
     Text {
-        text: String,
+        text: serde_bytes::ByteBuf,
     },
     Thinking {
-        thinking: String,
+        thinking: serde_bytes::ByteBuf,
         signature: String,
     },
     Image {
@@ -150,7 +151,7 @@ pub enum ContentBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Content {
-    String(String),
+    String(serde_bytes::ByteBuf),
     Blocks(Vec<ContentBlock>),
 }
 
@@ -203,9 +204,9 @@ struct ClaudeCodeMessageEntry {
     session_id: Option<String>, // e.g. "92a07d6b-b12d-40d7-b184-aa04762ba0d6"
     version: Option<String>,    // e.g. "1.0.61"
     message: Option<Message>,
-    tool_use_result: Option<serde_json::Value>, // For user messages only.
+    tool_use_result: Option<simd_json::OwnedValue>, // For user messages only.
     request_id: Option<String>,                 // e.g. "req_0191C3ttfWOg3zRCDNdSFGv3"
-    uuid: Option<String>,                       // e.g. "a6ae4765-8274-4d00-8433-4fb28f4b387b"
+    uuid: String,                               // e.g. "a6ae4765-8274-4d00-8433-4fb28f4b387b"
     timestamp: DateTime<Utc>,                   // e.g. "2025-07-12T22:12:00.572Z"
 }
 
@@ -254,7 +255,7 @@ pub mod tool_schema {
 
 pub fn extract_tool_stats(
     message_content: &Content,
-    tool_use_result: &Option<serde_json::Value>,
+    tool_use_result: &Option<simd_json::OwnedValue>,
 ) -> Stats {
     let mut stats = Stats::default();
 
@@ -281,7 +282,7 @@ pub fn extract_tool_stats(
 
     if let Some(tool_result) = &tool_use_result
         && let Ok(todo_write_result) =
-            serde_json::from_value::<tool_schema::TodoWriteResult>(tool_result.clone())
+            simd_json::serde::from_owned_value::<tool_schema::TodoWriteResult>(tool_result.clone())
     {
         let old_todos = todo_write_result.old_todos;
         let new_todos = todo_write_result.new_todos;
@@ -340,38 +341,43 @@ pub fn parse_jsonl_file<T>(
 where
     T: Read,
 {
+    // We do this instead of using the `sessionId` property on the message objects because
+    // forked conversations keep the `sessionId` from the parent.
+    let session_id = file_path.file_stem().unwrap().to_str().unwrap();
+
     let project_hash = extract_and_hash_project_id(file_path);
     let mut entries = Vec::new();
     let file_path_str = file_path.to_string_lossy();
 
-    for line_result in buffer_reader.lines() {
+    for (i, line_result) in buffer_reader.lines().enumerate() {
         let line = match line_result {
             Ok(l) if !l.trim().is_empty() => l,
             _ => continue,
         };
 
         // Parse the line, filtering various invalid scenarios.
-        let parsed_line = serde_json::from_str::<ClaudeCodeEntry>(&line);
-        let (message_id, model, content, usage, timestamp, request_id, tool_use_result) =
+        let parsed_line = simd_json::from_slice::<ClaudeCodeEntry>(&mut line.clone().into_bytes());
+        let (message_id, model, content, usage, timestamp, request_id, tool_use_result, uuid) =
             match parsed_line {
                 // Only get real user/AI messages; filter out summaries and any garbage message entries.
                 Ok(ClaudeCodeEntry::Message(ClaudeCodeMessageEntry {
-                    message:
-                        Some(Message {
-                            id: message_id,
-                            model,
-                            content: Some(content),
-                            usage,
-                            ..
-                        }),
-                    timestamp,
-                    tool_use_result,
-                    request_id,
-                    ..
-                // Skip messages for which no model is specified, or the model is `<synthetic>`;
-                // i.e. Claude Code-generated system messages.  These have their token usage all
-                // 0 anyway.
-                })) if !matches!(model.as_deref(), Some("<synthetic>")) => {
+                                                message:
+                                                Some(Message {
+                                                         id: message_id,
+                                                         model,
+                                                         content: Some(content),
+                                                         usage,
+                                                         ..
+                                                     }),
+                                                timestamp,
+                                                tool_use_result,
+                                                request_id,
+                                                uuid,
+                                                ..
+                                                // Skip messages for which no model is specified, or the model is `<synthetic>`;
+                                                // i.e. Claude Code-generated system messages.  These have their token usage all
+                                                // 0 anyway.
+                                            })) if !matches!(model.as_deref(), Some("<synthetic>")) => {
                     (
                         message_id,
                         model,
@@ -380,21 +386,22 @@ where
                         timestamp,
                         request_id,
                         tool_use_result,
+                        uuid,
                     )
                 }
                 Err(e) => {
-                    println!("Skipping invalid entry: {}", e);
+                    println!("Skipping invalid entry in {} line {}: {}", file_path.display(), i + 1, e);
                     continue;
                 }
                 _ => continue,
             };
 
         let mut msg = ConversationMessage {
-            global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp)),
+            global_hash: hash_text(&format!("{}_{uuid}", session_id)),
             local_hash: None,
             application: Application::ClaudeCode,
             model: model.clone(),
-            timestamp,
+            date: timestamp,
             project_hash: project_hash.clone(),
             conversation_hash: hash_text(&file_path_str),
             stats: extract_tool_stats(&content, &tool_use_result),

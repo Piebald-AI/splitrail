@@ -14,6 +14,7 @@ mod analyzer;
 mod analyzers;
 mod config;
 mod models;
+mod reqwest_simd_json;
 mod tui;
 mod types;
 mod upload;

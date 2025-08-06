@@ -23,7 +23,8 @@ pub enum MessageRole {
 #[serde(rename_all = "camelCase")]
 pub struct ConversationMessage {
     pub application: Application,
-    pub timestamp: DateTime<Utc>,
+    #[serde(rename = "date")]
+    pub date: DateTime<Utc>,
     pub project_hash: String,
     pub conversation_hash: String,
     /// The hash of this message, local to the application that we're gathering data from.  E.g.,
