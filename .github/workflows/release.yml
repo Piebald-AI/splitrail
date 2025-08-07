@@ -261,7 +261,7 @@ jobs:
           Architecture: ${DPKG_ARCH}
           Provides: ${{ needs.crate_metadata.outputs.name }}
           Conflicts: ${DPKG_CONFLICTS}
-          Description: Blazing fast, single-executable, cross-platform, agentic development monitor.  Supports Claude Code, Gemini CLI, and Codex (and more coming soon), and integrates with the Splitrail Leaderboard.
+          Description: Blazing fast, single-executable, cross-platform, agentic development monitor.  Supports Claude Code, Gemini CLI, and Codex CLI (and more coming soon), and integrates with the Splitrail Leaderboard.
           EOF
 
           DPKG_PATH="${DPKG_STAGING}/${DPKG_NAME}"

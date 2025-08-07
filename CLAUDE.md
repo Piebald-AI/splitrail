@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Rust that provides detailed analytics for Claude Code, Codex, and Gemini CLI usage. It features a rich TUI (Terminal User Interface), automatic data upload to the Splitrail Leaderboard, and extensive usage statistics including token counts, costs, file operations, tool usage, and productivity metrics.
+Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Rust that provides detailed analytics for Claude Code, Codex CLI, and Gemini CLI usage. It features a rich TUI (Terminal User Interface), automatic data upload to the Splitrail Leaderboard, and extensive usage statistics including token counts, costs, file operations, tool usage, and productivity metrics.
 
 ## Development Commands
 
@@ -31,8 +31,8 @@ Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Ru
 1. **Main Module** (`src/main.rs`): Command-line interface with subcommand routing
 2. **Analyzer Framework** (`src/analyzer.rs`): Trait-based analyzer architecture for multiple AI tools
 3. **Claude Code Analyzer** (`src/analyzers/claude_code.rs`): Analysis engine for Claude Code data
-4. **Codex Analyzer** (`src/analyzers/codex.rs`): Analysis engine for GitHub Codex data
-5. **Gemini CLI Analyzer** (`src/analyzers/gemini.rs`): Analysis engine for Gemini CLI data
+4. **Codex CLI Analyzer** (`src/analyzers/codex_cli.rs`): Analysis engine for Codex CLI data
+5. **Gemini CLI Analyzer** (`src/analyzers/gemini_cli.rs`): Analysis engine for Gemini CLI data
 6. **TUI Module** (`src/tui.rs`): Rich terminal user interface using ratatui
 7. **Upload Module** (`src/upload.rs`): HTTP client for Splitrail Leaderboard integration
 8. **Config Module** (`src/config.rs`): Configuration file management
@@ -57,7 +57,7 @@ Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Ru
 
 1. **Multi-Tool Data Discovery**:
    - Claude Code: `~/.claude/projects` directories (JSONL files)
-   - Codex: GitHub CLI data sources
+   - Codex CLI: `~/.codex/sessions/**/*.jsonl` files
    - Gemini CLI: `~/.gemini/tmp/*/chats/*.json` directories (JSON session files)
 2. **Flexible Conversation Parsing**: Processes different file formats (JSONL, JSON sessions)
 3. **Advanced Deduplication**: Uses tool-specific hashing strategies to prevent duplicate entries
@@ -76,15 +76,28 @@ Currently supports:
 - `claude-opus-4-20250514` (Opus 4): $0.015/$0.075 per 1K input/output tokens
 - Cache pricing for both models (creation + read costs)
 
-**Gemini Models:**
+**Gemini CLI Models:**
 - `gemini-2.5-pro`: $0.001/$0.003 per 1K input/output tokens
 - `gemini-2.5-flash`: $0.0005/$0.0015 per 1K input/output tokens
 - `gemini-1.5-pro`: Legacy model support
 - `gemini-1.5-flash`: Legacy model support
 - Cache read pricing supported
 
-**Codex Models:**
-- GitHub Codex model support with fallback pricing
+**Codex CLI Models:**
+- `o4-mini`: $1.10/$4.40 per 1M input/output tokens (cached: $0.275 per 1M)
+- `o3`: $2.00/$8.00 per 1M input/output tokens (cached: $0.50 per 1M) 
+- `o3-mini`: $1.10/$4.40 per 1M input/output tokens (cached: $0.55 per 1M)
+- `o3-pro`: $20.00/$80.00 per 1M input/output tokens (no caching)
+- `o1`, `o1-preview`: $15.00/$60.00 per 1M input/output tokens (cached: $7.50 per 1M)
+- `o1-mini`: $1.10/$4.40 per 1M input/output tokens (cached: $0.55 per 1M)
+- `o1-pro`: $150.00/$600.00 per 1M input/output tokens (no caching)
+- `codex-mini-latest`: $1.50/$6.00 per 1M input/output tokens (cached: $0.375 per 1M)
+- `gpt-4.1`: $2.00/$8.00 per 1M input/output tokens (cached: $0.50 per 1M)
+- `gpt-4.1-mini`: $0.40/$1.60 per 1M input/output tokens (cached: $0.10 per 1M)
+- `gpt-4.1-nano`: $0.10/$0.40 per 1M input/output tokens (cached: $0.025 per 1M)
+- `gpt-4o`: $2.50/$10.00 per 1M input/output tokens (cached: $1.25 per 1M)
+- `gpt-4o-mini`: $0.15/$0.60 per 1M input/output tokens (cached: $0.075 per 1M)
+- `gpt-4-turbo`: $10.00/$30.00 per 1M input/output tokens (no caching)
 
 **Features:**
 - Fallback pricing for unknown models
@@ -141,7 +154,7 @@ auto_upload = false
 
 ### Multi-Tool Support
 - **Claude Code**: Full support for JSONL conversation files, TodoWrite/TodoRead tracking
-- **Codex**: GitHub CLI integration with function call analytics
+- **Codex CLI**: Command-line coding agent with shell command execution, reasoning model support, and token tracking
 - **Gemini CLI**: JSON session parsing with thoughts tracking and multi-dimensional tokens
 
 ### Terminal User Interface
@@ -160,7 +173,7 @@ auto_upload = false
 - **Token Usage**: Input, output, cache, thoughts, and tool token consumption
 - **Cost Analysis**: Precise cost calculations per model and tool
 - **File Operations**: Read/write/edit operations with byte/line counts
-- **Tool Usage**: Tool-specific command tracking (Bash, Glob, Grep for Claude Code; read_many_files, replace, run_shell_command for Gemini CLI)
+- **Tool Usage**: Tool-specific command tracking (Bash, Glob, Grep for Claude Code; shell command execution and file operations for Codex CLI; read_many_files, replace, run_shell_command for Gemini CLI)
 - **Todo Management**: Task creation, completion, and productivity metrics (Claude Code)
 - **Conversation Analytics**: Message counts, tool calls, and flow analysis
 - **Deduplication**: Prevents duplicate entries across multiple data sources

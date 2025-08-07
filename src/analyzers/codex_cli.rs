@@ -14,18 +14,18 @@ use crate::types::{
 };
 use crate::utils::{deserialize_optional_utc_timestamp, deserialize_utc_timestamp, hash_text};
 
-pub struct CodexAnalyzer;
+pub struct CodexCliAnalyzer;
 
-impl CodexAnalyzer {
+impl CodexCliAnalyzer {
     pub fn new() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl Analyzer for CodexAnalyzer {
+impl Analyzer for CodexCliAnalyzer {
     fn display_name(&self) -> &'static str {
-        "Codex"
+        "Codex CLI"
     }
 
     fn get_data_glob_patterns(&self) -> Vec<String> {
@@ -69,7 +69,7 @@ impl Analyzer for CodexAnalyzer {
 
         let aggregated: Result<Vec<ConversationMessage>> = sources
             .into_par_iter()
-            .map(|source| parse_codex_jsonl_file(&source.path))
+            .map(|source| parse_codex_cli_jsonl_file(&source.path))
             // Start the reduction with an empty vector and extend it with the
             // entries coming from each successfully-parsed file.
             .try_reduce(Vec::new, |mut acc, mut entries| {
@@ -77,7 +77,7 @@ impl Analyzer for CodexAnalyzer {
                 Ok(acc)
             });
 
-        // For Codex, we don't need to deduplicate since each session is separate
+        // For Codex CLI, we don't need to deduplicate since each session is separate
         // but we keep the logic encapsulated for future changes.
         aggregated
     }
@@ -106,10 +106,10 @@ impl Analyzer for CodexAnalyzer {
     }
 }
 
-// CODEX JSONL FILES SCHEMA
+// CODEX CLI JSONL FILES SCHEMA
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexTokenUsage {
+struct CodexCliTokenUsage {
     #[serde(default)]
     input_tokens: u64,
     #[serde(default)]
@@ -123,18 +123,18 @@ struct CodexTokenUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexMessage {
+struct CodexCliMessage {
     #[serde(rename = "type")]
     message_type: String,
     role: Option<String>,
     content: Option<simd_json::OwnedValue>,
-    token_usage: Option<CodexTokenUsage>,
+    token_usage: Option<CodexCliTokenUsage>,
     #[serde(deserialize_with = "deserialize_utc_timestamp")]
     timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexShellAction {
+struct CodexCliShellAction {
     #[serde(rename = "type")]
     action_type: String,
     command: Vec<String>,
@@ -144,19 +144,19 @@ struct CodexShellAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexShellCall {
+struct CodexCliShellCall {
     #[serde(rename = "type")]
     call_type: String,
     id: Option<String>,
     call_id: Option<String>,
     status: Option<String>,
-    action: Option<CodexShellAction>,
+    action: Option<CodexCliShellAction>,
     #[serde(deserialize_with = "deserialize_optional_utc_timestamp")]
     timestamp: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexFunctionOutput {
+struct CodexCliFunctionOutput {
     #[serde(rename = "type")]
     output_type: String,
     call_id: Option<String>,
@@ -166,7 +166,7 @@ struct CodexFunctionOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CodexSessionHeader {
+struct CodexCliSessionHeader {
     id: String,
     #[serde(deserialize_with = "deserialize_utc_timestamp")]
     timestamp: DateTime<Utc>,
@@ -176,16 +176,16 @@ struct CodexSessionHeader {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-enum CodexEntry {
-    SessionHeader(CodexSessionHeader),
-    Message(CodexMessage),
-    ShellCall(CodexShellCall),
-    FunctionOutput(CodexFunctionOutput),
+enum CodexCliEntry {
+    SessionHeader(CodexCliSessionHeader),
+    Message(CodexCliMessage),
+    ShellCall(CodexCliShellCall),
+    FunctionOutput(CodexCliFunctionOutput),
     // Fallback for unknown entries
     Unknown(simd_json::OwnedValue),
 }
 
-fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
+fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
     let mut entries = Vec::new();
     let file_path_str = file_path.to_string_lossy();
 
@@ -193,7 +193,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
 
     let reader = BufReader::with_capacity(64 * 1024, file);
     let mut session_model: Option<String> = None;
-    let mut pending_shell_calls: HashMap<String, CodexShellCall> = HashMap::new();
+    let mut pending_shell_calls: HashMap<String, CodexCliShellCall> = HashMap::new();
 
     for line_result in reader.lines() {
         let line = match line_result {
@@ -205,16 +205,16 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
             continue;
         }
 
-        let entry = match simd_json::from_slice::<CodexEntry>(&mut line.clone().into_bytes()) {
+        let entry = match simd_json::from_slice::<CodexCliEntry>(&mut line.clone().into_bytes()) {
             Ok(entry) => entry,
             Err(_) => continue,
         };
 
         match entry {
-            CodexEntry::SessionHeader(header) => {
+            CodexCliEntry::SessionHeader(header) => {
                 session_model = header.model;
             }
-            CodexEntry::Message(message) => {
+            CodexCliEntry::Message(message) => {
                 if message.message_type == "message"
                     && let Some(role) = &message.role
                 {
@@ -278,7 +278,7 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                     }
                 }
             }
-            CodexEntry::ShellCall(shell_call) => {
+            CodexCliEntry::ShellCall(shell_call) => {
                 if shell_call.call_type == "local_shell_call" {
                     if let Some(call_id) = &shell_call.call_id {
                         pending_shell_calls.insert(call_id.clone(), shell_call.clone());
@@ -308,11 +308,11 @@ fn parse_codex_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> 
                     });
                 }
             }
-            CodexEntry::FunctionOutput(_) => {
+            CodexCliEntry::FunctionOutput(_) => {
                 // We can track function outputs if needed, but for now just skip
                 // Could be used to track command success/failure status
             }
-            CodexEntry::Unknown(_) => {
+            CodexCliEntry::Unknown(_) => {
                 // Skip unknown entries
             }
         }
@@ -447,14 +447,14 @@ fn extract_line_count_from_sed(command: &str) -> Option<u64> {
     None
 }
 
-fn calculate_cost_from_tokens(usage: &CodexTokenUsage, model_name: &str) -> f64 {
+fn calculate_cost_from_tokens(usage: &CodexCliTokenUsage, model_name: &str) -> f64 {
     let total_output_tokens = usage.output_tokens + usage.reasoning_output_tokens;
 
     calculate_total_cost(
         model_name,
         usage.input_tokens,
         total_output_tokens,
-        0, // Codex doesn't have separate cache creation tokens
+        0, // Codex CLI doesn't have separate cache creation tokens
         usage.cached_input_tokens,
     )
 }

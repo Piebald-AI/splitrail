@@ -1,4 +1,5 @@
 Output cli.gif
+Output cli.mp4
 
 Set FontSize 32
 Set Width 3000
