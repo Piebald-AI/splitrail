@@ -315,7 +315,7 @@ fn draw_ui(
             Constraint::Length(3),                             // Header
             Constraint::Length(1),                             // Tabs
             Constraint::Min(3),                                // Main table
-            Constraint::Length(7),                             // Summary stats
+            Constraint::Length(9),                             // Summary stats
             Constraint::Length(if has_error { 3 } else { 1 }), // Help text
         ])
         .split(frame.area())
@@ -921,7 +921,11 @@ fn draw_summary_stats(
     let mut all_days = std::collections::HashSet::new();
 
     for stats in filtered_stats {
-        total_cost += stats.daily_stats.values().map(|s| s.stats.cost).sum::<f64>();
+        total_cost += stats
+            .daily_stats
+            .values()
+            .map(|s| s.stats.cost)
+            .sum::<f64>();
         total_cached += stats
             .daily_stats
             .values()
@@ -942,7 +946,7 @@ fn draw_summary_stats(
             .values()
             .map(|s| s.stats.tool_calls as u64)
             .sum::<u64>();
-        
+
         // Collect unique days across all tools that have actual data
         for (day, day_stats) in &stats.daily_stats {
             if day_stats.stats.cost > 0.0
@@ -964,6 +968,11 @@ fn draw_summary_stats(
     // Define summary rows with labels and values
     let summary_rows = vec![
         (
+            "Tools:",
+            format!("{} tracked", tools_count.to_string()),
+            Color::Cyan,
+        ),
+        (
             "Tokens:",
             format_number(total_tokens, format_options),
             Color::LightBlue,
@@ -974,16 +983,7 @@ fn draw_summary_stats(
             Color::LightGreen,
         ),
         ("Cost:", format!("${total_cost:.2}"), Color::LightYellow),
-        (
-            "Days tracked:",
-            all_days.len().to_string(),
-            Color::White,
-        ),
-        (
-            "Tools:",
-            tools_count.to_string(),
-            Color::Cyan,
-        ),
+        ("Days tracked:", all_days.len().to_string(), Color::White),
     ];
 
     // Find the maximum label width for alignment
@@ -994,7 +994,7 @@ fn draw_summary_stats(
         .unwrap_or(0);
 
     // Create lines with consistent spacing
-    let summary_lines: Vec<Line> = summary_rows
+    let mut summary_lines: Vec<Line> = summary_rows
         .into_iter()
         .map(|(label, value, color)| {
             Line::from(vec![
@@ -1004,6 +1004,18 @@ fn draw_summary_stats(
             ])
         })
         .collect();
+
+    summary_lines.insert(
+        0,
+        Line::from(vec![Span::styled(
+            "-----------------------------",
+            Style::default().dim(),
+        )]),
+    );
+    summary_lines.insert(
+        0,
+        Line::from(vec![Span::styled("Totals", Style::default().bold().dim())]),
+    );
 
     let summary_widget =
         Paragraph::new(Text::from(summary_lines)).block(Block::default().title(""));
