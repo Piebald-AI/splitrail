@@ -234,11 +234,44 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
         caching: CachingSupport::None,
     },
+    "gpt-5" => ModelInfo {
+        canonical_name: "gpt-5",
+        aliases: &["gpt-5-2025-08-07"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.25,
+            output_per_1m: 10.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.125,
+        },
+    },
+    "gpt-5-mini" => ModelInfo {
+        canonical_name: "gpt-5-mini",
+        aliases: &["gpt-5-mini-2025-08-07"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.25,
+            output_per_1m: 2.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.025,
+        },
+    },
+    "gpt-5-nano" => ModelInfo {
+        canonical_name: "gpt-5-nano",
+        aliases: &["gpt-5-nano-2025-08-07"],
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.05,
+            output_per_1m: 0.4,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.005,
+        },
+    },
 
     // Anthropic Models
     "claude-opus-4" => ModelInfo {
         canonical_name: "claude-opus-4",
-        aliases: &["claude-opus-4-20250514", "claude-opus-4-0"],
+        aliases: &["claude-opus-4-20250514", "claude-opus-4-0", "claude-opus-4.1", "claude-opus-4-1-20250805"],
         pricing: PricingStructure::Flat {
             input_per_1m: 15.0,
             output_per_1m: 75.0,
@@ -576,11 +609,19 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "codex-mini-latest" => "codex-mini-latest",
     "gpt-4-turbo" => "gpt-4-turbo",
     "gpt-4-turbo-2024-04-09" => "gpt-4-turbo",
+    "gpt-5" => "gpt-5",
+    "gpt-5-2025-08-07" => "gpt-5",
+    "gpt-5-mini" => "gpt-5-mini",
+    "gpt-5-mini-2025-08-07" => "gpt-5-mini",
+    "gpt-5-nano" => "gpt-5-nano",
+    "gpt-5-nano-2025-08-07" => "gpt-5-nano",
 
     // Anthropic aliases
     "claude-opus-4" => "claude-opus-4",
     "claude-opus-4-20250514" => "claude-opus-4",
     "claude-opus-4-0" => "claude-opus-4",
+    "claude-opus-4.1" => "claude-opus-4",
+    "claude-opus-4-1-20250805" => "claude-opus-4",
     "claude-sonnet-4" => "claude-sonnet-4",
     "claude-sonnet-4-20250514" => "claude-sonnet-4",
     "claude-sonnet-4-0" => "claude-sonnet-4",

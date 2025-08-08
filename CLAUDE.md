@@ -74,7 +74,14 @@ Currently supports:
 **Claude Models:**
 - `claude-sonnet-4-20250514` (Sonnet 4): $0.003/$0.015 per 1K input/output tokens
 - `claude-opus-4-20250514` (Opus 4): $0.015/$0.075 per 1K input/output tokens
+- `claude-opus-4.1` / `claude-opus-4-1-20250805` (Opus 4.1): Same as Opus 4 pricing (aliases)
 - Cache pricing for both models (creation + read costs)
+
+**GPT Models:**
+- `gpt-5`: $1.25/$10.00 per 1K input/output tokens
+- `gpt-5-mini`: $0.25/$2.00 per 1K input/output tokens
+- `gpt-5-nano`: $0.05/$0.40 per 1K input/output tokens
+- Cache pricing supported for all GPT-5 series models
 
 **Gemini CLI Models:**
 - `gemini-2.5-pro`: $0.001/$0.003 per 1K input/output tokens
