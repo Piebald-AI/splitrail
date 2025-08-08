@@ -205,9 +205,9 @@ struct ClaudeCodeMessageEntry {
     version: Option<String>,    // e.g. "1.0.61"
     message: Option<Message>,
     tool_use_result: Option<simd_json::OwnedValue>, // For user messages only.
-    request_id: Option<String>,                 // e.g. "req_0191C3ttfWOg3zRCDNdSFGv3"
-    uuid: String,                               // e.g. "a6ae4765-8274-4d00-8433-4fb28f4b387b"
-    timestamp: DateTime<Utc>,                   // e.g. "2025-07-12T22:12:00.572Z"
+    request_id: Option<String>,                     // e.g. "req_0191C3ttfWOg3zRCDNdSFGv3"
+    uuid: String,                                   // e.g. "a6ae4765-8274-4d00-8433-4fb28f4b387b"
+    timestamp: DateTime<Utc>,                       // e.g. "2025-07-12T22:12:00.572Z"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,30 +456,38 @@ where
 pub fn deduplicate_messages_by_local_hash(
     messages: Vec<ConversationMessage>,
 ) -> Vec<ConversationMessage> {
-    let mut seen_messages = HashMap::<String, ConversationMessage>::new();
+    let mut seen_hashes = HashMap::<String, usize>::new(); // hash -> index in result
     let mut deduplicated_entries: Vec<ConversationMessage> = Vec::new();
 
     for message in messages {
         if let Some(local_hash) = &message.local_hash {
-            if let Some(existing_message) = seen_messages.get_mut(local_hash) {
-                if existing_message.stats.input_tokens
-                    + existing_message.stats.output_tokens
-                    + existing_message.stats.cache_creation_tokens
-                    + existing_message.stats.cache_read_tokens
-                    + existing_message.stats.cached_tokens
-                    == message.stats.input_tokens
-                        + message.stats.output_tokens
-                        + message.stats.cache_creation_tokens
-                        + message.stats.cache_read_tokens
-                        + message.stats.cached_tokens
-                {
-                    *existing_message = message.clone();
-                    continue;
+            if let Some(&existing_index) = seen_hashes.get(local_hash) {
+                let current_tokens = message.stats.input_tokens
+                    + message.stats.output_tokens
+                    + message.stats.cache_creation_tokens
+                    + message.stats.cache_read_tokens
+                    + message.stats.cached_tokens;
+
+                let existing_tokens = deduplicated_entries[existing_index].stats.input_tokens
+                    + deduplicated_entries[existing_index].stats.output_tokens
+                    + deduplicated_entries[existing_index].stats.cache_creation_tokens
+                    + deduplicated_entries[existing_index].stats.cache_read_tokens
+                    + deduplicated_entries[existing_index].stats.cached_tokens;
+
+                // If this message has more tokens than the saved one, replace the existing one.
+                if current_tokens > existing_tokens {
+                    deduplicated_entries[existing_index] = message;
                 }
+                // Otherwise skip this message.
+            } else {
+                // First time seeing this hash, add it
+                seen_hashes.insert(local_hash.clone(), deduplicated_entries.len());
+                deduplicated_entries.push(message);
             }
-            seen_messages.insert(local_hash.clone(), message.clone());
+        } else {
+            // No local hash, always keep
+            deduplicated_entries.push(message);
         }
-        deduplicated_entries.push(message);
     }
 
     deduplicated_entries

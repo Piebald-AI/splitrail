@@ -114,14 +114,11 @@ fn test_deduplicate_messages_by_local_hash() {
     
     let deduplicated = deduplicate_messages_by_local_hash(messages);
     
-    // Based on the actual deduplication logic: when token counts are different,
-    // both messages are kept in deduplicated_entries
-    assert_eq!(deduplicated.len(), 2);
+    // Deduplication logic only keeps the message with highest token count.
+    assert_eq!(deduplicated.len(), 1);
     
-    // The first message should be the one with lower token usage
-    assert_eq!(deduplicated[0].stats.input_tokens, 10);
-    // The second message should be the one with higher token usage  
-    assert_eq!(deduplicated[1].stats.input_tokens, 15);
+    // Should keep the message with higher token usage (15 tokens)
+    assert_eq!(deduplicated[0].stats.input_tokens, 15);
     
     // Test with manually created messages that should be deduplicated
     let mut test_messages = Vec::new();
@@ -163,14 +160,11 @@ fn test_deduplicate_messages_by_local_hash() {
     test_messages.push(duplicate_msg.clone());
     
     let deduplicated_test = deduplicate_messages_by_local_hash(test_messages);
-    // Based on actual logic: when token counts are different, both messages are kept
-    assert_eq!(deduplicated_test.len(), 2);
-    // First message (lower token usage)
-    assert_eq!(deduplicated_test[0].global_hash, "global1");
-    assert_eq!(deduplicated_test[0].stats.input_tokens, 10);
-    // Second message (higher token usage)
-    assert_eq!(deduplicated_test[1].global_hash, "global2");
-    assert_eq!(deduplicated_test[1].stats.input_tokens, 15);
+    // Duplication logic only keeps the message with highest token count
+    assert_eq!(deduplicated_test.len(), 1);
+    // Should keep the message with higher token usage (global2)
+    assert_eq!(deduplicated_test[0].global_hash, "global2");
+    assert_eq!(deduplicated_test[0].stats.input_tokens, 15);
 }
 
 #[test]
