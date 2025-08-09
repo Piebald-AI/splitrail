@@ -12,10 +12,10 @@ Also check out our developer-first agentic AI experience, [Piebald](https://pieb
 ## Screenshots
 
 ### [Splitrail CLI](https://splitrail.dev)
-<img width="750" alt="Screenshot of the Splitrail CLI" src="./screenshots/cli.gif" />
+<img width="750" alt="Screenshot of the Splitrail CLI" src="https://raw.githubusercontent.com/Piebald-AI/splitrail/main/screenshots/cli.gif" />
 
 ### [Splitrail Cloud](https://splitrail.dev)
-<img width="750" alt="Screenshot of Splitrail Cloud" src="./screenshots/cloud.png" />
+<img width="750" alt="Screenshot of Splitrail Cloud" src="https://raw.githubusercontent.com/Piebald-AI/splitrail/main/screenshots/cloud.png" />
 
 ## Development
 
