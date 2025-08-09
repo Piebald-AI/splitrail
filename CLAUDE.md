@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Rust that provides detailed analytics for Claude Code, Codex CLI, and Gemini CLI usage. It features a rich TUI (Terminal User Interface), automatic data upload to the Splitrail Leaderboard, and extensive usage statistics including token counts, costs, file operations, tool usage, and productivity metrics.
+Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Rust that provides detailed analytics for Claude Code, Codex CLI, and Gemini CLI usage. It features a rich TUI (Terminal User Interface), automatic data upload to Splitrail Cloud, and extensive usage statistics including token counts, costs, file operations, tool usage, and productivity metrics.
 
 ## Development Commands
 
@@ -13,12 +13,12 @@ Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Ru
 - `cargo build` - Build the project in debug mode
 - `cargo build --release` - Build optimized release version
 - `cargo run` - Run with default behavior (show stats + optional auto-upload)
-- `cargo run -- upload` - Force upload stats to leaderboard
+- `cargo run -- upload` - Manually upload stats to Splitrail Cloud
 - `cargo run -- config <subcommand>` - Manage configuration
 
 ### Available Commands
 - `splitrail` - Show Claude Code stats in TUI and auto-upload if configured
-- `splitrail upload` - Force upload stats to Splitrail Leaderboard
+- `splitrail upload` - Manually upload stats to Splitrail Cloud
 - `splitrail config init` - Create default configuration file
 - `splitrail config show` - Display current configuration
 - `splitrail config set <key> <value>` - Set configuration values
@@ -34,7 +34,7 @@ Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Ru
 4. **Codex CLI Analyzer** (`src/analyzers/codex_cli.rs`): Analysis engine for Codex CLI data
 5. **Gemini CLI Analyzer** (`src/analyzers/gemini_cli.rs`): Analysis engine for Gemini CLI data
 6. **TUI Module** (`src/tui.rs`): Rich terminal user interface using ratatui
-7. **Upload Module** (`src/upload.rs`): HTTP client for Splitrail Leaderboard integration
+7. **Upload Module** (`src/upload.rs`): HTTP client for Splitrail Cloud integration
 8. **Config Module** (`src/config.rs`): Configuration file management
 9. **Types Module** (`src/types.rs`): Core data structures and enums
 10. **Models Module** (`src/models.rs`): Model pricing definitions
@@ -65,7 +65,7 @@ Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Ru
 5. **File Operation Tracking**: Monitors tool usage across different AI coding assistants
 6. **Todo Analytics**: Tracks TodoWrite/TodoRead usage and task management (Claude Code)
 7. **TUI Display**: Interactive terminal interface with multiple views and navigation
-8. **Leaderboard Integration**: Secure upload to Splitrail Leaderboard with API tokens
+8. **Splitrail Cloud Integration**: Secure upload to Splitrail Cloud with API tokens
 9. **Configuration Management**: TOML-based config with auto-upload settings
 
 ### Model Support
@@ -127,7 +127,7 @@ Core dependencies:
 - `chrono`/`chrono-tz` - Timestamp handling and timezone conversion
 - `ratatui` - Rich terminal user interface framework
 - `crossterm` - Cross-platform terminal manipulation
-- `reqwest` - HTTP client for leaderboard uploads
+- `reqwest` - HTTP client for Splitrail Cloud uploads
 - `tokio` - Async runtime for HTTP operations
 - `async-trait` - Async trait support for analyzer framework
 - `toml` - Configuration file format
@@ -170,11 +170,11 @@ auto_upload = false
 - **File Operations**: Detailed file operation analytics by category
 - **Navigation**: Keyboard controls for scrolling and interaction
 
-### Leaderboard Integration
+### Splitrail Cloud Integration
 - Secure API token-based authentication
 - Automatic daily stats upload when configured
 - Manual upload command for on-demand sharing
-- Privacy-focused: only aggregated statistics are uploaded
+- Privacy-focused: only aggregated statistics are uploaded to the leaderboard; per-day statistics are uploaded but are only shown to the user themselves
 
 ### Analytics Tracking
 - **Token Usage**: Input, output, cache, thoughts, and tool token consumption

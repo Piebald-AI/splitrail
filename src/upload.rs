@@ -121,8 +121,8 @@ where
 
 pub fn show_upload_help() {
     println!();
-    println!("To enable automatic uploads to the Splitrail Leaderboard:");
-    println!("  1. Get your API token from the leaderboard webapp");
+    println!("To enable automatic uploads to Splitrail Cloud:");
+    println!("  1. Get your API token from https://splitrail.dev/settings");
     println!("  2. Configure splitrail:");
     println!("     splitrail config set api-token YOUR_TOKEN_HERE");
     println!("     splitrail config set auto-upload true");

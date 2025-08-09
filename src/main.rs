@@ -48,7 +48,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Force upload stats to the Splitrail Leaderboard
+    /// Manually upload stats to Splitrail Cloud
     Upload,
     /// Manage configuration
     Config(ConfigArgs),
