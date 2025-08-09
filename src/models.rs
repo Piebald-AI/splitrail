@@ -52,12 +52,6 @@ pub enum CachingSupport {
 /// Complete model information with all pricing details
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
-    /// Canonical model name
-    #[allow(dead_code)]
-    pub canonical_name: &'static str,
-    /// Alternative names and versions for this model
-    #[allow(dead_code)]
-    pub aliases: &'static [&'static str],
     /// Pricing structure (flat or tiered)
     pub pricing: PricingStructure,
     /// Caching support and pricing
@@ -67,8 +61,6 @@ pub struct ModelInfo {
 static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
     // OpenAI Models
     "o4-mini" => ModelInfo {
-        canonical_name: "o4-mini",
-        aliases: &["o4-mini-2025-04-16"],
         pricing: PricingStructure::Flat {
             input_per_1m: 1.1,
             output_per_1m: 4.4,
@@ -78,8 +70,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "o3" => ModelInfo {
-        canonical_name: "o3",
-        aliases: &["o3-2025-04-16"],
         pricing: PricingStructure::Flat {
             input_per_1m: 2.0,
             output_per_1m: 8.0,
@@ -89,8 +79,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "o3-pro" => ModelInfo {
-        canonical_name: "o3-pro",
-        aliases: &["o3-pro-2025-06-10"],
         pricing: PricingStructure::Flat {
             input_per_1m: 20.0,
             output_per_1m: 80.0,
@@ -98,8 +86,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::None,
     },
     "o3-mini" => ModelInfo {
-        canonical_name: "o3-mini",
-        aliases: &["o3-mini-2025-01-31"],
         pricing: PricingStructure::Flat {
             input_per_1m: 1.1,
             output_per_1m: 4.4,
@@ -109,8 +95,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "o1" => ModelInfo {
-        canonical_name: "o1",
-        aliases: &["o1-2024-12-17"],
         pricing: PricingStructure::Flat {
             input_per_1m: 15.0,
             output_per_1m: 60.0,
@@ -120,8 +104,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "o1-preview" => ModelInfo {
-        canonical_name: "o1-preview",
-        aliases: &["o1-preview-2024-09-12"],
         pricing: PricingStructure::Flat {
             input_per_1m: 15.0,
             output_per_1m: 60.0,
@@ -131,8 +113,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "o1-mini" => ModelInfo {
-        canonical_name: "o1-mini",
-        aliases: &["o1-mini-2024-09-12"],
         pricing: PricingStructure::Flat {
             input_per_1m: 1.1,
             output_per_1m: 4.4,
@@ -142,8 +122,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "o1-pro" => ModelInfo {
-        canonical_name: "o1-pro",
-        aliases: &["o1-pro-2025-03-19"],
         pricing: PricingStructure::Flat {
             input_per_1m: 150.0,
             output_per_1m: 600.0,
@@ -151,8 +129,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::None,
     },
     "gpt-4.1" => ModelInfo {
-        canonical_name: "gpt-4.1",
-        aliases: &["gpt-4.1-2025-04-14"],
         pricing: PricingStructure::Flat {
             input_per_1m: 2.0,
             output_per_1m: 8.0,
@@ -162,8 +138,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gpt-4o" => ModelInfo {
-        canonical_name: "gpt-4o",
-        aliases: &["gpt-4o-2024-11-20", "gpt-4o-2024-08-06"],
         pricing: PricingStructure::Flat {
             input_per_1m: 2.5,
             output_per_1m: 10.0,
@@ -173,8 +147,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gpt-4o-2024-05-13" => ModelInfo {
-        canonical_name: "gpt-4o-2024-05-13",
-        aliases: &[],
         pricing: PricingStructure::Flat {
             input_per_1m: 5.0,
             output_per_1m: 10.0,
@@ -182,8 +154,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::None,
     },
     "gpt-4.1-mini" => ModelInfo {
-        canonical_name: "gpt-4.1-mini",
-        aliases: &["gpt-4.1-mini-2025-04-14"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.4,
             output_per_1m: 1.6,
@@ -193,8 +163,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gpt-4.1-nano" => ModelInfo {
-        canonical_name: "gpt-4.1-nano",
-        aliases: &["gpt-4.1-nano-2025-04-14"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.1,
             output_per_1m: 0.4,
@@ -204,8 +172,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gpt-4o-mini" => ModelInfo {
-        canonical_name: "gpt-4o-mini",
-        aliases: &["gpt-4o-mini-2024-07-18"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.15,
             output_per_1m: 0.6,
@@ -215,8 +181,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "codex-mini-latest" => ModelInfo {
-        canonical_name: "codex-mini-latest",
-        aliases: &[],
         pricing: PricingStructure::Flat {
             input_per_1m: 1.5,
             output_per_1m: 6.0,
@@ -226,8 +190,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gpt-4-turbo" => ModelInfo {
-        canonical_name: "gpt-4-turbo",
-        aliases: &["gpt-4-turbo-2024-04-09"],
         pricing: PricingStructure::Flat {
             input_per_1m: 10.0,
             output_per_1m: 30.0,
@@ -235,8 +197,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::None,
     },
     "gpt-5" => ModelInfo {
-        canonical_name: "gpt-5",
-        aliases: &["gpt-5-2025-08-07"],
         pricing: PricingStructure::Flat {
             input_per_1m: 1.25,
             output_per_1m: 10.0,
@@ -246,8 +206,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gpt-5-mini" => ModelInfo {
-        canonical_name: "gpt-5-mini",
-        aliases: &["gpt-5-mini-2025-08-07"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.25,
             output_per_1m: 2.0,
@@ -257,8 +215,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gpt-5-nano" => ModelInfo {
-        canonical_name: "gpt-5-nano",
-        aliases: &["gpt-5-nano-2025-08-07"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.05,
             output_per_1m: 0.4,
@@ -269,9 +225,17 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
     },
 
     // Anthropic Models
+    "claude-opus-4-1" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 15.0,
+            output_per_1m: 75.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 18.75,
+            cache_read_per_1m: 1.5,
+        },
+    },
     "claude-opus-4" => ModelInfo {
-        canonical_name: "claude-opus-4",
-        aliases: &["claude-opus-4-20250514", "claude-opus-4-0", "claude-opus-4.1", "claude-opus-4-1-20250805"],
         pricing: PricingStructure::Flat {
             input_per_1m: 15.0,
             output_per_1m: 75.0,
@@ -282,8 +246,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "claude-sonnet-4" => ModelInfo {
-        canonical_name: "claude-sonnet-4",
-        aliases: &["claude-sonnet-4-20250514", "claude-sonnet-4-0"],
         pricing: PricingStructure::Flat {
             input_per_1m: 3.0,
             output_per_1m: 15.0,
@@ -293,9 +255,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_read_per_1m: 0.3,
         },
     },
-    "claude-3.7-sonnet" => ModelInfo {
-        canonical_name: "claude-3.7-sonnet",
-        aliases: &["claude-3-7-sonnet-20250219", "claude-3-7-sonnet-latest"],
+    "claude-3-7-sonnet" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 3.0,
             output_per_1m: 15.0,
@@ -305,13 +265,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_read_per_1m: 0.3,
         },
     },
-    "claude-3.5-sonnet" => ModelInfo {
-        canonical_name: "claude-3.5-sonnet",
-        aliases: &[
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-sonnet-latest",
-            "claude-3-5-sonnet-20240620",
-        ],
+    "claude-3-5-sonnet" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 3.0,
             output_per_1m: 15.0,
@@ -321,9 +275,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_read_per_1m: 0.3,
         },
     },
-    "claude-3.5-haiku" => ModelInfo {
-        canonical_name: "claude-3.5-haiku",
-        aliases: &["claude-3-5-haiku-20241022", "claude-3-5-haiku-latest"],
+    "claude-3-5-haiku" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 0.8,
             output_per_1m: 4.0,
@@ -334,8 +286,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "claude-3-opus" => ModelInfo {
-        canonical_name: "claude-3-opus",
-        aliases: &["claude-3-opus-20240229"],
         pricing: PricingStructure::Flat {
             input_per_1m: 15.0,
             output_per_1m: 75.0,
@@ -346,8 +296,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "claude-3-haiku" => ModelInfo {
-        canonical_name: "claude-3-haiku",
-        aliases: &["claude-3-haiku-20240307"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.25,
             output_per_1m: 1.25,
@@ -360,12 +308,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
 
     // Google Models
     "gemini-2.5-pro" => ModelInfo {
-        canonical_name: "gemini-2.5-pro",
-        aliases: &[
-            "gemini-2.5-pro-preview-06-05",
-            "gemini-2.5-pro-preview-05-06",
-            "gemini-2.5-pro-preview-03-25",
-        ],
         pricing: PricingStructure::Tiered {
             tiers: &[
                 PricingTier {
@@ -394,11 +336,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gemini-2.5-flash" => ModelInfo {
-        canonical_name: "gemini-2.5-flash",
-        aliases: &[
-            "gemini-2.5-flash-preview-05-20",
-            "gemini-2.5-flash-preview-04-17",
-        ],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.3,
             output_per_1m: 2.5,
@@ -413,8 +350,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gemini-2.5-flash-lite" => ModelInfo {
-        canonical_name: "gemini-2.5-flash-lite",
-        aliases: &["gemini-2.5-flash-lite-06-17"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.1,
             output_per_1m: 0.4,
@@ -429,8 +364,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gemini-2.0-pro-exp-02-05" => ModelInfo {
-        canonical_name: "gemini-2.0-pro-exp-02-05",
-        aliases: &["gemini-exp-1206"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.0,
             output_per_1m: 0.0,
@@ -445,8 +378,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gemini-2.0-flash" => ModelInfo {
-        canonical_name: "gemini-2.0-flash",
-        aliases: &["gemini-2.0-flash-001", "gemini-2.0-flash-exp"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.1,
             output_per_1m: 0.4,
@@ -461,8 +392,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gemini-2.0-flash-lite" => ModelInfo {
-        canonical_name: "gemini-2.0-flash-lite",
-        aliases: &["gemini-2.0-flash-lite-001"],
         pricing: PricingStructure::Flat {
             input_per_1m: 0.075,
             output_per_1m: 0.3,
@@ -470,12 +399,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::None,
     },
     "gemini-1.5-flash" => ModelInfo {
-        canonical_name: "gemini-1.5-flash",
-        aliases: &[
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash-001",
-            "gemini-1.5-flash-002",
-        ],
         pricing: PricingStructure::Tiered {
             tiers: &[
                 PricingTier {
@@ -504,13 +427,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gemini-1.5-flash-8b" => ModelInfo {
-        canonical_name: "gemini-1.5-flash-8b",
-        aliases: &[
-            "gemini-1.5-flash-8b-latest",
-            "gemini-1.5-flash-8b-001",
-            "gemini-1.5-flash-8b-exp-0924",
-            "gemini-1.5-flash-8b-exp-0827",
-        ],
         pricing: PricingStructure::Tiered {
             tiers: &[
                 PricingTier {
@@ -539,14 +455,6 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
     },
     "gemini-1.5-pro" => ModelInfo {
-        canonical_name: "gemini-1.5-pro",
-        aliases: &[
-            "gemini-1.5-pro-latest",
-            "gemini-1.5-pro-001",
-            "gemini-1.5-pro-002",
-            "gemini-1.5-pro-exp-0827",
-            "gemini-1.5-pro-exp-0801",
-        ],
         pricing: PricingStructure::Tiered {
             tiers: &[
                 PricingTier {
@@ -620,21 +528,21 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "claude-opus-4" => "claude-opus-4",
     "claude-opus-4-20250514" => "claude-opus-4",
     "claude-opus-4-0" => "claude-opus-4",
-    "claude-opus-4.1" => "claude-opus-4",
-    "claude-opus-4-1-20250805" => "claude-opus-4",
+    "claude-opus-4.1" => "claude-opus-4-1",
+    "claude-opus-4-1-20250805" => "claude-opus-4-1",
     "claude-sonnet-4" => "claude-sonnet-4",
     "claude-sonnet-4-20250514" => "claude-sonnet-4",
     "claude-sonnet-4-0" => "claude-sonnet-4",
-    "claude-3.7-sonnet" => "claude-3.7-sonnet",
-    "claude-3-7-sonnet-20250219" => "claude-3.7-sonnet",
-    "claude-3-7-sonnet-latest" => "claude-3.7-sonnet",
-    "claude-3.5-sonnet" => "claude-3.5-sonnet",
-    "claude-3-5-sonnet-20241022" => "claude-3.5-sonnet",
-    "claude-3-5-sonnet-latest" => "claude-3.5-sonnet",
-    "claude-3-5-sonnet-20240620" => "claude-3.5-sonnet",
-    "claude-3.5-haiku" => "claude-3.5-haiku",
-    "claude-3-5-haiku-20241022" => "claude-3.5-haiku",
-    "claude-3-5-haiku-latest" => "claude-3.5-haiku",
+    "claude-3-7-sonnet" => "claude-3-7-sonnet",
+    "claude-3-7-sonnet-20250219" => "claude-3-7-sonnet",
+    "claude-3-7-sonnet-latest" => "claude-3-7-sonnet",
+    "claude-3-5-sonnet" => "claude-3-5-sonnet",
+    "claude-3-5-sonnet-20241022" => "claude-3-5-sonnet",
+    "claude-3-5-sonnet-latest" => "claude-3-5-sonnet",
+    "claude-3-5-sonnet-20240620" => "claude-3-5-sonnet",
+    "claude-3-5-haiku" => "claude-3-5-haiku",
+    "claude-3-5-haiku-20241022" => "claude-3-5-haiku",
+    "claude-3-5-haiku-latest" => "claude-3-5-haiku",
     "claude-3-opus" => "claude-3-opus",
     "claude-3-opus-20240229" => "claude-3-opus",
     "claude-3-haiku" => "claude-3-haiku",
