@@ -292,11 +292,17 @@ fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessag
                     };
 
                     let timestamp = shell_call.timestamp.unwrap_or_else(|| {
-                        DateTime::parse_from_rfc3339("1970-01-01T00:00:00Z").unwrap().into()
+                        DateTime::parse_from_rfc3339("1970-01-01T00:00:00Z")
+                            .unwrap()
+                            .into()
                     });
 
                     entries.push(ConversationMessage {
-                        global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp.to_rfc3339())),
+                        global_hash: hash_text(&format!(
+                            "{}_{}",
+                            file_path_str,
+                            timestamp.to_rfc3339()
+                        )),
                         local_hash: None,
                         conversation_hash: hash_text(&file_path_str),
                         date: timestamp,

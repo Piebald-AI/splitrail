@@ -67,7 +67,7 @@ impl Analyzer for ClaudeCodeAnalyzer {
                 let file = match File::open(&source.path) {
                     Ok(file) => file,
                     Err(e) => {
-                        eprintln!("Failed to open file: {}", e);
+                        eprintln!("Failed to open file: {e}");
                         return Vec::new();
                     }
                 };
@@ -210,6 +210,7 @@ struct ClaudeCodeMessageEntry {
     timestamp: DateTime<Utc>,                       // e.g. "2025-07-12T22:12:00.572Z"
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ClaudeCodeEntry {
@@ -397,7 +398,7 @@ where
             };
 
         let mut msg = ConversationMessage {
-            global_hash: hash_text(&format!("{}_{uuid}", session_id)),
+            global_hash: hash_text(&format!("{session_id}_{uuid}")),
             local_hash: None,
             application: Application::ClaudeCode,
             model: model.clone(),
@@ -440,7 +441,7 @@ where
                     // them here, but actually some message _across files_ can have the same
                     // message ID and request ID (probably due to resuming sessions), so we need to
                     // do it later when we have a complete pool of messages.
-                    msg.local_hash = Some(hash_text(&format!("{}_{}", request_id, message_id)));
+                    msg.local_hash = Some(hash_text(&format!("{request_id}_{message_id}")));
                 }
             }
             None => {
@@ -470,7 +471,9 @@ pub fn deduplicate_messages_by_local_hash(
 
                 let existing_tokens = deduplicated_entries[existing_index].stats.input_tokens
                     + deduplicated_entries[existing_index].stats.output_tokens
-                    + deduplicated_entries[existing_index].stats.cache_creation_tokens
+                    + deduplicated_entries[existing_index]
+                        .stats
+                        .cache_creation_tokens
                     + deduplicated_entries[existing_index].stats.cache_read_tokens
                     + deduplicated_entries[existing_index].stats.cached_tokens;
 

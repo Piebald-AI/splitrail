@@ -376,7 +376,7 @@ fn draw_ui(
             );
 
             // Summary stats - pass all filtered stats for aggregation
-            draw_summary_stats(frame, chunks[3], &filtered_stats, format_options);
+            draw_summary_stats(frame, chunks[3], filtered_stats, format_options);
         }
 
         // Help text for data view with upload status
@@ -967,11 +967,7 @@ fn draw_summary_stats(
 
     // Define summary rows with labels and values
     let summary_rows = vec![
-        (
-            "Tools:",
-            format!("{} tracked", tools_count.to_string()),
-            Color::Cyan,
-        ),
+        ("Tools:", format!("{tools_count} tracked"), Color::Cyan),
         (
             "Tokens:",
             format_number(total_tokens, format_options),

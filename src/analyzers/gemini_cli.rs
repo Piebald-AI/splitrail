@@ -175,7 +175,7 @@ fn extract_and_hash_project_id_gemini_cli(file_path: &Path) -> String {
         }
     }
 
-    return hash_text(&file_path.to_string_lossy());
+    hash_text(&file_path.to_string_lossy())
 }
 
 // Cost calculation using the centralized model system
@@ -196,7 +196,8 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
     let mut entries = Vec::new();
 
     // Parse the complete session JSON
-    let session: GeminiCliSession = simd_json::from_slice(&mut std::fs::read_to_string(file_path)?.into_bytes())?;
+    let session: GeminiCliSession =
+        simd_json::from_slice(&mut std::fs::read_to_string(file_path)?.into_bytes())?;
 
     // Process each message in the session
     for message in session.messages {
@@ -211,7 +212,11 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                     application: Application::GeminiCli,
                     project_hash: project_hash.clone(),
                     local_hash: None,
-                    global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp.to_rfc3339())),
+                    global_hash: hash_text(&format!(
+                        "{}_{}",
+                        file_path_str,
+                        timestamp.to_rfc3339()
+                    )),
                     conversation_hash: hash_text(&file_path.to_string_lossy()),
                     model: None,
                     stats: Stats::default(),
@@ -242,7 +247,11 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                     application: Application::GeminiCli,
                     model: Some(model),
                     local_hash: None,
-                    global_hash: hash_text(&format!("{}_{}", file_path_str, timestamp.to_rfc3339())),
+                    global_hash: hash_text(&format!(
+                        "{}_{}",
+                        file_path_str,
+                        timestamp.to_rfc3339()
+                    )),
                     date: timestamp,
                     project_hash: project_hash.clone(),
                     conversation_hash: hash_text(&file_path.to_string_lossy()),

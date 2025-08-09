@@ -261,7 +261,9 @@ where
 }
 
 /// Custom serde deserializer for optional RFC3339 timestamp strings to Option<DateTime<Utc>>
-pub fn deserialize_optional_utc_timestamp<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+pub fn deserialize_optional_utc_timestamp<'de, D>(
+    deserializer: D,
+) -> Result<Option<DateTime<Utc>>, D::Error>
 where
     D: Deserializer<'de>,
 {

@@ -33,7 +33,7 @@ static DUPLICATE_MESSAGES_DATA: LazyLock<String> = LazyLock::new(|| {
 fn test_parse_jsonl_file_basic() {
     let cursor = Cursor::new(JSONL_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let messages = parse_jsonl_file(&Path::new("test.jsonl"), &mut buf_reader);
+    let messages = parse_jsonl_file(Path::new("test.jsonl"), &mut buf_reader);
 
     assert_eq!(messages.len(), 4);
 
@@ -49,7 +49,10 @@ fn test_parse_jsonl_file_basic() {
     assert_eq!(messages[1].stats.cache_creation_tokens, 16027);
     assert_eq!(messages[1].stats.cache_read_tokens, 0);
     assert_eq!(messages[1].stats.output_tokens, 7);
-    assert_eq!(messages[1].model, Some("claude-sonnet-4-20250514".to_string()));
+    assert_eq!(
+        messages[1].model,
+        Some("claude-sonnet-4-20250514".to_string())
+    );
 
     // Check tool use message
     assert_eq!(messages[2].stats.tool_calls, 1);
@@ -67,7 +70,7 @@ fn test_parse_jsonl_file_basic() {
 fn test_parse_jsonl_file_tool_operations() {
     let cursor = Cursor::new(TOOL_OPERATIONS_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let messages = parse_jsonl_file(&Path::new("tools.jsonl"), &mut buf_reader);
+    let messages = parse_jsonl_file(Path::new("tools.jsonl"), &mut buf_reader);
 
     assert_eq!(messages.len(), 2);
 
@@ -84,16 +87,16 @@ fn test_parse_jsonl_file_tool_operations() {
     assert_eq!(todo_msg.stats.todos_in_progress, 1);
 }
 
-#[test] 
+#[test]
 fn test_extract_and_hash_project_id() {
     let path1 = Path::new("/home/user/.claude/projects/proj123/conversation.jsonl");
     let path2 = Path::new("/home/user/.claude/projects/proj123/other.jsonl");
     let path3 = Path::new("/home/user/.claude/projects/proj456/conversation.jsonl");
-    
+
     let hash1 = extract_and_hash_project_id(path1);
     let hash2 = extract_and_hash_project_id(path2);
     let hash3 = extract_and_hash_project_id(path3);
-    
+
     // Same project should have same hash
     assert_eq!(hash1, hash2);
     // Different projects should have different hashes
@@ -107,22 +110,22 @@ fn test_extract_and_hash_project_id() {
 fn test_deduplicate_messages_by_local_hash() {
     let cursor = Cursor::new(DUPLICATE_MESSAGES_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let messages = parse_jsonl_file(&Path::new("duplicates.jsonl"), &mut buf_reader);
-    
+    let messages = parse_jsonl_file(Path::new("duplicates.jsonl"), &mut buf_reader);
+
     // Should have 2 messages before deduplication
     assert_eq!(messages.len(), 2);
-    
+
     let deduplicated = deduplicate_messages_by_local_hash(messages);
-    
+
     // Deduplication logic only keeps the message with highest token count.
     assert_eq!(deduplicated.len(), 1);
-    
+
     // Should keep the message with higher token usage (15 tokens)
     assert_eq!(deduplicated[0].stats.input_tokens, 15);
-    
+
     // Test with manually created messages that should be deduplicated
     let mut test_messages = Vec::new();
-    
+
     let base_msg = ConversationMessage {
         global_hash: "global1".to_string(),
         local_hash: Some("local1".to_string()),
@@ -141,7 +144,7 @@ fn test_deduplicate_messages_by_local_hash() {
         },
         role: MessageRole::Assistant,
     };
-    
+
     let duplicate_msg = ConversationMessage {
         global_hash: "global2".to_string(),
         local_hash: Some("local1".to_string()), // Same local hash
@@ -155,10 +158,10 @@ fn test_deduplicate_messages_by_local_hash() {
         },
         ..base_msg.clone()
     };
-    
+
     test_messages.push(base_msg);
     test_messages.push(duplicate_msg.clone());
-    
+
     let deduplicated_test = deduplicate_messages_by_local_hash(test_messages);
     // Duplication logic only keeps the message with highest token count
     assert_eq!(deduplicated_test.len(), 1);
@@ -170,32 +173,33 @@ fn test_deduplicate_messages_by_local_hash() {
 #[test]
 fn test_calculate_cost_from_tokens() {
     use crate::analyzers::claude_code::Usage;
-    
+
     let usage = Usage {
         input_tokens: 1000,
         output_tokens: 500,
         cache_creation_input_tokens: 200,
         cache_read_input_tokens: 100,
     };
-    
+
     let cost = calculate_cost_from_tokens(&usage, "claude-sonnet-4-20250514");
-    
+
     // Sonnet 4 pricing: $0.003/$0.015 per 1K input/output tokens
     // Cache creation: $0.00375 per 1K tokens, Cache read: $0.0003 per 1K tokens
-    let expected_cost = 
-        (1000.0 * 0.003 / 1000.0) +  // Input tokens
-        (500.0 * 0.015 / 1000.0) +   // Output tokens  
+    let expected_cost = (1000.0 * 0.003 / 1000.0) +  // Input tokens
+        (500.0 * 0.015 / 1000.0) +   // Output tokens
         (200.0 * 0.00375 / 1000.0) + // Cache creation
-        (100.0 * 0.0003 / 1000.0);   // Cache read
-    
-    assert!((cost - expected_cost).abs() < 0.0001, 
-            "Expected cost {}, got {}", expected_cost, cost);
+        (100.0 * 0.0003 / 1000.0); // Cache read
+
+    assert!(
+        (cost - expected_cost).abs() < 0.0001,
+        "Expected cost {expected_cost}, got {cost}"
+    );
 }
 
 #[test]
 fn test_extract_tool_stats_basic_tools() {
-    use crate::analyzers::claude_code::{extract_tool_stats, Content, ContentBlock};
-    
+    use crate::analyzers::claude_code::{Content, ContentBlock, extract_tool_stats};
+
     let content = Content::Blocks(vec![
         ContentBlock::ToolUse {
             id: "tool1".to_string(),
@@ -213,9 +217,9 @@ fn test_extract_tool_stats_basic_tools() {
             input: json!({"command": "ls -la"}),
         },
     ]);
-    
+
     let stats = extract_tool_stats(&content, &None);
-    
+
     assert_eq!(stats.files_read, 1);
     assert_eq!(stats.files_edited, 1);
     assert_eq!(stats.terminal_commands, 1);
@@ -225,8 +229,8 @@ fn test_extract_tool_stats_basic_tools() {
 
 #[test]
 fn test_extract_tool_stats_all_tools() {
-    use crate::analyzers::claude_code::{extract_tool_stats, Content, ContentBlock};
-    
+    use crate::analyzers::claude_code::{Content, ContentBlock, extract_tool_stats};
+
     let content = Content::Blocks(vec![
         ContentBlock::ToolUse {
             id: "tool1".to_string(),
@@ -259,9 +263,9 @@ fn test_extract_tool_stats_all_tools() {
             input: json!({}),
         },
     ]);
-    
+
     let stats = extract_tool_stats(&content, &None);
-    
+
     assert_eq!(stats.files_added, 1);
     assert_eq!(stats.files_edited, 1);
     assert_eq!(stats.file_searches, 1);
@@ -272,8 +276,8 @@ fn test_extract_tool_stats_all_tools() {
 
 #[test]
 fn test_extract_tool_stats_with_todo_result() {
-    use crate::analyzers::claude_code::{extract_tool_stats, Content};
-    
+    use crate::analyzers::claude_code::{Content, extract_tool_stats};
+
     let tool_result = json!({
         "oldTodos": [
             {"id": "1", "title": "Task 1", "status": "pending", "priority": "high"},
@@ -288,13 +292,13 @@ fn test_extract_tool_stats_with_todo_result() {
             {"id": "5", "title": "Task 5", "status": "in_progress", "priority": "medium"}
         ]
     });
-    
+
     let content = Content::String(serde_bytes::ByteBuf::new());
     let stats = extract_tool_stats(&content, &Some(tool_result));
-    
+
     // 2 new todos created (4 and 5)
     assert_eq!(stats.todos_created, 2);
-    // 1 todo completed (task 1: pending -> completed)  
+    // 1 todo completed (task 1: pending -> completed)
     assert_eq!(stats.todos_completed, 1);
     // 1 todo moved to in_progress (task 5)
     assert_eq!(stats.todos_in_progress, 1);
@@ -302,11 +306,11 @@ fn test_extract_tool_stats_with_todo_result() {
 
 #[test]
 fn test_extract_tool_stats_text_content() {
-    use crate::analyzers::claude_code::{extract_tool_stats, Content};
-    
+    use crate::analyzers::claude_code::{Content, extract_tool_stats};
+
     let content = Content::String(serde_bytes::ByteBuf::new());
     let stats = extract_tool_stats(&content, &None);
-    
+
     // Should be all zeros for text content
     assert_eq!(stats.files_read, 0);
     assert_eq!(stats.files_edited, 0);
@@ -320,8 +324,8 @@ fn test_extract_tool_stats_text_content() {
 
 #[test]
 fn test_extract_tool_stats_unknown_tools() {
-    use crate::analyzers::claude_code::{extract_tool_stats, Content, ContentBlock};
-    
+    use crate::analyzers::claude_code::{Content, ContentBlock, extract_tool_stats};
+
     let content = Content::Blocks(vec![
         ContentBlock::ToolUse {
             id: "tool1".to_string(),
@@ -334,9 +338,9 @@ fn test_extract_tool_stats_unknown_tools() {
             input: json!({}),
         },
     ]);
-    
+
     let stats = extract_tool_stats(&content, &None);
-    
+
     // Unknown tools should not increment any counters
     assert_eq!(stats.files_read, 0);
     assert_eq!(stats.files_edited, 0);

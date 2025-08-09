@@ -25,7 +25,7 @@ impl ReqwestSimdJsonExt for RequestBuilder {
     {
         // Serialize using simd-json
         let body = simd_json::to_vec(json).expect("Failed to serialize JSON");
-        
+
         self.header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
     }
