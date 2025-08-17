@@ -216,7 +216,7 @@ struct ClaudeCodeMessageEntry {
 enum ClaudeCodeEntry {
     #[serde(alias = "summary")]
     Summary(ClaudeCodeSummaryEntry),
-    #[serde(alias = "user", alias = "assistant")]
+    #[serde(alias = "user", alias = "assistant", alias = "system")]
     Message(ClaudeCodeMessageEntry),
 }
 
