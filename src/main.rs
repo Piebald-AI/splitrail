@@ -3,12 +3,9 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use analyzer::AnalyzerRegistry;
 use analyzers::{ClaudeCodeAnalyzer, CodexCliAnalyzer, GeminiCliAnalyzer};
-
-use crate::types::MultiAnalyzerStats;
 
 mod analyzer;
 mod analyzers;
@@ -137,7 +134,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     };
 
     // Create real-time stats manager
-    let stats_manager = match watcher::RealtimeStatsManager::new(registry).await {
+    let mut stats_manager = match watcher::RealtimeStatsManager::new(registry).await {
         Ok(manager) => manager,
         Err(e) => {
             eprintln!("Error loading analyzer stats: {e}");
@@ -151,13 +148,16 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     // Create upload status for TUI
     let upload_status = Arc::new(Mutex::new(tui::UploadStatus::None));
 
+    // Set upload status on stats manager for real-time upload tracking
+    stats_manager.set_upload_status(upload_status.clone());
+
     // Check if auto-upload is enabled and start background upload
     let config = config::Config::load().unwrap_or(None).unwrap_or_default();
     if config.upload.auto_upload {
         if config.is_configured() {
             let upload_status_clone = upload_status.clone();
             tokio::spawn(async move {
-                run_background_upload(initial_stats, upload_status_clone).await;
+                upload::perform_background_upload(initial_stats, Some(upload_status_clone), Some(500)).await;
             });
         } else {
             // Auto-upload is enabled but configuration is incomplete
@@ -188,74 +188,6 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     }
 }
 
-async fn run_background_upload(
-    initial_stats: MultiAnalyzerStats,
-    upload_status: Arc<Mutex<tui::UploadStatus>>,
-) {
-    // Helper to set status
-    fn set_status(status: &Arc<Mutex<tui::UploadStatus>>, value: tui::UploadStatus) {
-        if let Ok(mut s) = status.lock() {
-            *s = value;
-        }
-    }
-
-    // Don't set initial upload status - let it get set by the first progress callback
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let upload_result = async {
-        let config = config::Config::load().ok().flatten()?;
-        if !config.is_configured() {
-            return None;
-        }
-        let mut messages = vec![];
-        for analyzer_stats in initial_stats.analyzer_stats {
-            messages.extend(analyzer_stats.messages);
-        }
-        let mut config = config;
-        let messages = utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
-            .await
-            .ok()?;
-        Some(
-            upload::upload_message_stats(&messages, &mut config, |current, total| {
-                // Preserve the current dots value when updating
-                if let Ok(mut status) = upload_status.lock() {
-                    match &*status {
-                        tui::UploadStatus::Uploading { dots, .. } => {
-                            *status = tui::UploadStatus::Uploading {
-                                current,
-                                total,
-                                dots: *dots,
-                            };
-                        }
-                        _ => {
-                            *status = tui::UploadStatus::Uploading {
-                                current,
-                                total,
-                                dots: 0,
-                            };
-                        }
-                    }
-                }
-            })
-            .await,
-        )
-    }
-    .await;
-
-    match upload_result {
-        Some(Ok(_)) => {
-            set_status(&upload_status, tui::UploadStatus::Uploaded);
-            // Only hide success messages after 3 seconds
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            set_status(&upload_status, tui::UploadStatus::None);
-        }
-        Some(Err(e)) => {
-            // Keep error messages visible permanently (don't auto-hide)
-            set_status(&upload_status, tui::UploadStatus::Failed(format!("{e:#}")));
-        }
-        None => (), // Config not available or not configured - skip upload
-    }
-}
 
 async fn run_upload() -> Result<()> {
     let registry = create_analyzer_registry();

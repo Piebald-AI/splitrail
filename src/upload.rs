@@ -1,8 +1,10 @@
 use crate::config::Config;
 use crate::reqwest_simd_json::{ReqwestSimdJsonExt, ResponseSimdJsonExt};
-use crate::types::{ConversationMessage, ErrorResponse, UploadResponse};
+use crate::tui::UploadStatus;
+use crate::types::{ConversationMessage, ErrorResponse, MultiAnalyzerStats, UploadResponse};
+use crate::utils;
 use anyhow::{Context, Result};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -117,6 +119,88 @@ where
     config.save(true)?;
 
     Ok(())
+}
+
+pub async fn perform_background_upload(
+    stats: MultiAnalyzerStats,
+    upload_status: Option<Arc<Mutex<UploadStatus>>>,
+    initial_delay_ms: Option<u64>,
+) {
+    // Helper to set status
+    fn set_status(status: &Option<Arc<Mutex<UploadStatus>>>, value: UploadStatus) {
+        if let Some(status) = status {
+            if let Ok(mut s) = status.lock() {
+                *s = value;
+            }
+        }
+    }
+
+    // Optional initial delay
+    if let Some(delay) = initial_delay_ms {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+
+    let upload_result = async {
+        let mut config = Config::load().ok().flatten()?;
+        if !config.is_configured() {
+            return None;
+        }
+
+        let mut messages = vec![];
+        for analyzer_stats in stats.analyzer_stats {
+            messages.extend(analyzer_stats.messages);
+        }
+
+        let messages = utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
+            .await
+            .ok()?;
+
+        if messages.is_empty() {
+            return Some(Ok(())); // Nothing new to upload
+        }
+
+        Some(
+            upload_message_stats(&messages, &mut config, |current, total| {
+                // Update upload progress
+                if let Some(ref status) = upload_status {
+                    if let Ok(mut s) = status.lock() {
+                        match &*s {
+                            UploadStatus::Uploading { dots, .. } => {
+                                *s = UploadStatus::Uploading {
+                                    current,
+                                    total,
+                                    dots: *dots,
+                                };
+                            }
+                            _ => {
+                                *s = UploadStatus::Uploading {
+                                    current,
+                                    total,
+                                    dots: 0,
+                                };
+                            }
+                        }
+                    }
+                }
+            })
+            .await,
+        )
+    }
+    .await;
+
+    match upload_result {
+        Some(Ok(_)) => {
+            set_status(&upload_status, UploadStatus::Uploaded);
+            // Hide success message after 3 seconds
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            set_status(&upload_status, UploadStatus::None);
+        }
+        Some(Err(e)) => {
+            // Keep error messages visible permanently
+            set_status(&upload_status, UploadStatus::Failed(format!("{e:#}")));
+        }
+        None => (), // Config not available or nothing to upload
+    }
 }
 
 pub fn show_upload_help() {

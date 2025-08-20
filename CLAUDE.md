@@ -17,7 +17,7 @@ Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Ru
 - `cargo run -- config <subcommand>` - Manage configuration
 
 ### Available Commands
-- `splitrail` - Show Claude Code stats in TUI and auto-upload if configured
+- `splitrail` - Show stats in TUI with real-time watching and auto-upload when changes are detected (if auto-upload is enabled)
 - `splitrail upload` - Manually upload stats to Splitrail Cloud
 - `splitrail config init` - Create default configuration file
 - `splitrail config show` - Display current configuration
