@@ -1,6 +1,6 @@
 # Splitrail
 
-Blazing fast, single-executable, cross-platform, agentic development monitor.  Supports Claude Code, Gemini CLI, and Codex CLI (and more coming soon), and integrates with Splitrail Cloud.  (`ccusage` equivalent for Gemini CLI and Codex CLI, as well as Claude Code.)
+Blazing fast, single-executable, cross-platform, agentic development usage monitor.  Supports Gemini CLI, Claude Code, and Codex CLI, and integrates with Splitrail Cloud.
 
 > [!WARNING]
 > While support for both Gemini CLI and Codex CLI **is** implemented, neither tool currently implements the necessary functionality to make them work with Splitrail: Codex CLI does not output enough information to its recorded chat files, and Gemini CLI does not automatically record conversation history at all.  PRs are open for both, however: https://github.com/openai/codex/pull/1583 and https://github.com/google-gemini/gemini-cli/pull/4401.  React with :+1: on them to encourage them to be merged!
