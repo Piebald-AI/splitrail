@@ -157,7 +157,12 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         if config.is_configured() {
             let upload_status_clone = upload_status.clone();
             tokio::spawn(async move {
-                upload::perform_background_upload(initial_stats, Some(upload_status_clone), Some(500)).await;
+                upload::perform_background_upload(
+                    initial_stats,
+                    Some(upload_status_clone),
+                    Some(500),
+                )
+                .await;
             });
         } else {
             // Auto-upload is enabled but configuration is incomplete
@@ -187,7 +192,6 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         eprintln!("Error displaying TUI: {e}");
     }
 }
-
 
 async fn run_upload() -> Result<()> {
     let registry = create_analyzer_registry();

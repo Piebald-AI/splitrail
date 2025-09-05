@@ -128,10 +128,10 @@ pub async fn perform_background_upload(
 ) {
     // Helper to set status
     fn set_status(status: &Option<Arc<Mutex<UploadStatus>>>, value: UploadStatus) {
-        if let Some(status) = status {
-            if let Ok(mut s) = status.lock() {
-                *s = value;
-            }
+        if let Some(status) = status
+            && let Ok(mut s) = status.lock()
+        {
+            *s = value;
         }
     }
 
@@ -162,23 +162,23 @@ pub async fn perform_background_upload(
         Some(
             upload_message_stats(&messages, &mut config, |current, total| {
                 // Update upload progress
-                if let Some(ref status) = upload_status {
-                    if let Ok(mut s) = status.lock() {
-                        match &*s {
-                            UploadStatus::Uploading { dots, .. } => {
-                                *s = UploadStatus::Uploading {
-                                    current,
-                                    total,
-                                    dots: *dots,
-                                };
-                            }
-                            _ => {
-                                *s = UploadStatus::Uploading {
-                                    current,
-                                    total,
-                                    dots: 0,
-                                };
-                            }
+                if let Some(ref status) = upload_status
+                    && let Ok(mut s) = status.lock()
+                {
+                    match &*s {
+                        UploadStatus::Uploading { dots, .. } => {
+                            *s = UploadStatus::Uploading {
+                                current,
+                                total,
+                                dots: *dots,
+                            };
+                        }
+                        _ => {
+                            *s = UploadStatus::Uploading {
+                                current,
+                                total,
+                                dots: 0,
+                            };
                         }
                     }
                 }

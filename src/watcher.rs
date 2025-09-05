@@ -202,60 +202,60 @@ impl RealtimeStatsManager {
         };
 
         // Check if an upload is already in progress
-        if let Ok(in_progress) = self.upload_in_progress.lock() {
-            if *in_progress {
-                // Mark that we have pending changes to upload
-                if let Ok(mut pending) = self.pending_upload.lock() {
-                    *pending = true;
-                }
-                return;
+        if let Ok(in_progress) = self.upload_in_progress.lock()
+            && *in_progress
+        {
+            // Mark that we have pending changes to upload
+            if let Ok(mut pending) = self.pending_upload.lock() {
+                *pending = true;
             }
+            return;
         }
 
         // Check debounce timing
         let now = Instant::now();
-        if let Some(last_time) = self.last_upload_time {
-            if now.duration_since(last_time) < self.upload_debounce {
-                // Schedule a delayed upload
-                let remaining_wait = self.upload_debounce - now.duration_since(last_time);
-                let stats = self.current_stats.clone();
-                let upload_status = self.upload_status.clone();
-                let upload_in_progress = self.upload_in_progress.clone();
-                let pending_upload = self.pending_upload.clone();
-                
-                tokio::spawn(async move {
-                    tokio::time::sleep(remaining_wait).await;
-                    
-                    // Check if we should still upload
-                    let should_upload = if let Ok(mut pending) = pending_upload.lock() {
-                        let was_pending = *pending;
-                        *pending = false;
-                        was_pending
-                    } else {
-                        true
-                    };
-                    
-                    if should_upload {
-                        // Mark upload as in progress
-                        if let Ok(mut in_progress) = upload_in_progress.lock() {
-                            *in_progress = true;
-                        }
-                        
-                        upload::perform_background_upload(stats, upload_status, None).await;
-                        
-                        // Mark upload as complete
-                        if let Ok(mut in_progress) = upload_in_progress.lock() {
-                            *in_progress = false;
-                        }
+        if let Some(last_time) = self.last_upload_time
+            && now.duration_since(last_time) < self.upload_debounce
+        {
+            // Schedule a delayed upload
+            let remaining_wait = self.upload_debounce - now.duration_since(last_time);
+            let stats = self.current_stats.clone();
+            let upload_status = self.upload_status.clone();
+            let upload_in_progress = self.upload_in_progress.clone();
+            let pending_upload = self.pending_upload.clone();
+
+            tokio::spawn(async move {
+                tokio::time::sleep(remaining_wait).await;
+
+                // Check if we should still upload
+                let should_upload = if let Ok(mut pending) = pending_upload.lock() {
+                    let was_pending = *pending;
+                    *pending = false;
+                    was_pending
+                } else {
+                    true
+                };
+
+                if should_upload {
+                    // Mark upload as in progress
+                    if let Ok(mut in_progress) = upload_in_progress.lock() {
+                        *in_progress = true;
                     }
-                });
-                
-                // Mark that we have a pending upload scheduled
-                if let Ok(mut pending) = self.pending_upload.lock() {
-                    *pending = true;
+
+                    upload::perform_background_upload(stats, upload_status, None).await;
+
+                    // Mark upload as complete
+                    if let Ok(mut in_progress) = upload_in_progress.lock() {
+                        *in_progress = false;
+                    }
                 }
-                return;
+            });
+
+            // Mark that we have a pending upload scheduled
+            if let Ok(mut pending) = self.pending_upload.lock() {
+                *pending = true;
             }
+            return;
         }
 
         self.last_upload_time = Some(now);
@@ -274,12 +274,12 @@ impl RealtimeStatsManager {
         // Spawn background upload task
         tokio::spawn(async move {
             upload::perform_background_upload(stats.clone(), upload_status.clone(), None).await;
-            
+
             // Mark upload as complete
             if let Ok(mut in_progress) = upload_in_progress.lock() {
                 *in_progress = false;
             }
-            
+
             // Check if we need to upload again due to changes during the upload
             let should_upload_again = if let Ok(mut pending) = pending_upload.lock() {
                 let was_pending = *pending;
@@ -288,7 +288,7 @@ impl RealtimeStatsManager {
             } else {
                 false
             };
-            
+
             if should_upload_again {
                 // Wait a short time before uploading again
                 tokio::time::sleep(Duration::from_secs(1)).await;
