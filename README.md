@@ -1,8 +1,6 @@
 # Splitrail
 
-**Fast, cross-platform, real-time Gemini CLI / Claude Code / Codex token usage tracker and cost monitor.**
-
-The Splitrail CLI can automatically upload usage data to [Splitrail Cloud.](https://splitrail.dev)
+Splitrail is a **fast, cross-platform, real-time Gemini CLI / Claude Code / Codex token usage tracker and cost monitor.**  Run one command to instantly review all of your CLI coding agent usage.  Upload your usage data to your private account on the [Splitrail Cloud](https://splitrail.dev) for safe-keeping and cross-machine usage aggregation.
 
 > [!WARNING]
 > While support for both Codex **is** implemented, Codex currently does not output enough information to its recorded chat files.  A PR is open on Codex, however: https://github.com/openai/codex/pull/1583.  React with :+1: on it to encourage it to be merged!
