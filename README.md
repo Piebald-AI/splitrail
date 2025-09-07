@@ -1,11 +1,11 @@
 # Splitrail
 
-Blazing fast, single-executable, cross-platform, agentic development usage monitor.  Supports Gemini CLI, Claude Code, and Codex CLI, and integrates with Splitrail Cloud.
-
-> [!WARNING]
-> While support for both Gemini CLI and Codex CLI **is** implemented, neither tool currently implements the necessary functionality to make them work with Splitrail: Codex CLI does not output enough information to its recorded chat files, and Gemini CLI does not automatically record conversation history at all.  PRs are open for both, however: https://github.com/openai/codex/pull/1583 and https://github.com/google-gemini/gemini-cli/pull/4401.  React with :+1: on them to encourage them to be merged!
+**Fast, cross-platform, real-time Gemini CLI / Claude Code / Codex token usage tracker and cost monitor.**
 
 The Splitrail CLI can automatically upload usage data to [Splitrail Cloud.](https://splitrail.dev)
+
+> [!WARNING]
+> While support for both Codex **is** implemented, Codex currently does not output enough information to its recorded chat files.  A PR is open on Codex, however: https://github.com/openai/codex/pull/1583.  React with :+1: on it to encourage it to be merged!
 
 Also check out our developer-first agentic AI experience, [Piebald](https://piebald.ai/).
 
