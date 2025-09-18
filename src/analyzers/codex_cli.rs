@@ -229,89 +229,88 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
             }
             "response_item" => {
                 let mut payload_bytes = simd_json::to_vec(&wrapper.payload)?;
-                if let Ok(message) = simd_json::from_slice::<CodexCliMessage>(&mut payload_bytes) {
-                    if message.message_type == "message" {
-                        if let Some(role) = &message.role {
-                            match role.as_str() {
-                                "user" => {
-                                    entries.push(ConversationMessage {
-                                        date: wrapper.timestamp,
-                                        global_hash: hash_text(&format!(
-                                            "{}_{}",
-                                            file_path_str,
-                                            wrapper.timestamp.to_rfc3339()
-                                        )),
-                                        local_hash: None,
-                                        conversation_hash: hash_text(&file_path_str),
-                                        application: Application::CodexCli,
-                                        project_hash: "".to_string(),
-                                        model: None,
-                                        stats: Stats::default(),
-                                        role: MessageRole::User,
-                                    });
-                                }
-                                "assistant" => {
-                                    let model_name = session_model
-                                        .clone()
-                                        .unwrap_or_else(|| "unknown".to_string());
-
-                                    // Use token usage if we have it
-                                    let stats = if let Some(usage) = &current_token_usage {
-                                        let total_output_tokens =
-                                            usage.output_tokens + usage.reasoning_output_tokens;
-
-                                        // Subtract cached input tokens from total input tokens
-                                        // since Codex input_tokens is a superset that includes cached tokens
-                                        let actual_input_tokens = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
-
-                                        Stats {
-                                            input_tokens: actual_input_tokens,
-                                            output_tokens: total_output_tokens,
-                                            cache_creation_tokens: 0,
-                                            cache_read_tokens: 0,
-                                            cached_tokens: usage.cached_input_tokens,
-                                            cost: calculate_cost_from_tokens(usage, &model_name),
-                                            tool_calls: 0,
-                                            ..Default::default()
-                                        }
-                                    } else {
-                                        Stats::default()
-                                    };
-
-                                    entries.push(ConversationMessage {
-                                        application: Application::CodexCli,
-                                        model: Some(model_name),
-                                        global_hash: hash_text(&format!(
-                                            "{}_{}",
-                                            file_path_str,
-                                            wrapper.timestamp.to_rfc3339()
-                                        )),
-                                        local_hash: None,
-                                        conversation_hash: hash_text(&file_path_str),
-                                        date: wrapper.timestamp,
-                                        project_hash: "".to_string(),
-                                        stats,
-                                        role: MessageRole::Assistant,
-                                    });
-
-                                    // Clear token usage after using it
-                                    current_token_usage = None;
-                                }
-                                _ => {}
-                            }
+                if let Ok(message) = simd_json::from_slice::<CodexCliMessage>(&mut payload_bytes)
+                    && message.message_type == "message"
+                    && let Some(role) = &message.role
+                {
+                    match role.as_str() {
+                        "user" => {
+                            entries.push(ConversationMessage {
+                                date: wrapper.timestamp,
+                                global_hash: hash_text(&format!(
+                                    "{}_{}",
+                                    file_path_str,
+                                    wrapper.timestamp.to_rfc3339()
+                                )),
+                                local_hash: None,
+                                conversation_hash: hash_text(&file_path_str),
+                                application: Application::CodexCli,
+                                project_hash: "".to_string(),
+                                model: None,
+                                stats: Stats::default(),
+                                role: MessageRole::User,
+                            });
                         }
+                        "assistant" => {
+                            let model_name = session_model
+                                .clone()
+                                .unwrap_or_else(|| "unknown".to_string());
+
+                            // Use token usage if we have it
+                            let stats = if let Some(usage) = &current_token_usage {
+                                let total_output_tokens =
+                                    usage.output_tokens + usage.reasoning_output_tokens;
+
+                                // Subtract cached input tokens from total input tokens
+                                // since Codex input_tokens is a superset that includes cached tokens
+                                let actual_input_tokens =
+                                    usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+
+                                Stats {
+                                    input_tokens: actual_input_tokens,
+                                    output_tokens: total_output_tokens,
+                                    cache_creation_tokens: 0,
+                                    cache_read_tokens: 0,
+                                    cached_tokens: usage.cached_input_tokens,
+                                    cost: calculate_cost_from_tokens(usage, &model_name),
+                                    tool_calls: 0,
+                                    ..Default::default()
+                                }
+                            } else {
+                                Stats::default()
+                            };
+
+                            entries.push(ConversationMessage {
+                                application: Application::CodexCli,
+                                model: Some(model_name),
+                                global_hash: hash_text(&format!(
+                                    "{}_{}",
+                                    file_path_str,
+                                    wrapper.timestamp.to_rfc3339()
+                                )),
+                                local_hash: None,
+                                conversation_hash: hash_text(&file_path_str),
+                                date: wrapper.timestamp,
+                                project_hash: "".to_string(),
+                                stats,
+                                role: MessageRole::Assistant,
+                            });
+
+                            // Clear token usage after using it
+                            current_token_usage = None;
+                        }
+                        _ => {}
                     }
                 }
             }
             "event_msg" => {
                 let mut payload_bytes = simd_json::to_vec(&wrapper.payload)?;
-                if let Ok(event) = simd_json::from_slice::<CodexCliEventMsg>(&mut payload_bytes) {
-                    if event.event_type == "token_count" {
-                        if let Some(info) = event.info {
-                            // Use last_token_usage if available, otherwise total_token_usage
-                            current_token_usage = info.last_token_usage.or(info.total_token_usage);
-                        }
-                    }
+                if let Ok(event) = simd_json::from_slice::<CodexCliEventMsg>(&mut payload_bytes)
+                    && event.event_type == "token_count"
+                    && let Some(info) = event.info
+                {
+                    // Use last_token_usage if available, otherwise total_token_usage
+                    current_token_usage = info.last_token_usage.or(info.total_token_usage);
                 }
             }
             _ => {

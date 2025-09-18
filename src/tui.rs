@@ -896,7 +896,7 @@ fn draw_daily_stats_table(
             Constraint::Length(6),  // Convs
             Constraint::Length(6),  // Tools
             // Constraint::Length(23), // Lines
-            Constraint::Min(10),    // Models
+            Constraint::Min(10), // Models
         ],
     )
     .header(header)
