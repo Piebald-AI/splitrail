@@ -90,6 +90,43 @@ fn test_parse_codex_cli_wrapper_format_no_tokens() {
 }
 
 #[test]
+fn test_parse_codex_cli_missing_model() {
+    let mut temp_file = NamedTempFile::new().unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:16:27.465Z","type":"session_meta","payload":{{"id":"b51f4ba9-0bf5-40b0-8e70-4f339c4b4f52","timestamp":"2025-09-18T00:16:27.461Z","cwd":"/home/test","originator":"codex_cli_rs","cli_version":"0.38.0","instructions":null,"git":null}}}}"#
+    )
+    .unwrap();
+
+    // Token usage without any turn context to provide model information
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:16:30.000Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":1030}},"last_token_usage":{{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":1030}},"model_context_window":272000}}}}}}"#
+    )
+    .unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:16:31.000Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"No model info available."}}]}}}}"#
+    )
+    .unwrap();
+
+    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+
+    let assistant_msg = result
+        .iter()
+        .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
+        .unwrap();
+
+    assert_eq!(assistant_msg.model, Some("unknown".to_string()));
+    assert_eq!(assistant_msg.stats.input_tokens, 600); // 1000 - 400 cached
+    assert_eq!(assistant_msg.stats.output_tokens, 30); // 20 + 10 reasoning
+    assert_eq!(assistant_msg.stats.cached_tokens, 400);
+    assert_eq!(assistant_msg.stats.cost, 0.0);
+}
+
+#[test]
 fn test_codex_availability() {
     let analyzer = CodexCliAnalyzer::new();
 

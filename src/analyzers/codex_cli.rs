@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
 use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
-use crate::utils::{deserialize_utc_timestamp, hash_text};
+use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
 
 pub struct CodexCliAnalyzer;
 
@@ -182,7 +182,7 @@ struct CodexCliWrapper {
 
 pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
     let mut entries = Vec::new();
-    let file_path_str = file_path.to_string_lossy();
+    let file_path_str = file_path.to_string_lossy().into_owned();
 
     let file = File::open(file_path)?;
     let reader = BufReader::with_capacity(64 * 1024, file);
@@ -252,6 +252,13 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                             });
                         }
                         "assistant" => {
+                            let has_model = session_model.is_some();
+                            if !has_model {
+                                warn_once(format!(
+                                    "WARNING: session {file_path_str} has no model information; cost will be omitted."
+                                ));
+                            }
+
                             let model_name = session_model
                                 .clone()
                                 .unwrap_or_else(|| "unknown".to_string());
@@ -266,13 +273,19 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                                 let actual_input_tokens =
                                     usage.input_tokens.saturating_sub(usage.cached_input_tokens);
 
+                                let cost = if has_model {
+                                    calculate_cost_from_tokens(usage, &model_name)
+                                } else {
+                                    0.0
+                                };
+
                                 Stats {
                                     input_tokens: actual_input_tokens,
                                     output_tokens: total_output_tokens,
                                     cache_creation_tokens: 0,
                                     cache_read_tokens: 0,
                                     cached_tokens: usage.cached_input_tokens,
-                                    cost: calculate_cost_from_tokens(usage, &model_name),
+                                    cost,
                                     tool_calls: 0,
                                     ..Default::default()
                                 }

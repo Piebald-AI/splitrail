@@ -1,6 +1,8 @@
 use phf::phf_map;
 use serde::{Deserialize, Serialize};
 
+use crate::utils::warn_once;
+
 /// Represents different pricing tier structures for various models
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PricingTier {
@@ -608,7 +610,9 @@ pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
             PricingStructure::Tiered { tiers } => calculate_tiered_cost(input_tokens, tiers, true),
         },
         None => {
-            eprintln!("WARNING: Unknown model: {model_name}. Using fallback pricing.");
+            warn_once(format!(
+                "WARNING: Unknown model: {model_name}. Using fallback pricing."
+            ));
             (input_tokens as f64 / 1_000_000.0) * 1.0 // $1 per 1M tokens fallback
         }
     }
@@ -626,7 +630,9 @@ pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
             }
         },
         None => {
-            eprintln!("WARNING: Unknown model: {model_name}. Using fallback pricing.");
+            warn_once(format!(
+                "WARNING: Unknown model: {model_name}. Using fallback pricing."
+            ));
             (output_tokens as f64 / 1_000_000.0) * 5.0 // $5 per 1M tokens fallback
         }
     }
@@ -664,7 +670,9 @@ pub fn calculate_cache_cost(
             }
         }
         None => {
-            eprintln!("WARNING: Unknown model: {model_name}. Using fallback cache pricing.");
+            warn_once(format!(
+                "WARNING: Unknown model: {model_name}. Using fallback cache pricing."
+            ));
             (cache_read_tokens as f64 / 1_000_000.0) * 0.1 // $0.1 per 1M tokens fallback
         }
     }
