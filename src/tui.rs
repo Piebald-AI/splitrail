@@ -41,6 +41,7 @@ fn has_data(stats: &AgenticCodingToolStats) -> bool {
             day.stats.cost > 0.0
                 || day.stats.input_tokens > 0
                 || day.stats.output_tokens > 0
+                || day.stats.reasoning_tokens > 0
                 || day.stats.tool_calls > 0
         })
 }
@@ -479,6 +480,7 @@ fn draw_daily_stats_table(
         Cell::new(Text::from("Cached Tks").right_aligned()),
         Cell::new(Text::from("Inp Tks").right_aligned()),
         Cell::new(Text::from("Outp Tks").right_aligned()),
+        Cell::new(Text::from("Reason Tks").right_aligned()),
         Cell::new(Text::from("Convs").right_aligned()),
         Cell::new(Text::from("Tools").right_aligned()),
         // Cell::new(Text::from("Lines").right_aligned()),
@@ -498,6 +500,8 @@ fn draw_daily_stats_table(
     let mut best_input_tokens_i = 0;
     let mut best_output_tokens = 0;
     let mut best_output_tokens_i = 0;
+    let mut best_reasoning_tokens = 0;
+    let mut best_reasoning_tokens_i = 0;
     let mut best_conversations = 0;
     let mut best_conversations_i = 0;
     let mut best_tool_calls = 0;
@@ -520,6 +524,10 @@ fn draw_daily_stats_table(
             best_output_tokens = day_stats.stats.output_tokens;
             best_output_tokens_i = i;
         }
+        if day_stats.stats.reasoning_tokens > best_reasoning_tokens {
+            best_reasoning_tokens = day_stats.stats.reasoning_tokens;
+            best_reasoning_tokens_i = i;
+        }
         if day_stats.conversations > best_conversations {
             best_conversations = day_stats.conversations;
             best_conversations_i = i;
@@ -535,6 +543,7 @@ fn draw_daily_stats_table(
     let mut total_cached = 0;
     let mut total_input = 0;
     let mut total_output = 0;
+    let mut total_reasoning = 0;
     let mut total_tool_calls = 0;
 
     for (i, (date, day_stats)) in stats.daily_stats.iter().enumerate() {
@@ -542,6 +551,7 @@ fn draw_daily_stats_table(
         total_cached += day_stats.stats.cached_tokens;
         total_input += day_stats.stats.input_tokens;
         total_output += day_stats.stats.output_tokens;
+        total_reasoning += day_stats.stats.reasoning_tokens;
         total_tool_calls += day_stats.stats.tool_calls;
 
         let mut models_vec = day_stats.models.keys().cloned().collect::<Vec<String>>();
@@ -560,6 +570,7 @@ fn draw_daily_stats_table(
             && day_stats.stats.cached_tokens == 0
             && day_stats.stats.input_tokens == 0
             && day_stats.stats.output_tokens == 0
+            && day_stats.stats.reasoning_tokens == 0
             && day_stats.conversations == 0
             && day_stats.user_messages == 0
             && day_stats.ai_messages == 0
@@ -647,6 +658,24 @@ fn draw_daily_stats_table(
         }
         .right_aligned();
 
+        let reasoning_cell = if is_empty_row {
+            Line::from(Span::styled(
+                format_number(day_stats.stats.reasoning_tokens, format_options),
+                Style::default().add_modifier(Modifier::DIM),
+            ))
+        } else if i == best_reasoning_tokens_i {
+            Line::from(Span::styled(
+                format_number(day_stats.stats.reasoning_tokens, format_options),
+                Style::default().fg(Color::Red),
+            ))
+        } else {
+            Line::from(Span::raw(format_number(
+                day_stats.stats.reasoning_tokens,
+                format_options,
+            )))
+        }
+        .right_aligned();
+
         let conv_cell = if is_empty_row {
             Line::from(Span::styled(
                 format_number(day_stats.conversations as u64, format_options),
@@ -720,6 +749,7 @@ fn draw_daily_stats_table(
             cached_cell,
             input_cell,
             output_cell,
+            reasoning_cell,
             conv_cell,
             tool_cell,
             // lines_cell,
@@ -767,6 +797,10 @@ fn draw_daily_stats_table(
         )),
         Line::from(Span::styled(
             "─────────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "──────────",
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
@@ -848,6 +882,11 @@ fn draw_daily_stats_table(
         ))
         .right_aligned(),
         Line::from(Span::styled(
+            format_number(total_reasoning, format_options),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .right_aligned(),
+        Line::from(Span::styled(
             format_number(stats.num_conversations, format_options),
             Style::default().add_modifier(Modifier::BOLD),
         ))
@@ -893,6 +932,7 @@ fn draw_daily_stats_table(
             Constraint::Length(12), // Cached
             Constraint::Length(8),  // Input
             Constraint::Length(9),  // Output
+            Constraint::Length(11), // Reasoning
             Constraint::Length(6),  // Convs
             Constraint::Length(6),  // Tools
             // Constraint::Length(23), // Lines
@@ -921,6 +961,7 @@ fn draw_summary_stats(
     let mut total_cached: u64 = 0;
     let mut total_input: u64 = 0;
     let mut total_output: u64 = 0;
+    let mut total_reasoning: u64 = 0;
     let mut total_tool_calls: u64 = 0;
     let mut all_days = std::collections::HashSet::new();
 
@@ -945,6 +986,11 @@ fn draw_summary_stats(
             .values()
             .map(|s| s.stats.output_tokens)
             .sum::<u64>();
+        total_reasoning += stats
+            .daily_stats
+            .values()
+            .map(|s| s.stats.reasoning_tokens)
+            .sum::<u64>();
         total_tool_calls += stats
             .daily_stats
             .values()
@@ -956,6 +1002,7 @@ fn draw_summary_stats(
             if day_stats.stats.cost > 0.0
                 || day_stats.stats.input_tokens > 0
                 || day_stats.stats.output_tokens > 0
+                || day_stats.stats.reasoning_tokens > 0
                 || day_stats.stats.cached_tokens > 0
                 || day_stats.stats.tool_calls > 0
                 || day_stats.ai_messages > 0
@@ -976,6 +1023,11 @@ fn draw_summary_stats(
             "Tokens:",
             format_number(total_tokens, format_options),
             Color::LightBlue,
+        ),
+        (
+            "Reasoning:",
+            format_number(total_reasoning, format_options),
+            Color::Red,
         ),
         (
             "Tool Calls:",

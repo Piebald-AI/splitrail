@@ -59,6 +59,7 @@ pub struct Stats {
     // Token and cost stats
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub reasoning_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
     pub cached_tokens: u64,

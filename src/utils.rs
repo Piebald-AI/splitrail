@@ -142,6 +142,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 daily_stats_entry.stats.cost += entry.stats.cost;
                 daily_stats_entry.stats.input_tokens += entry.stats.input_tokens;
                 daily_stats_entry.stats.output_tokens += entry.stats.output_tokens;
+                daily_stats_entry.stats.reasoning_tokens += entry.stats.reasoning_tokens;
                 daily_stats_entry.stats.cache_creation_tokens += entry.stats.cache_creation_tokens;
                 daily_stats_entry.stats.cache_read_tokens += entry.stats.cache_read_tokens;
                 daily_stats_entry.stats.cached_tokens += entry.stats.cached_tokens;
