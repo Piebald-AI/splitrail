@@ -3,6 +3,7 @@ use tempfile::NamedTempFile;
 
 use crate::analyzer::Analyzer;
 use crate::analyzers::codex_cli::*;
+use crate::models::calculate_total_cost;
 
 #[test]
 fn test_parse_codex_cli_new_wrapper_format() {
@@ -52,7 +53,8 @@ fn test_parse_codex_cli_new_wrapper_format() {
 
     assert_eq!(assistant_msg.model, Some("gpt-5-codex".to_string()));
     assert_eq!(assistant_msg.stats.input_tokens, 69); // 2629 - 2560 (cached tokens subtracted)
-    assert_eq!(assistant_msg.stats.output_tokens, 14); // output_tokens + reasoning_output_tokens (0)
+    assert_eq!(assistant_msg.stats.output_tokens, 14); // Codex output_tokens already include reasoning
+    assert_eq!(assistant_msg.stats.reasoning_tokens, 0);
     assert_eq!(assistant_msg.stats.cached_tokens, 2560);
 }
 
@@ -90,6 +92,67 @@ fn test_parse_codex_cli_wrapper_format_no_tokens() {
 }
 
 #[test]
+fn test_parse_codex_cli_counts_tool_calls() {
+    let mut temp_file = NamedTempFile::new().unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:20:00.000Z","type":"turn_context","payload":{{"model":"gpt-5-codex"}}}}"#
+    )
+    .unwrap();
+
+    // Simulate user input to start the conversation
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:20:01.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Do the thing"}}]}}}}"#
+    )
+    .unwrap();
+
+    // Multiple tool calls, including a duplicate call_id that should be deduplicated
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:20:02.000Z","type":"response_item","payload":{{"type":"function_call","name":"shell","arguments":"{{\"command\":[\"bash\",\"-lc\",\"echo first\"],\"workdir\":\"/tmp\"}}","call_id":"call_duplicate"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:20:03.000Z","type":"response_item","payload":{{"type":"function_call","name":"shell","arguments":"{{\"command\":[\"bash\",\"-lc\",\"echo first\"],\"workdir\":\"/tmp\"}}","call_id":"call_duplicate"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:20:04.000Z","type":"response_item","payload":{{"type":"function_call","name":"shell","arguments":"{{\"command\":[\"bash\",\"-lc\",\"echo second\"],\"workdir\":\"/tmp\"}}","call_id":"call_unique"}}}}"#
+    )
+    .unwrap();
+
+    // Token usage emitted for the assistant response
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:20:05.000Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5,"total_tokens":155}}}}}}}}"#
+    )
+    .unwrap();
+
+    // Assistant message content (ignored for stats but included for completeness)
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:20:06.000Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"All set!"}}]}}}}"#
+    )
+    .unwrap();
+
+    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+
+    let assistant_msg = result
+        .iter()
+        .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
+        .unwrap();
+
+    assert_eq!(assistant_msg.stats.tool_calls, 2);
+    assert_eq!(assistant_msg.stats.input_tokens, 100);
+    assert_eq!(assistant_msg.stats.output_tokens, 30);
+    assert_eq!(assistant_msg.stats.reasoning_tokens, 5);
+}
+
+#[test]
 fn test_parse_codex_cli_missing_model() {
     let mut temp_file = NamedTempFile::new().unwrap();
 
@@ -102,7 +165,7 @@ fn test_parse_codex_cli_missing_model() {
     // Token usage without any turn context to provide model information
     writeln!(
         temp_file,
-        r#"{{"timestamp":"2025-09-18T00:16:30.000Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":1030}},"last_token_usage":{{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":1030}},"model_context_window":272000}}}}}}"#
+        r#"{{"timestamp":"2025-09-18T00:16:30.000Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":1020}},"last_token_usage":{{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":1020}},"model_context_window":272000}}}}}}"#
     )
     .unwrap();
 
@@ -119,11 +182,83 @@ fn test_parse_codex_cli_missing_model() {
         .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
         .unwrap();
 
-    assert_eq!(assistant_msg.model, Some("unknown".to_string()));
+    assert_eq!(assistant_msg.model, Some("gpt-5".to_string()));
     assert_eq!(assistant_msg.stats.input_tokens, 600); // 1000 - 400 cached
-    assert_eq!(assistant_msg.stats.output_tokens, 30); // 20 + 10 reasoning
+    assert_eq!(assistant_msg.stats.output_tokens, 20);
+    assert_eq!(assistant_msg.stats.reasoning_tokens, 10);
     assert_eq!(assistant_msg.stats.cached_tokens, 400);
-    assert_eq!(assistant_msg.stats.cost, 0.0);
+    let expected_cost = calculate_total_cost("gpt-5", 600, 20, 0, 400);
+    assert!((assistant_msg.stats.cost - expected_cost).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_parse_codex_cli_turn_context_metadata_model() {
+    let mut temp_file = NamedTempFile::new().unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T01:00:00.000Z","type":"session_meta","payload":{{"id":"e7b89af6-58bf-4b3e-8118-8cef1cf9f7cd","timestamp":"2025-09-18T01:00:00.000Z","cwd":"/home/test","originator":"codex_cli_rs","cli_version":"0.38.0"}}}}"#
+    )
+    .unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T01:00:05.000Z","type":"turn_context","payload":{{"metadata":{{"model":"gpt-5-mini"}}}}}}"#
+    )
+    .unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T01:00:06.000Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"Hello!"}}]}}}}"#
+    )
+    .unwrap();
+
+    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+
+    let assistant_msg = result
+        .iter()
+        .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
+        .unwrap();
+
+    assert_eq!(assistant_msg.model, Some("gpt-5-mini".to_string()));
+}
+
+#[test]
+fn test_parse_codex_cli_event_model_backfill() {
+    let mut temp_file = NamedTempFile::new().unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T02:00:00.000Z","type":"session_meta","payload":{{"id":"95b7e78c-3a23-4f3a-bc06-2ce7acc82941","timestamp":"2025-09-18T02:00:00.000Z"}}}}"#
+    )
+    .unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T02:00:02.000Z","type":"event_msg","payload":{{"type":"token_count","info":{{"model":"gpt-5-codex","total_token_usage":{{"input_tokens":120,"cached_input_tokens":0,"output_tokens":25,"reasoning_output_tokens":5,"total_tokens":145}}}}}}}}"#
+    )
+    .unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T02:00:03.000Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"Hi!"}}]}}}}"#
+    )
+    .unwrap();
+
+    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+
+    let assistant_msg = result
+        .iter()
+        .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
+        .unwrap();
+
+    assert_eq!(assistant_msg.model, Some("gpt-5-codex".to_string()));
+    assert_eq!(assistant_msg.stats.input_tokens, 120);
+    assert_eq!(assistant_msg.stats.output_tokens, 25);
+    assert_eq!(assistant_msg.stats.reasoning_tokens, 5);
+    assert_eq!(assistant_msg.stats.cached_tokens, 0);
+    let expected_cost = calculate_total_cost("gpt-5-codex", 120, 25, 0, 0);
+    assert!((assistant_msg.stats.cost - expected_cost).abs() < f64::EPSILON);
 }
 
 #[test]
