@@ -15,10 +15,10 @@ pub fn warn_once(message: impl Into<String>) {
     let message = message.into();
     let cache = WARNED_MESSAGES.get_or_init(|| Mutex::new(HashSet::new()));
 
-    if let Ok(mut warned) = cache.lock() {
-        if warned.insert(message.clone()) {
-            eprintln!("{message}");
-        }
+    if let Ok(mut warned) = cache.lock()
+        && warned.insert(message.clone())
+    {
+        eprintln!("{message}");
     }
 }
 
