@@ -259,19 +259,3 @@ where
         .map(|dt| dt.into())
         .map_err(serde::de::Error::custom)
 }
-
-/// Custom serde deserializer for optional RFC3339 timestamp strings to Option<DateTime<Utc>>
-pub fn deserialize_optional_utc_timestamp<'de, D>(
-    deserializer: D,
-) -> Result<Option<DateTime<Utc>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let opt = Option::<String>::deserialize(deserializer)?;
-    match opt {
-        Some(s) => DateTime::parse_from_rfc3339(&s)
-            .map(|dt| Some(dt.into()))
-            .map_err(serde::de::Error::custom),
-        None => Ok(None),
-    }
-}
