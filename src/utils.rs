@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Local, Utc};
@@ -7,6 +8,19 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 use crate::types::{ConversationMessage, DailyStats};
+
+static WARNED_MESSAGES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+pub fn warn_once(message: impl Into<String>) {
+    let message = message.into();
+    let cache = WARNED_MESSAGES.get_or_init(|| Mutex::new(HashSet::new()));
+
+    if let Ok(mut warned) = cache.lock()
+        && warned.insert(message.clone())
+    {
+        eprintln!("{message}");
+    }
+}
 
 #[derive(Clone)]
 pub struct NumberFormatOptions {
