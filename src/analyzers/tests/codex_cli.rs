@@ -76,7 +76,7 @@ fn test_parse_codex_cli_wrapper_format_no_tokens() {
     let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
 
     // Should have parsed the assistant message
-    assert!(result.len() >= 1);
+    assert!(!result.is_empty());
 
     let assistant_msg = result
         .iter()
