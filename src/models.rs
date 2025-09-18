@@ -8,7 +8,7 @@ pub struct PricingTier {
     pub max_tokens: Option<u64>,
     /// Input cost per 1M tokens
     pub input_per_1m: f64,
-    /// Output cost per 1M tokens  
+    /// Output cost per 1M tokens
     pub output_per_1m: f64,
 }
 
@@ -518,6 +518,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-4-turbo" => "gpt-4-turbo",
     "gpt-4-turbo-2024-04-09" => "gpt-4-turbo",
     "gpt-5" => "gpt-5",
+    "gpt-5-codex" => "gpt-5",
     "gpt-5-2025-08-07" => "gpt-5",
     "gpt-5-mini" => "gpt-5-mini",
     "gpt-5-mini-2025-08-07" => "gpt-5-mini",

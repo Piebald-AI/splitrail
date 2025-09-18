@@ -4,9 +4,6 @@ Splitrail is a **fast, cross-platform, real-time Gemini CLI / Claude Code / Code
 
 **Download the binary for your platform on the [Releases](https://github.com/Piebald-AI/splitrail/releases) page.**
 
-> [!WARNING]
-> While support for both Codex **is** implemented, Codex currently does not output enough information to its recorded chat files.  A PR is open on Codex, however: https://github.com/openai/codex/pull/1583.  React with :+1: on it to encourage it to be merged!
-
 Also check out our developer-first agentic AI experience, [Piebald](https://piebald.ai/).
 
 ## Screenshots

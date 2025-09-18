@@ -481,7 +481,7 @@ fn draw_daily_stats_table(
         Cell::new(Text::from("Outp Tks").right_aligned()),
         Cell::new(Text::from("Convs").right_aligned()),
         Cell::new(Text::from("Tools").right_aligned()),
-        Cell::new(Text::from("Lines").right_aligned()),
+        // Cell::new(Text::from("Lines").right_aligned()),
         Cell::new("Models"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD))
@@ -683,7 +683,7 @@ fn draw_daily_stats_table(
         }
         .right_aligned();
 
-        let lines_cell = if is_empty_row {
+        let _lines_cell = if is_empty_row {
             Line::from(Span::styled(
                 lines_summary,
                 Style::default().add_modifier(Modifier::DIM),
@@ -722,7 +722,7 @@ fn draw_daily_stats_table(
             output_cell,
             conv_cell,
             tool_cell,
-            lines_cell,
+            // lines_cell,
             models_cell,
         ]);
 
@@ -777,10 +777,12 @@ fn draw_daily_stats_table(
             "──────",
             Style::default().add_modifier(Modifier::DIM),
         )),
+        /*
         Line::from(Span::styled(
             "───────────────────────",
             Style::default().add_modifier(Modifier::DIM),
         )),
+        */
         Line::from(Span::styled(
             "─".repeat(all_models_text.len().max(18)),
             Style::default().add_modifier(Modifier::DIM),
@@ -789,17 +791,17 @@ fn draw_daily_stats_table(
     rows.push(separator_row);
 
     // Add totals row
-    let total_lines_r = stats
+    let _total_lines_r = stats
         .daily_stats
         .values()
         .map(|s| s.stats.lines_read)
         .sum::<u64>();
-    let total_lines_e = stats
+    let _total_lines_e = stats
         .daily_stats
         .values()
         .map(|s| s.stats.lines_edited)
         .sum::<u64>();
-    let total_lines_a = stats
+    let _total_lines_a = stats
         .daily_stats
         .values()
         .map(|s| s.stats.lines_added)
@@ -857,6 +859,7 @@ fn draw_daily_stats_table(
                 .add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
+        /*
         Line::from(Span::styled(
             format!(
                 "{}/{}/{}",
@@ -869,6 +872,7 @@ fn draw_daily_stats_table(
                 .add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
+        */
         Line::from(Span::styled(
             all_models_text,
             Style::default().add_modifier(Modifier::DIM),
@@ -891,8 +895,8 @@ fn draw_daily_stats_table(
             Constraint::Length(9),  // Output
             Constraint::Length(6),  // Convs
             Constraint::Length(6),  // Tools
-            Constraint::Length(23), // Lines
-            Constraint::Min(10),    // Models
+            // Constraint::Length(23), // Lines
+            Constraint::Min(10), // Models
         ],
     )
     .header(header)
