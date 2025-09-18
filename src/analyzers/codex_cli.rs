@@ -250,21 +250,20 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                 }
             }
             "response_item" => {
-                if let simd_json::OwnedValue::Object(map) = &wrapper.payload {
-                    if let Some(simd_json::OwnedValue::String(item_type)) = map.get("type") {
-                        if item_type == "function_call" {
-                            if let Some(simd_json::OwnedValue::String(call_id)) = map.get("call_id") {
-                                current_tool_call_ids.insert(call_id.clone());
-                            } else {
-                                current_tool_call_ids.insert(format!(
-                                    "{}_{}",
-                                    wrapper.timestamp.to_rfc3339(),
-                                    current_tool_call_ids.len()
-                                ));
-                            }
-                            continue;
-                        }
+                if let simd_json::OwnedValue::Object(map) = &wrapper.payload
+                    && let Some(simd_json::OwnedValue::String(item_type)) = map.get("type")
+                    && item_type == "function_call"
+                {
+                    if let Some(simd_json::OwnedValue::String(call_id)) = map.get("call_id") {
+                        current_tool_call_ids.insert(call_id.clone());
+                    } else {
+                        current_tool_call_ids.insert(format!(
+                            "{}_{}",
+                            wrapper.timestamp.to_rfc3339(),
+                            current_tool_call_ids.len()
+                        ));
                     }
+                    continue;
                 }
 
                 let mut payload_bytes = simd_json::to_vec(&wrapper.payload)?;
@@ -331,63 +330,60 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
             }
             "event_msg" => {
                 let mut payload_bytes = simd_json::to_vec(&wrapper.payload)?;
-                if let Ok(event) = simd_json::from_slice::<CodexCliEventMsg>(&mut payload_bytes) {
-                    if event.event_type == "token_count" {
-                        if let Some(model_name) = extract_model_from_token_event(&wrapper.payload) {
-                            session_model = Some(SessionModel::explicit(model_name));
+                if let Ok(event) = simd_json::from_slice::<CodexCliEventMsg>(&mut payload_bytes)
+                    && event.event_type == "token_count"
+                {
+                    if let Some(model_name) = extract_model_from_token_event(&wrapper.payload) {
+                        session_model = Some(SessionModel::explicit(model_name));
+                    }
+
+                    if let Some(info) = event.info {
+                        let usage = if let Some(last_usage) = info.last_token_usage.clone() {
+                            Some(last_usage)
+                        } else {
+                            info.total_token_usage.clone().map(|total_usage| {
+                                subtract_token_usage(&total_usage, previous_total_usage.as_ref())
+                            })
+                        };
+
+                        if let Some(total_usage) = info.total_token_usage {
+                            previous_total_usage = Some(total_usage);
                         }
 
-                        if let Some(info) = event.info {
-                            let usage = if let Some(last_usage) = info.last_token_usage.clone() {
-                                Some(last_usage)
-                            } else if let Some(total_usage) = info.total_token_usage.clone() {
-                                Some(subtract_token_usage(
-                                    &total_usage,
-                                    previous_total_usage.as_ref(),
-                                ))
-                            } else {
-                                None
-                            };
+                        if let Some(token_usage) = usage {
+                            let model_state = session_model.clone().unwrap_or_else(|| {
+                                let fallback = SessionModel::inferred(
+                                    DEFAULT_FALLBACK_MODEL.to_string(),
+                                );
+                                warn_once(format!(
+                                    "WARNING: session {file_path_str} missing model metadata; using fallback model {} for cost estimation.",
+                                    fallback.name
+                                ));
+                                session_model = Some(fallback.clone());
+                                fallback
+                            });
 
-                            if let Some(total_usage) = info.total_token_usage {
-                                previous_total_usage = Some(total_usage);
-                            }
+                            let mut stats = stats_from_usage(&token_usage, &model_state.name);
+                            stats.tool_calls = current_tool_call_ids.len() as u32;
+                            current_tool_call_ids.clear();
 
-                            if let Some(token_usage) = usage {
-                                let model_state = session_model.clone().unwrap_or_else(|| {
-                                    let fallback = SessionModel::inferred(
-                                        DEFAULT_FALLBACK_MODEL.to_string(),
-                                    );
-                                    warn_once(format!(
-                                        "WARNING: session {file_path_str} missing model metadata; using fallback model {} for cost estimation.",
-                                        fallback.name
-                                    ));
-                                    session_model = Some(fallback.clone());
-                                    fallback
-                                });
+                            entries.push(ConversationMessage {
+                                application: Application::CodexCli,
+                                model: Some(model_state.name.clone()),
+                                global_hash: hash_text(&format!(
+                                    "{}_{}_token",
+                                    file_path_str,
+                                    wrapper.timestamp.to_rfc3339()
+                                )),
+                                local_hash: None,
+                                conversation_hash: hash_text(&file_path_str),
+                                date: wrapper.timestamp,
+                                project_hash: "".to_string(),
+                                stats,
+                                role: MessageRole::Assistant,
+                            });
 
-                                let mut stats = stats_from_usage(&token_usage, &model_state.name);
-                                stats.tool_calls = current_tool_call_ids.len() as u32;
-                                current_tool_call_ids.clear();
-
-                                entries.push(ConversationMessage {
-                                    application: Application::CodexCli,
-                                    model: Some(model_state.name.clone()),
-                                    global_hash: hash_text(&format!(
-                                        "{}_{}_token",
-                                        file_path_str,
-                                        wrapper.timestamp.to_rfc3339()
-                                    )),
-                                    local_hash: None,
-                                    conversation_hash: hash_text(&file_path_str),
-                                    date: wrapper.timestamp,
-                                    project_hash: "".to_string(),
-                                    stats,
-                                    role: MessageRole::Assistant,
-                                });
-
-                                saw_token_usage = true;
-                            }
+                            saw_token_usage = true;
                         }
                     }
                 }
@@ -461,10 +457,10 @@ fn subtract_token_usage(
 }
 
 fn extract_model_from_token_event(payload: &simd_json::OwnedValue) -> Option<String> {
-    if let simd_json::OwnedValue::Object(map) = payload {
-        if let Some(info_value) = map.get("info") {
-            return extract_model_from_value(info_value);
-        }
+    if let simd_json::OwnedValue::Object(map) = payload
+        && let Some(info_value) = map.get("info")
+    {
+        return extract_model_from_value(info_value);
     }
     None
 }
@@ -481,18 +477,18 @@ fn extract_model_from_value_rec(value: &simd_json::OwnedValue, depth: usize) -> 
     match value {
         simd_json::OwnedValue::Object(map) => {
             for key in ["model", "model_name", "modelName"] {
-                if let Some(simd_json::OwnedValue::String(model)) = map.get(key) {
-                    if let Some(normalized) = normalize_model_name(model) {
-                        return Some(normalized);
-                    }
+                if let Some(simd_json::OwnedValue::String(model)) = map.get(key)
+                    && let Some(normalized) = normalize_model_name(model)
+                {
+                    return Some(normalized);
                 }
             }
 
             for key in ["metadata", "info"] {
-                if let Some(nested) = map.get(key) {
-                    if let Some(model) = extract_model_from_value_rec(nested, depth + 1) {
-                        return Some(model);
-                    }
+                if let Some(nested) = map.get(key)
+                    && let Some(model) = extract_model_from_value_rec(nested, depth + 1)
+                {
+                    return Some(model);
                 }
             }
 
