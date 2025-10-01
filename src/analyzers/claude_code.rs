@@ -195,6 +195,13 @@ struct ClaudeCodeSummaryEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ClaudeCodeFileHistorySnapshotEntry {
+    #[serde(flatten)]
+    fields: simd_json::OwnedValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ClaudeCodeMessageEntry {
     r#type: Option<String>,      // "assistant" or "user"
     parent_uuid: Option<String>, // e.g. "773f9fdc-51ed-41cc-b107-19e5418bcf13"
@@ -216,6 +223,8 @@ struct ClaudeCodeMessageEntry {
 enum ClaudeCodeEntry {
     #[serde(alias = "summary")]
     Summary(ClaudeCodeSummaryEntry),
+    #[serde(rename = "file-history-snapshot")]
+    FileHistorySnapshot(ClaudeCodeFileHistorySnapshotEntry),
     #[serde(alias = "user", alias = "assistant", alias = "system")]
     Message(ClaudeCodeMessageEntry),
 }

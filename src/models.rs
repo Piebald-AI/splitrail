@@ -257,6 +257,16 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_read_per_1m: 0.3,
         },
     },
+    "claude-sonnet-4-5" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 3.0,
+            output_per_1m: 15.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 3.75,
+            cache_read_per_1m: 0.3,
+        },
+    },
     "claude-3-7-sonnet" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 3.0,
@@ -536,6 +546,9 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "claude-sonnet-4" => "claude-sonnet-4",
     "claude-sonnet-4-20250514" => "claude-sonnet-4",
     "claude-sonnet-4-0" => "claude-sonnet-4",
+    "claude-sonnet-4.5" => "claude-sonnet-4-5",
+    "claude-sonnet-4-5" => "claude-sonnet-4-5",
+    "claude-sonnet-4-5-20250929" => "claude-sonnet-4-5",
     "claude-3-7-sonnet" => "claude-3-7-sonnet",
     "claude-3-7-sonnet-20250219" => "claude-3-7-sonnet",
     "claude-3-7-sonnet-latest" => "claude-3-7-sonnet",
