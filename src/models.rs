@@ -297,6 +297,16 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_read_per_1m: 0.08,
         },
     },
+    "claude-haiku-4-5" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.0,
+            output_per_1m: 5.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 1.25,
+            cache_read_per_1m: 0.10,
+        },
+    },
     "claude-3-opus" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 15.0,
@@ -559,6 +569,9 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "claude-3-5-haiku" => "claude-3-5-haiku",
     "claude-3-5-haiku-20241022" => "claude-3-5-haiku",
     "claude-3-5-haiku-latest" => "claude-3-5-haiku",
+    "claude-haiku-4-5" => "claude-haiku-4-5",
+    "claude-haiku-4.5" => "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001" => "claude-haiku-4-5",
     "claude-3-opus" => "claude-3-opus",
     "claude-3-opus-20240229" => "claude-3-opus",
     "claude-3-haiku" => "claude-3-haiku",
