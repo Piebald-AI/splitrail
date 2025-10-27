@@ -400,7 +400,12 @@ where
                     )
                 }
                 Err(e) => {
-                    println!("Skipping invalid entry in {} line {}: {}", file_path.display(), i + 1, e);
+                    crate::utils::warn_once(format!(
+                        "Skipping invalid entry in {} line {}: {}",
+                        file_path.display(),
+                        i + 1,
+                        e
+                    ));
                     continue;
                 }
                 _ => continue,
@@ -467,33 +472,138 @@ pub fn deduplicate_messages_by_local_hash(
     messages: Vec<ConversationMessage>,
 ) -> Vec<ConversationMessage> {
     let mut seen_hashes = HashMap::<String, usize>::new(); // hash -> index in result
+    // Track distinct token tuples seen per local_hash to avoid double-counting
+    use std::collections::HashSet;
+    let mut seen_token_fingerprints: HashMap<String, HashSet<(u64, u64, u64, u64, u64)>> = HashMap::new();
     let mut deduplicated_entries: Vec<ConversationMessage> = Vec::new();
 
     for message in messages {
         if let Some(local_hash) = &message.local_hash {
             if let Some(&existing_index) = seen_hashes.get(local_hash) {
-                let current_tokens = message.stats.input_tokens
-                    + message.stats.output_tokens
-                    + message.stats.cache_creation_tokens
-                    + message.stats.cache_read_tokens
-                    + message.stats.cached_tokens;
+                // Compute the token tuple fingerprint for this message
+                let fp = (
+                    message.stats.input_tokens,
+                    message.stats.output_tokens,
+                    message.stats.cache_creation_tokens,
+                    message.stats.cache_read_tokens,
+                    message.stats.cached_tokens,
+                );
 
-                let existing_tokens = deduplicated_entries[existing_index].stats.input_tokens
-                    + deduplicated_entries[existing_index].stats.output_tokens
-                    + deduplicated_entries[existing_index]
+                // Initialize set for this hash if missing
+                let set = seen_token_fingerprints
+                    .entry(local_hash.clone())
+                    .or_insert_with(HashSet::new);
+
+                // If we've already seen this exact token tuple for this local_hash,
+                // it's a redundant duplicate (old format or repeated identical row).
+                if set.contains(&fp) {
+                    // Merge non-token stats so we don't lose tool/activity counts
+                    let existing_mut = &mut deduplicated_entries[existing_index];
+                    existing_mut.stats.tool_calls = existing_mut
                         .stats
-                        .cache_creation_tokens
-                    + deduplicated_entries[existing_index].stats.cache_read_tokens
-                    + deduplicated_entries[existing_index].stats.cached_tokens;
-
-                // If this message has more tokens than the saved one, replace the existing one.
-                if current_tokens > existing_tokens {
-                    deduplicated_entries[existing_index] = message;
+                        .tool_calls
+                        .max(message.stats.tool_calls);
+                    existing_mut.stats.files_read = existing_mut
+                        .stats
+                        .files_read
+                        .max(message.stats.files_read);
+                    existing_mut.stats.files_edited = existing_mut
+                        .stats
+                        .files_edited
+                        .max(message.stats.files_edited);
+                    existing_mut.stats.files_added = existing_mut
+                        .stats
+                        .files_added
+                        .max(message.stats.files_added);
+                    existing_mut.stats.terminal_commands = existing_mut
+                        .stats
+                        .terminal_commands
+                        .max(message.stats.terminal_commands);
+                    existing_mut.stats.file_searches = existing_mut
+                        .stats
+                        .file_searches
+                        .max(message.stats.file_searches);
+                    existing_mut.stats.file_content_searches = existing_mut
+                        .stats
+                        .file_content_searches
+                        .max(message.stats.file_content_searches);
+                    existing_mut.stats.todo_writes = existing_mut
+                        .stats
+                        .todo_writes
+                        .max(message.stats.todo_writes);
+                    existing_mut.stats.todo_reads = existing_mut
+                        .stats
+                        .todo_reads
+                        .max(message.stats.todo_reads);
+                    existing_mut.stats.todos_created = existing_mut
+                        .stats
+                        .todos_created
+                        .max(message.stats.todos_created);
+                    existing_mut.stats.todos_completed = existing_mut
+                        .stats
+                        .todos_completed
+                        .max(message.stats.todos_completed);
+                    existing_mut.stats.todos_in_progress = existing_mut
+                        .stats
+                        .todos_in_progress
+                        .max(message.stats.todos_in_progress);
+                    continue;
                 }
-                // Otherwise skip this message.
+
+                // Mark this distinct tuple as seen and aggregate its values
+                set.insert(fp);
+
+                // This is a split message with different/partial token counts.
+                // Aggregate all stats together.
+                let existing = &mut deduplicated_entries[existing_index];
+
+                // Aggregate token counts
+                existing.stats.input_tokens += message.stats.input_tokens;
+                existing.stats.output_tokens += message.stats.output_tokens;
+                existing.stats.cache_creation_tokens += message.stats.cache_creation_tokens;
+                existing.stats.cache_read_tokens += message.stats.cache_read_tokens;
+                existing.stats.cached_tokens += message.stats.cached_tokens;
+
+                // Aggregate tool stats
+                existing.stats.tool_calls += message.stats.tool_calls;
+                existing.stats.files_read += message.stats.files_read;
+                existing.stats.files_edited += message.stats.files_edited;
+                existing.stats.files_added += message.stats.files_added;
+                existing.stats.terminal_commands += message.stats.terminal_commands;
+                existing.stats.file_searches += message.stats.file_searches;
+                existing.stats.file_content_searches += message.stats.file_content_searches;
+                existing.stats.todo_writes += message.stats.todo_writes;
+                existing.stats.todo_reads += message.stats.todo_reads;
+                existing.stats.todos_created += message.stats.todos_created;
+                existing.stats.todos_completed += message.stats.todos_completed;
+                existing.stats.todos_in_progress += message.stats.todos_in_progress;
+
+                // Recalculate cost with the aggregated tokens
+                if let Some(model) = &existing.model {
+                    existing.stats.cost = calculate_total_cost(
+                        model,
+                        existing.stats.input_tokens,
+                        existing.stats.output_tokens,
+                        existing.stats.cache_creation_tokens,
+                        existing.stats.cache_read_tokens,
+                    );
+                }
             } else {
                 // First time seeing this hash, add it
                 seen_hashes.insert(local_hash.clone(), deduplicated_entries.len());
+                // Seed the seen tuple set for this local_hash with this message's tokens
+                let fp = (
+                    message.stats.input_tokens,
+                    message.stats.output_tokens,
+                    message.stats.cache_creation_tokens,
+                    message.stats.cache_read_tokens,
+                    message.stats.cached_tokens,
+                );
+                seen_token_fingerprints
+                    .entry(local_hash.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(fp);
+
                 deduplicated_entries.push(message);
             }
         } else {
@@ -503,4 +613,235 @@ pub fn deduplicate_messages_by_local_hash(
     }
 
     deduplicated_entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{MessageRole, Stats};
+
+    #[test]
+    fn test_deduplicate_partial_split_messages() {
+        // Test the new format (Oct 18+ 2025): Split messages with DIFFERENT partial tokens
+        let hash = "test_partial_split".to_string();
+
+        let messages = vec![
+            ConversationMessage {
+                global_hash: "unique1".to_string(),
+                local_hash: Some(hash.clone()),
+                application: Application::ClaudeCode,
+                model: Some("claude-sonnet-4-5-20250929".to_string()),
+                date: chrono::Utc::now(),
+                project_hash: "proj1".to_string(),
+                conversation_hash: "conv1".to_string(),
+                role: MessageRole::Assistant,
+                stats: Stats {
+                    input_tokens: 10,   // Different from others
+                    output_tokens: 2,   // thinking block
+                    tool_calls: 0,
+                    ..Default::default()
+                },
+            },
+            ConversationMessage {
+                global_hash: "unique2".to_string(),
+                local_hash: Some(hash.clone()),
+                application: Application::ClaudeCode,
+                model: Some("claude-sonnet-4-5-20250929".to_string()),
+                date: chrono::Utc::now(),
+                project_hash: "proj1".to_string(),
+                conversation_hash: "conv1".to_string(),
+                role: MessageRole::Assistant,
+                stats: Stats {
+                    input_tokens: 5,    // Different from others
+                    output_tokens: 2,   // text block
+                    tool_calls: 0,
+                    ..Default::default()
+                },
+            },
+            ConversationMessage {
+                global_hash: "unique3".to_string(),
+                local_hash: Some(hash.clone()),
+                application: Application::ClaudeCode,
+                model: Some("claude-sonnet-4-5-20250929".to_string()),
+                date: chrono::Utc::now(),
+                project_hash: "proj1".to_string(),
+                conversation_hash: "conv1".to_string(),
+                role: MessageRole::Assistant,
+                stats: Stats {
+                    input_tokens: 0,    // Different from others
+                    output_tokens: 447, // tool_use block
+                    tool_calls: 1,
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let deduplicated = deduplicate_messages_by_local_hash(messages);
+
+        // Should have exactly 1 message (all 3 merged)
+        assert_eq!(deduplicated.len(), 1);
+
+        // Output tokens should be summed: 2 + 2 + 447 = 451
+        assert_eq!(deduplicated[0].stats.output_tokens, 451);
+
+        // Input tokens should be summed: 10 + 5 + 0 = 15
+        assert_eq!(deduplicated[0].stats.input_tokens, 15);
+
+        // Tool calls should be summed too
+        assert_eq!(deduplicated[0].stats.tool_calls, 1);
+    }
+
+    #[test]
+    fn test_deduplicate_redundant_split_messages() {
+        // Test the old format (Oct 16-17 2025): Split messages with IDENTICAL redundant tokens
+        let hash = "test_redundant_split".to_string();
+
+        let messages = vec![
+            ConversationMessage {
+                global_hash: "unique1".to_string(),
+                local_hash: Some(hash.clone()),
+                application: Application::ClaudeCode,
+                model: Some("claude-sonnet-4-5-20250929".to_string()),
+                date: chrono::Utc::now(),
+                project_hash: "proj1".to_string(),
+                conversation_hash: "conv1".to_string(),
+                role: MessageRole::Assistant,
+                stats: Stats {
+                    output_tokens: 4,  // All blocks report same total
+                    input_tokens: 100,
+                    tool_calls: 2,
+                    ..Default::default()
+                },
+            },
+            ConversationMessage {
+                global_hash: "unique2".to_string(),
+                local_hash: Some(hash.clone()),
+                application: Application::ClaudeCode,
+                model: Some("claude-sonnet-4-5-20250929".to_string()),
+                date: chrono::Utc::now(),
+                project_hash: "proj1".to_string(),
+                conversation_hash: "conv1".to_string(),
+                role: MessageRole::Assistant,
+                stats: Stats {
+                    output_tokens: 4,  // Identical
+                    input_tokens: 100, // Identical
+                    tool_calls: 2,     // Not checked for identity, but will be kept
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let deduplicated = deduplicate_messages_by_local_hash(messages);
+
+        // Should have exactly 1 message (duplicate skipped)
+        assert_eq!(deduplicated.len(), 1);
+
+        // Tokens should NOT be summed (identical entries)
+        assert_eq!(deduplicated[0].stats.output_tokens, 4);
+        assert_eq!(deduplicated[0].stats.input_tokens, 100);
+
+        // Tool calls are from the first entry only
+        assert_eq!(deduplicated[0].stats.tool_calls, 2);
+    }
+
+    #[test]
+    fn test_identical_tokens_merge_tool_stats() {
+        // First row has no tools; second row has tool_calls=1, tokens identical
+        let hash = "identical_merge_tools".to_string();
+
+        let msg1 = ConversationMessage {
+            global_hash: "g1".to_string(),
+            local_hash: Some(hash.clone()),
+            application: Application::ClaudeCode,
+            model: Some("claude-sonnet-4-5-20250929".to_string()),
+            date: chrono::Utc::now(),
+            project_hash: "proj".to_string(),
+            conversation_hash: "conv".to_string(),
+            role: MessageRole::Assistant,
+            stats: Stats {
+                input_tokens: 100,
+                output_tokens: 4,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                cached_tokens: 0,
+                tool_calls: 0,
+                ..Default::default()
+            },
+        };
+
+        let msg2 = ConversationMessage {
+            global_hash: "g2".to_string(),
+            local_hash: Some(hash.clone()),
+            application: Application::ClaudeCode,
+            model: Some("claude-sonnet-4-5-20250929".to_string()),
+            date: chrono::Utc::now(),
+            project_hash: "proj".to_string(),
+            conversation_hash: "conv".to_string(),
+            role: MessageRole::Assistant,
+            stats: Stats {
+                input_tokens: 100,
+                output_tokens: 4,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+                cached_tokens: 0,
+                tool_calls: 1,
+                ..Default::default()
+            },
+        };
+
+        let dedup = deduplicate_messages_by_local_hash(vec![msg1, msg2]);
+        assert_eq!(dedup.len(), 1);
+        // Tokens unchanged
+        assert_eq!(dedup[0].stats.input_tokens, 100);
+        assert_eq!(dedup[0].stats.output_tokens, 4);
+        // Tool calls merged from second row
+        assert_eq!(dedup[0].stats.tool_calls, 1);
+    }
+
+    #[test]
+    fn test_deduplicate_skips_identical_after_partial_aggregate() {
+        // Mix of partials and redundant duplicates for the same local_hash
+        let hash = "test_mixed_duplicates".to_string();
+
+        let a1 = ConversationMessage {
+            global_hash: "ga1".to_string(),
+            local_hash: Some(hash.clone()),
+            application: Application::ClaudeCode,
+            model: Some("claude-sonnet-4-5-20250929".to_string()),
+            date: chrono::Utc::now(),
+            project_hash: "proj".to_string(),
+            conversation_hash: "conv".to_string(),
+            role: MessageRole::Assistant,
+            stats: Stats { input_tokens: 10, output_tokens: 2, ..Default::default() },
+        };
+        // Exact duplicate of a1 (should be skipped)
+        let a2 = ConversationMessage { global_hash: "ga2".to_string(), ..a1.clone() };
+
+        // Tool-use partial
+        let b1 = ConversationMessage {
+            global_hash: "gb1".to_string(),
+            local_hash: Some(hash.clone()),
+            application: Application::ClaudeCode,
+            model: Some("claude-sonnet-4-5-20250929".to_string()),
+            date: chrono::Utc::now(),
+            project_hash: "proj".to_string(),
+            conversation_hash: "conv".to_string(),
+            role: MessageRole::Assistant,
+            stats: Stats { input_tokens: 0, output_tokens: 447, tool_calls: 1, ..Default::default() },
+        };
+        // Exact duplicate of b1 (should be skipped)
+        let b2 = ConversationMessage { global_hash: "gb2".to_string(), ..b1.clone() };
+
+        // Another duplicate of a1 after aggregation (should still be skipped)
+        let a3 = ConversationMessage { global_hash: "ga3".to_string(), ..a1.clone() };
+
+        let messages = vec![a1, a2, b1, b2, a3];
+        let deduplicated = deduplicate_messages_by_local_hash(messages);
+
+        assert_eq!(deduplicated.len(), 1);
+        // Should include A once and B once
+        assert_eq!(deduplicated[0].stats.input_tokens, 10);
+        assert_eq!(deduplicated[0].stats.output_tokens, 2 + 447);
+        assert_eq!(deduplicated[0].stats.tool_calls, 1);
+    }
 }

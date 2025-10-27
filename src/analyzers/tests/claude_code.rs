@@ -117,11 +117,11 @@ fn test_deduplicate_messages_by_local_hash() {
 
     let deduplicated = deduplicate_messages_by_local_hash(messages);
 
-    // Deduplication logic only keeps the message with highest token count.
+    // Deduplication now aggregates messages with the same local_hash
     assert_eq!(deduplicated.len(), 1);
 
-    // Should keep the message with higher token usage (15 tokens)
-    assert_eq!(deduplicated[0].stats.input_tokens, 15);
+    // Should sum the tokens from both entries: 10 + 15 = 25
+    assert_eq!(deduplicated[0].stats.input_tokens, 25);
 
     // Test with manually created messages that should be deduplicated
     let mut test_messages = Vec::new();
@@ -163,11 +163,16 @@ fn test_deduplicate_messages_by_local_hash() {
     test_messages.push(duplicate_msg.clone());
 
     let deduplicated_test = deduplicate_messages_by_local_hash(test_messages);
-    // Duplication logic only keeps the message with highest token count
+    // Aggregation logic merges messages with the same local_hash
     assert_eq!(deduplicated_test.len(), 1);
-    // Should keep the message with higher token usage (global2)
-    assert_eq!(deduplicated_test[0].global_hash, "global2");
-    assert_eq!(deduplicated_test[0].stats.input_tokens, 15);
+    // Should keep the first message's metadata but aggregate the tokens
+    assert_eq!(deduplicated_test[0].global_hash, "global1");
+    // Should sum the tokens from both entries: 10 + 15 = 25
+    assert_eq!(deduplicated_test[0].stats.input_tokens, 25);
+    // Should sum output tokens: 5 + 8 = 13
+    assert_eq!(deduplicated_test[0].stats.output_tokens, 13);
+    // Should sum cache tokens: 3 + 5 = 8
+    assert_eq!(deduplicated_test[0].stats.cached_tokens, 8);
 }
 
 #[test]
