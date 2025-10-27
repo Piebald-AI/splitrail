@@ -11,7 +11,7 @@ use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
 use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct ClaudeCodeAnalyzer;
 
@@ -468,13 +468,16 @@ where
     entries
 }
 
+// Type alias for token fingerprint tracking to avoid type complexity
+type TokenFingerprint = (u64, u64, u64, u64, u64);
+type TokenFingerprintMap = HashMap<String, HashSet<TokenFingerprint>>;
+
 pub fn deduplicate_messages_by_local_hash(
     messages: Vec<ConversationMessage>,
 ) -> Vec<ConversationMessage> {
     let mut seen_hashes = HashMap::<String, usize>::new(); // hash -> index in result
     // Track distinct token tuples seen per local_hash to avoid double-counting
-    use std::collections::HashSet;
-    let mut seen_token_fingerprints: HashMap<String, HashSet<(u64, u64, u64, u64, u64)>> = HashMap::new();
+    let mut seen_token_fingerprints: TokenFingerprintMap = HashMap::new();
     let mut deduplicated_entries: Vec<ConversationMessage> = Vec::new();
 
     for message in messages {
@@ -492,7 +495,7 @@ pub fn deduplicate_messages_by_local_hash(
                 // Initialize set for this hash if missing
                 let set = seen_token_fingerprints
                     .entry(local_hash.clone())
-                    .or_insert_with(HashSet::new);
+                    .or_default();
 
                 // If we've already seen this exact token tuple for this local_hash,
                 // it's a redundant duplicate (old format or repeated identical row).
@@ -601,7 +604,7 @@ pub fn deduplicate_messages_by_local_hash(
                 );
                 seen_token_fingerprints
                     .entry(local_hash.clone())
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(fp);
 
                 deduplicated_entries.push(message);
