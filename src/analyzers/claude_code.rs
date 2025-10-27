@@ -502,14 +502,10 @@ pub fn deduplicate_messages_by_local_hash(
                 if set.contains(&fp) {
                     // Merge non-token stats so we don't lose tool/activity counts
                     let existing_mut = &mut deduplicated_entries[existing_index];
-                    existing_mut.stats.tool_calls = existing_mut
-                        .stats
-                        .tool_calls
-                        .max(message.stats.tool_calls);
-                    existing_mut.stats.files_read = existing_mut
-                        .stats
-                        .files_read
-                        .max(message.stats.files_read);
+                    existing_mut.stats.tool_calls =
+                        existing_mut.stats.tool_calls.max(message.stats.tool_calls);
+                    existing_mut.stats.files_read =
+                        existing_mut.stats.files_read.max(message.stats.files_read);
                     existing_mut.stats.files_edited = existing_mut
                         .stats
                         .files_edited
@@ -534,10 +530,8 @@ pub fn deduplicate_messages_by_local_hash(
                         .stats
                         .todo_writes
                         .max(message.stats.todo_writes);
-                    existing_mut.stats.todo_reads = existing_mut
-                        .stats
-                        .todo_reads
-                        .max(message.stats.todo_reads);
+                    existing_mut.stats.todo_reads =
+                        existing_mut.stats.todo_reads.max(message.stats.todo_reads);
                     existing_mut.stats.todos_created = existing_mut
                         .stats
                         .todos_created
@@ -639,8 +633,8 @@ mod tests {
                 conversation_hash: "conv1".to_string(),
                 role: MessageRole::Assistant,
                 stats: Stats {
-                    input_tokens: 10,   // Different from others
-                    output_tokens: 2,   // thinking block
+                    input_tokens: 10, // Different from others
+                    output_tokens: 2, // thinking block
                     tool_calls: 0,
                     ..Default::default()
                 },
@@ -655,8 +649,8 @@ mod tests {
                 conversation_hash: "conv1".to_string(),
                 role: MessageRole::Assistant,
                 stats: Stats {
-                    input_tokens: 5,    // Different from others
-                    output_tokens: 2,   // text block
+                    input_tokens: 5,  // Different from others
+                    output_tokens: 2, // text block
                     tool_calls: 0,
                     ..Default::default()
                 },
@@ -710,7 +704,7 @@ mod tests {
                 conversation_hash: "conv1".to_string(),
                 role: MessageRole::Assistant,
                 stats: Stats {
-                    output_tokens: 4,  // All blocks report same total
+                    output_tokens: 4, // All blocks report same total
                     input_tokens: 100,
                     tool_calls: 2,
                     ..Default::default()
@@ -815,10 +809,17 @@ mod tests {
             project_hash: "proj".to_string(),
             conversation_hash: "conv".to_string(),
             role: MessageRole::Assistant,
-            stats: Stats { input_tokens: 10, output_tokens: 2, ..Default::default() },
+            stats: Stats {
+                input_tokens: 10,
+                output_tokens: 2,
+                ..Default::default()
+            },
         };
         // Exact duplicate of a1 (should be skipped)
-        let a2 = ConversationMessage { global_hash: "ga2".to_string(), ..a1.clone() };
+        let a2 = ConversationMessage {
+            global_hash: "ga2".to_string(),
+            ..a1.clone()
+        };
 
         // Tool-use partial
         let b1 = ConversationMessage {
@@ -830,13 +831,24 @@ mod tests {
             project_hash: "proj".to_string(),
             conversation_hash: "conv".to_string(),
             role: MessageRole::Assistant,
-            stats: Stats { input_tokens: 0, output_tokens: 447, tool_calls: 1, ..Default::default() },
+            stats: Stats {
+                input_tokens: 0,
+                output_tokens: 447,
+                tool_calls: 1,
+                ..Default::default()
+            },
         };
         // Exact duplicate of b1 (should be skipped)
-        let b2 = ConversationMessage { global_hash: "gb2".to_string(), ..b1.clone() };
+        let b2 = ConversationMessage {
+            global_hash: "gb2".to_string(),
+            ..b1.clone()
+        };
 
         // Another duplicate of a1 after aggregation (should still be skipped)
-        let a3 = ConversationMessage { global_hash: "ga3".to_string(), ..a1.clone() };
+        let a3 = ConversationMessage {
+            global_hash: "ga3".to_string(),
+            ..a1.clone()
+        };
 
         let messages = vec![a1, a2, b1, b2, a3];
         let deduplicated = deduplicate_messages_by_local_hash(messages);
