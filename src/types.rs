@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum Application {
     ClaudeCode,
     GeminiCli,
+    QwenCode,
     CodexCli,
     Cline,
     RooCode,
