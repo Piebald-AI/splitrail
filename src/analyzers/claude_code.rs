@@ -217,6 +217,15 @@ struct ClaudeCodeMessageEntry {
     timestamp: DateTime<Utc>,                       // e.g. "2025-07-12T22:12:00.572Z"
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCodeQueueOperationEntry {
+    operation: String, // "enqueue" or "dequeue"
+    timestamp: DateTime<Utc>,
+    content: Option<String>,
+    session_id: String,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -227,6 +236,8 @@ enum ClaudeCodeEntry {
     FileHistorySnapshot(ClaudeCodeFileHistorySnapshotEntry),
     #[serde(alias = "user", alias = "assistant", alias = "system")]
     Message(ClaudeCodeMessageEntry),
+    #[serde(rename = "queue-operation")]
+    QueueOperation(ClaudeCodeQueueOperationEntry),
 }
 
 pub mod tool_schema {

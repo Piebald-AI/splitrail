@@ -9,6 +9,9 @@ pub enum Application {
     ClaudeCode,
     GeminiCli,
     CodexCli,
+    Cline,
+    RooCode,
+    KiloCode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

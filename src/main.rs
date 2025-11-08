@@ -5,7 +5,10 @@ use clap::{Args, Parser, Subcommand};
 use std::sync::{Arc, Mutex};
 
 use analyzer::AnalyzerRegistry;
-use analyzers::{ClaudeCodeAnalyzer, CodexCliAnalyzer, GeminiCliAnalyzer};
+use analyzers::{
+    ClaudeCodeAnalyzer, ClineAnalyzer, CodexCliAnalyzer, GeminiCliAnalyzer, KiloCodeAnalyzer,
+    RooCodeAnalyzer,
+};
 
 mod analyzer;
 mod analyzers;
@@ -115,6 +118,9 @@ fn create_analyzer_registry() -> AnalyzerRegistry {
 
     // Register available analyzers
     registry.register(ClaudeCodeAnalyzer::new());
+    registry.register(ClineAnalyzer::new());
+    registry.register(RooCodeAnalyzer::new());
+    registry.register(KiloCodeAnalyzer::new());
     registry.register(GeminiCliAnalyzer::new());
     registry.register(CodexCliAnalyzer::new());
 
