@@ -225,6 +225,15 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cached_input_per_1m: 0.005,
         },
     },
+    "gpt-5-codex-mini" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.25,
+            output_per_1m: 2.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.025,
+        },
+    },
 
     // Anthropic Models
     "claude-opus-4-1" => ModelInfo {
@@ -329,6 +338,34 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
     },
 
     // Google Models
+    "gemini-3-pro-preview-11-2025" => ModelInfo {
+        pricing: PricingStructure::Tiered {
+            tiers: &[
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 1.25,
+                    output_per_1m: 10.0,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.5,
+                    output_per_1m: 15.0,
+                },
+            ],
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.31,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.625,
+                },
+            ],
+        },
+    },
     "gemini-2.5-pro" => ModelInfo {
         pricing: PricingStructure::Tiered {
             tiers: &[
@@ -546,6 +583,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5-mini-2025-08-07" => "gpt-5-mini",
     "gpt-5-nano" => "gpt-5-nano",
     "gpt-5-nano-2025-08-07" => "gpt-5-nano",
+    "gpt-5-codex-mini" => "gpt-5-codex-mini",
 
     // Anthropic aliases
     "claude-opus-4" => "claude-opus-4",
@@ -578,6 +616,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "claude-3-haiku-20240307" => "claude-3-haiku",
 
     // Google aliases
+    "gemini-3-pro-preview-11-2025" => "gemini-3-pro-preview-11-2025",
     "gemini-2.5-pro" => "gemini-2.5-pro",
     "gemini-2.5-pro-preview-06-05" => "gemini-2.5-pro",
     "gemini-2.5-pro-preview-05-06" => "gemini-2.5-pro",
@@ -637,9 +676,9 @@ pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
         },
         None => {
             warn_once(format!(
-                "WARNING: Unknown model: {model_name}. Using fallback pricing."
+                "WARNING: Unknown model: {model_name}. Defaulting to $0."
             ));
-            (input_tokens as f64 / 1_000_000.0) * 1.0 // $1 per 1M tokens fallback
+            (input_tokens as f64 / 1_000_000.0) * 0.0 // $0 per 1M tokens fallback
         }
     }
 }
@@ -657,9 +696,9 @@ pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
         },
         None => {
             warn_once(format!(
-                "WARNING: Unknown model: {model_name}. Using fallback pricing."
+                "WARNING: Unknown model: {model_name}. Defaulting to $0."
             ));
-            (output_tokens as f64 / 1_000_000.0) * 5.0 // $5 per 1M tokens fallback
+            (output_tokens as f64 / 1_000_000.0) * 0.0 // $0 per 1M tokens fallback
         }
     }
 }
@@ -697,9 +736,9 @@ pub fn calculate_cache_cost(
         }
         None => {
             warn_once(format!(
-                "WARNING: Unknown model: {model_name}. Using fallback cache pricing."
+                "WARNING: Unknown model: {model_name}. Defaulting to $0."
             ));
-            (cache_read_tokens as f64 / 1_000_000.0) * 0.1 // $0.1 per 1M tokens fallback
+            (cache_read_tokens as f64 / 1_000_000.0) * 0.0 // $0 per 1M tokens fallback
         }
     }
 }
