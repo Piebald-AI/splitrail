@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2025-11-10
+
+- Add support for Cline, Kilo Code, Roo Code (Cline forks) and Qwen Code (Gemini CLI fork) (#25 and #26) - @bl-ue
+- Various fixes and improvements to Splitrail Cloud
+
 ## [1.2.0] - 2025-10-27
 
 - Correct Claude Code token aggregation for split messages (#23) - @bl-ue

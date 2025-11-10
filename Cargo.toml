@@ -1,6 +1,6 @@
 [package]
 name = "splitrail"
-version = "1.2.0"
+version = "2.0.0"
 edition = "2024"
 license = "MIT"
 authors = ["Piebald LLC <support@piebald.ai>"]
