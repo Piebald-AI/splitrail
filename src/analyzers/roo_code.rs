@@ -228,26 +228,38 @@ impl Analyzer for RooCodeAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        // VSCode forks that might have Roo Code installed: Code, Cursor, Windsurf, VSCodium, Positron
-        let vscode_forks = ["Code", "Cursor", "Windsurf", "VSCodium", "Positron"];
+        // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron
+        let vscode_gui_forks = [
+            "Code",
+            "Cursor",
+            "Windsurf",
+            "VSCodium",
+            "Positron",
+            "Code - Insiders",
+        ];
+        let vscode_cli_forks = ["vscode-server-insiders", "vscode-server"];
 
         if let Some(home_dir) = std::env::home_dir() {
             let home_str = home_dir.to_string_lossy();
 
             // Linux paths for all VSCode forks
-            for fork in &vscode_forks {
+            for fork in &vscode_gui_forks {
                 patterns.push(format!("{home_str}/.config/{fork}/User/globalStorage/rooveterinaryinc.roo-cline/tasks/*/ui_messages.json"));
+            }
+            // Linux paths for all VSCode CLI (server) forks
+            for fork in &vscode_cli_forks {
+                patterns.push(format!("{home_str}/.{fork}/data/User/globalStorage/rooveterinaryinc.roo-cline/tasks/*/ui_messages.json"));
             }
 
             // macOS paths for all VSCode forks
-            for fork in &vscode_forks {
+            for fork in &vscode_gui_forks {
                 patterns.push(format!("{home_str}/Library/Application Support/{fork}/User/globalStorage/rooveterinaryinc.roo-cline/tasks/*/ui_messages.json"));
             }
         }
 
         // Windows paths for all VSCode forks
         if let Ok(appdata) = std::env::var("APPDATA") {
-            for fork in &vscode_forks {
+            for fork in &vscode_gui_forks {
                 patterns.push(format!("{appdata}\\{fork}\\User\\globalStorage\\rooveterinaryinc.roo-cline\\tasks\\*\\ui_messages.json"));
             }
         }
