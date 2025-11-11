@@ -235,12 +235,9 @@ impl Analyzer for RooCodeAnalyzer {
             "Windsurf", 
             "VSCodium", 
             "Positron", 
-            "Code - Insiders"
+            "Code - Insiders",
         ];
-        let vscode_cli_forks = [
-            "vscode-server-insiders", 
-            "vscode-server"
-        ];
+        let vscode_cli_forks = ["vscode-server-insiders", "vscode-server"];
 
         if let Some(home_dir) = std::env::home_dir() {
             let home_str = home_dir.to_string_lossy();
