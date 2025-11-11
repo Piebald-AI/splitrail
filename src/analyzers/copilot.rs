@@ -394,12 +394,6 @@ impl Analyzer for CopilotAnalyzer {
             }
         }
 
-        // Windows paths for all VSCode forks
-        // if let Ok(appdata) = std::env::var("APPDATA") {
-        //     for fork in &vscode_forks {
-        //         patterns.push(format!("{appdata}\\{fork}\\User\\globalStorage\\kilocode.kilo-code\\tasks\\*\\ui_messages.json"));
-        //     }
-        // }
 
         patterns
     }
