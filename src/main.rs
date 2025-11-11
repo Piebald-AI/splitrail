@@ -1,4 +1,3 @@
-#![feature(if_let_guard)]
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -6,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use analyzer::AnalyzerRegistry;
 use analyzers::{
-    ClaudeCodeAnalyzer, ClineAnalyzer, CodexCliAnalyzer, GeminiCliAnalyzer, KiloCodeAnalyzer,
-    QwenCodeAnalyzer, RooCodeAnalyzer,
+    ClaudeCodeAnalyzer, ClineAnalyzer, CodexCliAnalyzer, CopilotAnalyzer, GeminiCliAnalyzer,
+    KiloCodeAnalyzer, QwenCodeAnalyzer, RooCodeAnalyzer,
 };
 
 mod analyzer;
@@ -124,6 +123,7 @@ fn create_analyzer_registry() -> AnalyzerRegistry {
     registry.register(GeminiCliAnalyzer::new());
     registry.register(QwenCodeAnalyzer::new());
     registry.register(CodexCliAnalyzer::new());
+    registry.register(CopilotAnalyzer::new());
 
     registry
 }

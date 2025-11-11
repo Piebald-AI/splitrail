@@ -13,6 +13,7 @@ pub enum Application {
     Cline,
     RooCode,
     KiloCode,
+    Copilot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
