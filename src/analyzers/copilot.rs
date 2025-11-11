@@ -387,7 +387,6 @@ impl Analyzer for CopilotAnalyzer {
         if let Some(home_dir) = std::env::home_dir() {
             let home_str = home_dir.to_string_lossy();
 
-
             // macOS paths for all VSCode forks
             for fork in &vscode_forks {
                 patterns.push(format!("{home_str}/Library/Application Support/{fork}/User/workspaceStorage/*/chatSessions/*.json"));
