@@ -231,7 +231,7 @@ impl Analyzer for KiloCodeAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron
+        // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron and Code - Insiders
         let vscode_gui_forks = [
             "Code",
             "Cursor",
@@ -240,10 +240,7 @@ impl Analyzer for KiloCodeAnalyzer {
             "Positron",
             "Code - Insiders",
         ];
-        let vscode_cli_forks = [
-            "vscode-server-insiders", 
-            "vscode-server"
-        ];
+        let vscode_cli_forks = ["vscode-server-insiders", "vscode-server"];
 
         if let Some(home_dir) = std::env::home_dir() {
             let home_str = home_dir.to_string_lossy();
