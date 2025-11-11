@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Rust that provides detailed analytics for Claude Code, Codex CLI, and Gemini CLI usage. It features a rich TUI (Terminal User Interface), automatic data upload to Splitrail Cloud, and extensive usage statistics including token counts, costs, file operations, tool usage, and productivity metrics.
+Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Rust that provides detailed analytics for Claude Code, Codex CLI, Copilot, and Gemini CLI usage. It features a rich TUI (Terminal User Interface), automatic data upload to Splitrail Cloud, and extensive usage statistics including token counts, costs, file operations, tool usage, and productivity metrics.
 
 ## Development Commands
 
@@ -33,12 +33,17 @@ Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Ru
 3. **Claude Code Analyzer** (`src/analyzers/claude_code.rs`): Analysis engine for Claude Code data
 4. **Codex CLI Analyzer** (`src/analyzers/codex_cli.rs`): Analysis engine for Codex CLI data
 5. **Gemini CLI Analyzer** (`src/analyzers/gemini_cli.rs`): Analysis engine for Gemini CLI data
-6. **TUI Module** (`src/tui.rs`): Rich terminal user interface using ratatui
-7. **Upload Module** (`src/upload.rs`): HTTP client for Splitrail Cloud integration
-8. **Config Module** (`src/config.rs`): Configuration file management
-9. **Types Module** (`src/types.rs`): Core data structures and enums
-10. **Models Module** (`src/models.rs`): Model pricing definitions
-11. **Utils Module** (`src/utils.rs`): Utility functions and helpers
+6. **GitHub Copilot Analyzer** (`src/analyzers/copilot.rs`): Analysis engine for GitHub Copilot Chat data
+7. **Cline Analyzer** (`src/analyzers/cline.rs`): Analysis engine for Cline data
+8. **Roo Code Analyzer** (`src/analyzers/roo_code.rs`): Analysis engine for Roo Code data
+9. **Kilo Code Analyzer** (`src/analyzers/kilo_code.rs`): Analysis engine for Kilo Code data
+10. **Qwen Code Analyzer** (`src/analyzers/qwen_code.rs`): Analysis engine for Qwen Code data
+11. **TUI Module** (`src/tui.rs`): Rich terminal user interface using ratatui
+12. **Upload Module** (`src/upload.rs`): HTTP client for Splitrail Cloud integration
+13. **Config Module** (`src/config.rs`): Configuration file management
+14. **Types Module** (`src/types.rs`): Core data structures and enums
+15. **Models Module** (`src/models.rs`): Model pricing definitions
+16. **Utils Module** (`src/utils.rs`): Utility functions and helpers
 
 ### Key Data Structures
 
@@ -59,7 +64,9 @@ Splitrail is a comprehensive agentic AI coding tool usage analyzer written in Ru
    - Claude Code: `~/.claude/projects` directories (JSONL files)
    - Codex CLI: `~/.codex/sessions/**/*.jsonl` files
    - Gemini CLI: `~/.gemini/tmp/*/chats/*.json` directories (JSON session files)
-2. **Flexible Conversation Parsing**: Processes different file formats (JSONL, JSON sessions)
+   - GitHub Copilot: `~/.vscode/extensions/github.copilot-chat-*/sessions/*.json` files (VSCode, Cursor, Insiders variants)
+   - Cline, Roo Code, Kilo Code, Qwen Code: Various VSCode extension data directories
+2. **Flexible Conversation Parsing**: Processes different file formats (JSONL, JSON sessions, chat logs)
 3. **Advanced Deduplication**: Uses tool-specific hashing strategies to prevent duplicate entries
 4. **Comprehensive Cost Calculation**: Uses actual cost values or calculates from tokens using model pricing
 5. **File Operation Tracking**: Monitors tool usage across different AI coding assistants
@@ -163,6 +170,8 @@ auto_upload = false
 - **Claude Code**: Full support for JSONL conversation files, TodoWrite/TodoRead tracking
 - **Codex CLI**: Command-line coding agent with shell command execution, reasoning model support, and token tracking
 - **Gemini CLI**: JSON session parsing with thoughts tracking and multi-dimensional tokens
+- **GitHub Copilot**: Chat session analysis from VSCode/Cursor/Insiders extensions with tool invocation tracking
+- **Cline, Roo Code, Kilo Code, Qwen Code**: Additional VSCode extension analyzers for comprehensive coverage
 
 ### Terminal User Interface
 - **Daily Stats View**: Comprehensive daily breakdown with costs, tokens, and operations

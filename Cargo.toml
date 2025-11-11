@@ -23,6 +23,7 @@ sha2 = "0.10"
 phf = { version = "0.12.1", features = ["macros"] }
 serde_bytes = "0.11.17"
 simd-json = { version = "0.15.1", features = ["serde"] }
+tiktoken-rs = "0.6"
 
 [dependencies.clap]
 version = "4.5.41"
