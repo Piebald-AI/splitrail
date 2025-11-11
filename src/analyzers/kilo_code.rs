@@ -232,7 +232,14 @@ impl Analyzer for KiloCodeAnalyzer {
         let mut patterns = Vec::new();
 
         // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron
-        let vscode_forks = ["Code", "Cursor", "Windsurf", "VSCodium", "Positron", "Code - Insiders"];
+        let vscode_forks = [
+            "Code",
+            "Cursor",
+            "Windsurf",
+            "VSCodium",
+            "Positron",
+            "Code - Insiders",
+        ];
 
         if let Some(home_dir) = std::env::home_dir() {
             let home_str = home_dir.to_string_lossy();
