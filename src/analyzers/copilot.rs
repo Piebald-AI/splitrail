@@ -108,9 +108,8 @@ fn count_tokens(text: &str) -> u64 {
     // Use o200k_base encoding (GPT-4o and newer models)
     match get_bpe_from_model("o200k_base") {
         Ok(bpe) => {
-            match bpe.encode_with_special_tokens(text).len() {
-                count => count as u64,
-            }
+            let count = bpe.encode_with_special_tokens(text).len();
+            count as u64
         }
         Err(_) => {
             // Fallback: rough estimate of ~4 characters per token
@@ -131,11 +130,10 @@ fn extract_text_from_value(value: &simd_json::OwnedValue, accumulated_text: &mut
         }
         simd_json::OwnedValue::Object(obj) => {
             // Look for "text" fields specifically
-            if let Some(text_value) = obj.get("text") {
-                if let Some(text_str) = text_value.as_str() {
-                    accumulated_text.push_str(text_str);
-                    accumulated_text.push(' ');
-                }
+            if let Some(text_value) = obj.get("text")
+                && let Some(text_str) = text_value.as_str() {
+                accumulated_text.push_str(text_str);
+                accumulated_text.push(' ');
             }
             // Recursively process all other fields
             for (_key, val) in obj.iter() {
@@ -167,7 +165,7 @@ fn extract_model_from_model_id(model_id: &str) -> Option<String> {
     // "LiteLLM/Sonnet 4.5"
 
     // Try to parse the full path format first
-    if let Some(last_part) = model_id.split('/').last() {
+    if let Some(last_part) = model_id.split('/').next_back() {
         return Some(last_part.to_string());
     }
 
@@ -253,30 +251,29 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
         let mut output_tokens = 0;
         
         // Count tokens from tool call rounds (model's thinking + tool requests)
-        if let Some(result) = &request.result {
-            if let Some(metadata) = &result.metadata {
-                if let Some(tool_call_rounds) = &metadata.tool_call_rounds {
-                    for round in tool_call_rounds {
-                        // The "response" field contains the model's thinking before making tool calls
-                        if let Some(response_text) = &round.response {
-                            output_tokens += count_tokens(response_text);
-                        }
-                        
-                        // Count tool call requests (name + arguments) as output
-                        for tool_call in &round.tool_calls {
-                            output_tokens += count_tokens(&tool_call.name);
-                            output_tokens += count_tokens(&tool_call.arguments);
-                        }
+        if let Some(result) = &request.result
+            && let Some(metadata) = &result.metadata {
+            if let Some(tool_call_rounds) = &metadata.tool_call_rounds {
+                for round in tool_call_rounds {
+                    // The "response" field contains the model's thinking before making tool calls
+                    if let Some(response_text) = &round.response {
+                        output_tokens += count_tokens(response_text);
+                    }
+                    
+                    // Count tool call requests (name + arguments) as output
+                    for tool_call in &round.tool_calls {
+                        output_tokens += count_tokens(&tool_call.name);
+                        output_tokens += count_tokens(&tool_call.arguments);
                     }
                 }
-                
-                // Count tool call results as input tokens (these are fed back to the model)
-                // Extract actual text content from the nested structure
-                if let Some(tool_results) = &metadata.tool_call_results {
-                    let mut extracted_text = String::new();
-                    extract_text_from_value(tool_results, &mut extracted_text);
-                    input_tokens += count_tokens(&extracted_text);
-                }
+            }
+            
+            // Count tool call results as input tokens (these are fed back to the model)
+            // Extract actual text content from the nested structure
+            if let Some(tool_results) = &metadata.tool_call_results {
+                let mut extracted_text = String::new();
+                extract_text_from_value(tool_results, &mut extracted_text);
+                input_tokens += count_tokens(&extracted_text);
             }
         }
 
@@ -287,15 +284,11 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
                     // This is actual text output from the model
                     output_tokens += count_tokens(value);
                 }
-                CopilotResponsePart::WithKind { kind, .. } => {
+                CopilotResponsePart::WithKind { .. } => {
                     // Don't count tool invocation serialized or other metadata
                     // These are just UI elements, not model output
                     // The actual tool calls are already counted in tool_call_rounds above
-                    match kind.as_str() {
-                        _ => {
-                            // Skip - already counted in tool_call_rounds or not model output
-                        }
-                    }
+                    // Skip - already counted in tool_call_rounds or not model output
                 }
             }
         }
@@ -340,17 +333,16 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
             ..Default::default()
         };
 
-        if let Some(result) = &request.result {
-            if let Some(metadata) = &result.metadata {
-                let file_ops = extract_file_operations(metadata);
-                stats.files_read += file_ops.files_read;
-                stats.files_edited += file_ops.files_edited;
-                stats.files_added += file_ops.files_added;
-                stats.files_deleted += file_ops.files_deleted;
-                stats.file_searches += file_ops.file_searches;
-                stats.file_content_searches += file_ops.file_content_searches;
-                stats.terminal_commands += file_ops.terminal_commands;
-            }
+        if let Some(result) = &request.result
+            && let Some(metadata) = &result.metadata {
+            let file_ops = extract_file_operations(metadata);
+            stats.files_read += file_ops.files_read;
+            stats.files_edited += file_ops.files_edited;
+            stats.files_added += file_ops.files_added;
+            stats.files_deleted += file_ops.files_deleted;
+            stats.file_searches += file_ops.file_searches;
+            stats.file_content_searches += file_ops.file_content_searches;
+            stats.terminal_commands += file_ops.terminal_commands;
         }
 
         entries.push(ConversationMessage {
