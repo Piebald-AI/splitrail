@@ -123,7 +123,10 @@ fn extract_text_from_value(value: &simd_json::OwnedValue, accumulated_text: &mut
     match value {
         simd_json::OwnedValue::String(s) => {
             // Only accumulate if it's a "text" field value, not metadata like URIs
-            if !s.starts_with("vscode-") && !s.starts_with("file://") && !s.starts_with("ssh-remote") {
+            if !s.starts_with("vscode-")
+                && !s.starts_with("file://")
+                && !s.starts_with("ssh-remote")
+            {
                 accumulated_text.push_str(s);
                 accumulated_text.push(' ');
             }
@@ -131,7 +134,8 @@ fn extract_text_from_value(value: &simd_json::OwnedValue, accumulated_text: &mut
         simd_json::OwnedValue::Object(obj) => {
             // Look for "text" fields specifically
             if let Some(text_value) = obj.get("text")
-                && let Some(text_str) = text_value.as_str() {
+                && let Some(text_str) = text_value.as_str()
+            {
                 accumulated_text.push_str(text_str);
                 accumulated_text.push(' ');
             }
@@ -199,9 +203,7 @@ fn extract_file_operations(metadata: &CopilotMetadata) -> Stats {
                     }
                     "create_file" => stats.files_added += 1,
                     "file_search" => stats.file_searches += 1,
-                    "grep_search" | "semantic_search" => {
-                        stats.file_content_searches += 1
-                    }
+                    "grep_search" | "semantic_search" => stats.file_content_searches += 1,
                     "run_in_terminal" => stats.terminal_commands += 1,
                     _ => {}
                 }
@@ -246,20 +248,21 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
 
         // Estimate input tokens from user message
         let mut input_tokens = count_tokens(&request.message.text);
-        
+
         // Estimate output tokens from model responses
         let mut output_tokens = 0;
-        
+
         // Count tokens from tool call rounds (model's thinking + tool requests)
         if let Some(result) = &request.result
-            && let Some(metadata) = &result.metadata {
+            && let Some(metadata) = &result.metadata
+        {
             if let Some(tool_call_rounds) = &metadata.tool_call_rounds {
                 for round in tool_call_rounds {
                     // The "response" field contains the model's thinking before making tool calls
                     if let Some(response_text) = &round.response {
                         output_tokens += count_tokens(response_text);
                     }
-                    
+
                     // Count tool call requests (name + arguments) as output
                     for tool_call in &round.tool_calls {
                         output_tokens += count_tokens(&tool_call.name);
@@ -267,7 +270,7 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
                     }
                 }
             }
-            
+
             // Count tool call results as input tokens (these are fed back to the model)
             // Extract actual text content from the nested structure
             if let Some(tool_results) = &metadata.tool_call_results {
@@ -334,7 +337,8 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
         };
 
         if let Some(result) = &request.result
-            && let Some(metadata) = &result.metadata {
+            && let Some(metadata) = &result.metadata
+        {
             let file_ops = extract_file_operations(metadata);
             stats.files_read += file_ops.files_read;
             stats.files_edited += file_ops.files_edited;
@@ -393,7 +397,6 @@ impl Analyzer for CopilotAnalyzer {
                 patterns.push(format!("{home_str}/Library/Application Support/{fork}/User/workspaceStorage/*/chatSessions/*.json"));
             }
         }
-
 
         patterns
     }
@@ -550,13 +553,13 @@ mod tests {
                 {"text": "Nested text"}
             ]
         }"#;
-        
+
         let mut bytes = json_str.as_bytes().to_vec();
         let value: OwnedValue = simd_json::from_slice(&mut bytes).unwrap();
-        
+
         let mut extracted = String::new();
         extract_text_from_value(&value, &mut extracted);
-        
+
         assert!(extracted.contains("Hello world"));
         assert!(extracted.contains("Nested text"));
     }

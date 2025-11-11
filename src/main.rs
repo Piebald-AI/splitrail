@@ -1,4 +1,3 @@
-
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::sync::{Arc, Mutex};
