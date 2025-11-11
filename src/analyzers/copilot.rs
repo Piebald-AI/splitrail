@@ -370,7 +370,7 @@ impl Analyzer for CopilotAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron
+        // VSCode forks that might have Copilot installed: Code, Cursor, Windsurf, VSCodium, Positron
         let vscode_forks = [
             "Code",
             "Cursor",
