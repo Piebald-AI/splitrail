@@ -230,11 +230,11 @@ impl Analyzer for RooCodeAnalyzer {
 
         // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron
         let vscode_gui_forks = [
-            "Code", 
-            "Cursor", 
-            "Windsurf", 
-            "VSCodium", 
-            "Positron", 
+            "Code",
+            "Cursor",
+            "Windsurf",
+            "VSCodium",
+            "Positron",
             "Code - Insiders",
         ];
         let vscode_cli_forks = ["vscode-server-insiders", "vscode-server"];
