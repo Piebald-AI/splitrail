@@ -80,6 +80,11 @@ fn extract_and_hash_project_id_kilo_code(file_path: &Path) -> String {
     hash_text(&file_path.to_string_lossy())
 }
 
+fn is_probably_tool_json_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    (trimmed.starts_with('{') || trimmed.starts_with("[{")) && trimmed.contains("\"tool\"")
+}
+
 // Helper function to extract model from environment details text
 fn extract_model_from_text(text: &str) -> Option<String> {
     // Look for <model>...</model> tags in the text
@@ -139,6 +144,7 @@ fn parse_kilo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMes
 
     let mut entries = Vec::new();
     let mut message_index = 0;
+    let mut fallback_session_name: Option<String> = None;
 
     // Process ui_messages to extract API requests with token/cost data
     for message in ui_messages {
@@ -181,13 +187,15 @@ fn parse_kilo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMes
                             model: current_model.clone(),
                             stats,
                             role: MessageRole::Assistant, // API requests are from the assistant
+                            uuid: None,
+                            session_name: fallback_session_name.clone(),
                         });
 
                         message_index += 1;
                     }
                 }
             }
-            KiloCodeUiMessage::Ask { ts, ask, .. } => {
+            KiloCodeUiMessage::Ask { ts, ask, text, .. } => {
                 // Track user interactions (followup questions, confirmations)
                 if matches!(
                     ask.as_str(),
@@ -201,6 +209,19 @@ fn parse_kilo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMes
                         project_hash, conversation_hash, message_index, ts
                     ));
 
+                    if fallback_session_name.is_none() && !text.is_empty() {
+                        let text_str = text;
+                        if !is_probably_tool_json_text(&text_str) {
+                            let truncated = if text_str.chars().count() > 50 {
+                                let chars: String = text_str.chars().take(50).collect();
+                                format!("{}...", chars)
+                            } else {
+                                text_str
+                            };
+                            fallback_session_name = Some(truncated);
+                        }
+                    }
+
                     entries.push(ConversationMessage {
                         application: Application::KiloCode,
                         date,
@@ -211,6 +232,8 @@ fn parse_kilo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMes
                         model: None,
                         stats: Stats::default(), // User messages don't have token costs
                         role: MessageRole::User,
+                        uuid: None,
+                        session_name: fallback_session_name.clone(),
                     });
 
                     message_index += 1;
@@ -231,7 +254,7 @@ impl Analyzer for KiloCodeAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron and Code - Insiders
+        // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron, Antigravity, Code - Insiders
         let vscode_gui_forks = [
             "Code",
             "Cursor",
@@ -239,6 +262,7 @@ impl Analyzer for KiloCodeAnalyzer {
             "VSCodium",
             "Positron",
             "Code - Insiders",
+            "Antigravity",
         ];
         let vscode_cli_forks = ["vscode-server-insiders", "vscode-server"];
 

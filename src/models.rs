@@ -207,6 +207,15 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cached_input_per_1m: 0.125,
         },
     },
+    "gpt-5.1" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.25,
+            output_per_1m: 10.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.125,
+        },
+    },
     "gpt-5-mini" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 0.25,
@@ -343,28 +352,17 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             tiers: &[
                 PricingTier {
                     max_tokens: Some(200_000),
-                    input_per_1m: 1.25,
-                    output_per_1m: 10.0,
+                    input_per_1m: 2.0,
+                    output_per_1m: 12.0,
                 },
                 PricingTier {
                     max_tokens: None,
-                    input_per_1m: 2.5,
-                    output_per_1m: 15.0,
+                    input_per_1m: 4.0,
+                    output_per_1m: 18.0,
                 },
             ],
         },
-        caching: CachingSupport::Google {
-            tiers: &[
-                CachingTier {
-                    max_tokens: Some(200_000),
-                    cached_input_per_1m: 0.31,
-                },
-                CachingTier {
-                    max_tokens: None,
-                    cached_input_per_1m: 0.625,
-                },
-            ],
-        },
+        caching: CachingSupport::None,
     },
     "gemini-2.5-pro" => ModelInfo {
         pricing: PricingStructure::Tiered {
@@ -579,6 +577,8 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5" => "gpt-5",
     "gpt-5-codex" => "gpt-5",
     "gpt-5-2025-08-07" => "gpt-5",
+    "gpt-5.1" => "gpt-5.1",
+    "gpt-5.1-2025-08-07" => "gpt-5.1",
     "gpt-5-mini" => "gpt-5-mini",
     "gpt-5-mini-2025-08-07" => "gpt-5-mini",
     "gpt-5-nano" => "gpt-5-nano",
@@ -617,6 +617,8 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
 
     // Google aliases
     "gemini-3-pro-preview-11-2025" => "gemini-3-pro-preview-11-2025",
+    "gemini-3-pro-preview" => "gemini-3-pro-preview-11-2025",
+    "gemini-3-pro" => "gemini-3-pro-preview-11-2025",
     "gemini-2.5-pro" => "gemini-2.5-pro",
     "gemini-2.5-pro-preview-06-05" => "gemini-2.5-pro",
     "gemini-2.5-pro-preview-05-06" => "gemini-2.5-pro",

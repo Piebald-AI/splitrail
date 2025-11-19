@@ -45,6 +45,12 @@ fn test_parse_codex_cli_new_wrapper_format() {
     // Should have parsed user and assistant messages
     assert!(result.len() >= 2);
 
+    // Session name should prefer the first user message over generic summaries like "auto"
+    assert!(
+        result
+            .iter()
+            .any(|msg| msg.session_name.as_deref() == Some("Hey"))
+    );
     // Find the assistant message
     let assistant_msg = result
         .iter()
@@ -89,6 +95,39 @@ fn test_parse_codex_cli_wrapper_format_no_tokens() {
     // Should have default stats when no token info is available
     assert_eq!(assistant_msg.stats.input_tokens, 0);
     assert_eq!(assistant_msg.stats.output_tokens, 0);
+}
+
+#[test]
+fn test_codex_cli_fallback_session_name_from_first_user_message() {
+    let mut temp_file = NamedTempFile::new().unwrap();
+
+    // Turn context without summary
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:16:36.676Z","type":"turn_context","payload":{{"cwd":"/home/test","approval_policy":"on-request","model":"gpt-5-codex"}}}}"#
+    )
+    .unwrap();
+
+    // User message with input_text
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:16:36.675Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"This is a Codex CLI session title that should be truncated for display."}}]}}}}"#
+    )
+    .unwrap();
+
+    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+
+    // Fallback session name should be derived from the first user message
+    let names: Vec<String> = result
+        .iter()
+        .filter_map(|msg| msg.session_name.clone())
+        .collect();
+
+    assert!(!names.is_empty());
+    let name = &names[0];
+    assert!(name.starts_with("This is a Codex CLI session title"));
+    assert!(name.ends_with("..."));
+    assert_eq!(name.chars().count(), 53); // 50 chars + "..."
 }
 
 #[test]

@@ -198,6 +198,18 @@ impl SessionModel {
     }
 }
 
+fn is_probably_tool_json_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    (trimmed.starts_with('{') || trimmed.starts_with("[{")) && trimmed.contains("\"tool\"")
+}
+
+fn is_noise_title_candidate(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    is_probably_tool_json_text(trimmed)
+        || trimmed.starts_with("<environment_context>")
+        || trimmed.starts_with("# AGENTS.md instructions for")
+}
+
 pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
     let mut entries = Vec::new();
     let file_path_str = file_path.to_string_lossy().into_owned();
@@ -210,6 +222,8 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
     let mut saw_token_usage = false;
     let mut _turn_context: Option<CodexCliTurnContext> = None;
     let mut current_tool_call_ids: HashSet<String> = HashSet::new();
+    let mut session_name: Option<String> = None;
+    let mut fallback_session_name: Option<String> = None;
 
     for line_result in reader.lines() {
         let line = match line_result {
@@ -246,6 +260,16 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                     if let Some(model_name) = extract_model_from_value(&wrapper.payload) {
                         session_model = Some(SessionModel::explicit(model_name));
                     }
+                    if session_name.is_none()
+                        && let Some(summary) = context.summary.clone()
+                        && !summary.trim().is_empty()
+                    {
+                        let trimmed = summary.trim();
+                        // Skip generic summaries like "auto"
+                        if trimmed.to_lowercase() != "auto" {
+                            session_name = Some(summary);
+                        }
+                    }
                     _turn_context = Some(context);
                 }
             }
@@ -273,6 +297,71 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                 {
                     match role.as_str() {
                         "user" => {
+                            if fallback_session_name.is_none()
+                                && let Some(content_val) = &message.content
+                            {
+                                let text_opt = match content_val {
+                                    simd_json::OwnedValue::String(s) => {
+                                        if s.is_empty() {
+                                            None
+                                        } else {
+                                            Some(s.clone())
+                                        }
+                                    }
+                                    simd_json::OwnedValue::Array(items) => {
+                                        let mut result = None;
+                                        for item in items.iter() {
+                                            if let simd_json::OwnedValue::Object(map) = item {
+                                                // Prefer input_text blocks for titles
+                                                if let Some(simd_json::OwnedValue::String(kind)) =
+                                                    map.get("type")
+                                                    && kind == "input_text"
+                                                    && let Some(simd_json::OwnedValue::String(text)) =
+                                                        map.get("text")
+                                                    && !text.is_empty()
+                                                    && !is_probably_tool_json_text(text)
+                                                {
+                                                    result = Some(text.clone());
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        result
+                                    }
+                                    simd_json::OwnedValue::Object(map) => {
+                                        if let Some(simd_json::OwnedValue::String(text)) =
+                                            map.get("text")
+                                        {
+                                            if !text.is_empty() && !is_probably_tool_json_text(text)
+                                            {
+                                                Some(text.clone())
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    _ => None,
+                                };
+
+                                if let Some(text_str) = text_opt
+                                    && !is_noise_title_candidate(&text_str)
+                                {
+                                    let truncated = if text_str.chars().count() > 50 {
+                                        let chars: String = text_str.chars().take(50).collect();
+                                        format!("{}...", chars)
+                                    } else {
+                                        text_str
+                                    };
+                                    fallback_session_name = Some(truncated);
+                                }
+                            }
+
+                            let effective_name = session_name
+                                .clone()
+                                .or_else(|| fallback_session_name.clone());
+
                             entries.push(ConversationMessage {
                                 date: wrapper.timestamp,
                                 global_hash: hash_text(&format!(
@@ -287,6 +376,8 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                                 model: None,
                                 stats: Stats::default(),
                                 role: MessageRole::User,
+                                uuid: None,
+                                session_name: effective_name,
                             });
                         }
                         "assistant" => {
@@ -321,6 +412,10 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                                     project_hash: "".to_string(),
                                     stats: Stats::default(),
                                     role: MessageRole::Assistant,
+                                    uuid: None,
+                                    session_name: session_name
+                                        .clone()
+                                        .or_else(|| fallback_session_name.clone()),
                                 });
                             }
                         }
@@ -381,6 +476,10 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                                 project_hash: "".to_string(),
                                 stats,
                                 role: MessageRole::Assistant,
+                                uuid: None,
+                                session_name: session_name
+                                    .clone()
+                                    .or_else(|| fallback_session_name.clone()),
                             });
 
                             saw_token_usage = true;

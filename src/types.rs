@@ -45,6 +45,8 @@ pub struct ConversationMessage {
     pub model: Option<String>, // None for user messages
     pub stats: Stats,
     pub role: MessageRole,
+    pub uuid: Option<String>,
+    pub session_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
