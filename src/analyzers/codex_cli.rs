@@ -260,15 +260,14 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                     if let Some(model_name) = extract_model_from_value(&wrapper.payload) {
                         session_model = Some(SessionModel::explicit(model_name));
                     }
-                    if session_name.is_none() {
-                        if let Some(summary) = context.summary.clone()
-                            && !summary.trim().is_empty()
-                        {
-                            let trimmed = summary.trim();
-                            // Skip generic summaries like "auto"
-                            if trimmed.to_lowercase() != "auto" {
-                                session_name = Some(summary);
-                            }
+                    if session_name.is_none()
+                        && let Some(summary) = context.summary.clone()
+                        && !summary.trim().is_empty()
+                    {
+                        let trimmed = summary.trim();
+                        // Skip generic summaries like "auto"
+                        if trimmed.to_lowercase() != "auto" {
+                            session_name = Some(summary);
                         }
                     }
                     _turn_context = Some(context);
@@ -298,8 +297,8 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                 {
                     match role.as_str() {
                         "user" => {
-                            if fallback_session_name.is_none() {
-                                if let Some(content_val) = &message.content {
+                            if fallback_session_name.is_none()
+                                && let Some(content_val) = &message.content {
                                     let text_opt = match content_val {
                                         simd_json::OwnedValue::String(s) => {
                                             if s.is_empty() { None } else { Some(s.clone()) }
@@ -312,20 +311,16 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                                                     if let Some(simd_json::OwnedValue::String(kind)) =
                                                         map.get("type")
                                                         && kind == "input_text"
-                                                    {
-                                                        if let Some(
+                                                        && let Some(
                                                             simd_json::OwnedValue::String(text),
                                                         ) = map.get("text")
-                                                        {
-                                                            if !text.is_empty()
-                                                                && !is_probably_tool_json_text(
-                                                                    text,
-                                                                )
-                                                            {
-                                                                result = Some(text.clone());
-                                                                break;
-                                                            }
-                                                        }
+                                                        && !text.is_empty()
+                                                        && !is_probably_tool_json_text(
+                                                            text,
+                                                        )
+                                                    {
+                                                        result = Some(text.clone());
+                                                        break;
                                                     }
                                                 }
                                             }
@@ -349,8 +344,8 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                                         _ => None,
                                     };
 
-                                    if let Some(text_str) = text_opt {
-                                        if !is_noise_title_candidate(&text_str) {
+                                    if let Some(text_str) = text_opt
+                                        && !is_noise_title_candidate(&text_str) {
                                             let truncated = if text_str.chars().count() > 50 {
                                                 let chars: String =
                                                     text_str.chars().take(50).collect();
@@ -360,9 +355,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                                             };
                                             fallback_session_name = Some(truncated);
                                         }
-                                    }
                                 }
-                            }
 
                             let effective_name =
                                 session_name.clone().or_else(|| fallback_session_name.clone());

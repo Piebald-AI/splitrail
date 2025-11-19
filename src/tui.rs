@@ -336,14 +336,13 @@ async fn run_app(
                     if *selected_tab > 0 {
                         *selected_tab -= 1;
 
-                        if let StatsViewMode::Session = *stats_view_mode {
-                            if let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
+                        if let StatsViewMode::Session = *stats_view_mode
+                            && let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
                                 && let Some(table_state) = table_states.get_mut(*selected_tab)
                                 && !session_rows.is_empty()
                             {
                                 table_state.select(Some(session_rows.len().saturating_sub(1)));
                             }
-                        }
 
                         needs_redraw = true;
                     }
@@ -352,14 +351,13 @@ async fn run_app(
                     if *selected_tab < filtered_stats.len().saturating_sub(1) {
                         *selected_tab += 1;
 
-                        if let StatsViewMode::Session = *stats_view_mode {
-                            if let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
+                        if let StatsViewMode::Session = *stats_view_mode
+                            && let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
                                 && let Some(table_state) = table_states.get_mut(*selected_tab)
                                 && !session_rows.is_empty()
                             {
                                 table_state.select(Some(session_rows.len().saturating_sub(1)));
                             }
-                        }
 
                         needs_redraw = true;
                     }
@@ -470,8 +468,7 @@ async fn run_app(
                             StatsViewMode::Session => {
                                 if let Some(session_rows) =
                                     session_stats_per_tool.get(*selected_tab)
-                                {
-                                    if !session_rows.is_empty() {
+                                    && !session_rows.is_empty() {
                                         // sessions + separator + totals
                                         let total_rows = session_rows.len() + 2;
                                         // Move to totals row (last row)
@@ -479,7 +476,6 @@ async fn run_app(
                                             .select(Some(total_rows.saturating_sub(1)));
                                         needs_redraw = true;
                                     }
-                                }
                             }
                         }
                     }
@@ -501,8 +497,7 @@ async fn run_app(
                             StatsViewMode::Session => {
                                 if let Some(session_rows) =
                                     session_stats_per_tool.get(*selected_tab)
-                                {
-                                    if !session_rows.is_empty() {
+                                    && !session_rows.is_empty() {
                                         // sessions + separator + totals
                                         let total_rows = session_rows.len() + 2;
                                         let new_selected = (selected + 10)
@@ -510,7 +505,6 @@ async fn run_app(
                                         table_state.select(Some(new_selected));
                                         needs_redraw = true;
                                     }
-                                }
                             }
                         }
                     }
