@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2025-11-19
+
+- Add support for Copilot - @mcowger
+- Add better support for Roo Code - @mcowger
+- Add support for per-session token + cost tracking - @mike1858
+- Various fixes and improvements to Splitrail Cloud - @mike1858
+
 ## [2.0.0] - 2025-11-10
 
 - Add support for Cline, Kilo Code, Roo Code (Cline forks) and Qwen Code (Gemini CLI fork) (#25 and #26) - @bl-ue
