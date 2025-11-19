@@ -13,6 +13,9 @@ use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, Mes
 use crate::utils::hash_text;
 use std::collections::{HashMap, HashSet};
 
+// Type alias for parse_jsonl_file return type
+type ParseResult = (Vec<ConversationMessage>, HashMap<String, String>, Vec<String>, Option<String>);
+
 pub struct ClaudeCodeAnalyzer;
 
 impl ClaudeCodeAnalyzer {
@@ -112,11 +115,10 @@ impl Analyzer for ClaudeCodeAnalyzer {
             }
             
             // Fallback: If no summary found, use the fallback name (first user message)
-            if !found_summary {
-                if let Some(name) = conversation_fallbacks.get(&conversation_hash) {
+            if !found_summary
+                && let Some(name) = conversation_fallbacks.get(&conversation_hash) {
                     conversation_summaries.insert(conversation_hash, name.clone());
                 }
-            }
         }
 
         // Second pass: Apply session names to messages
@@ -409,7 +411,7 @@ pub fn parse_jsonl_file<R: BufRead>(
     reader: R,
     project_hash: &str,
     conversation_hash: &str,
-) -> Result<(Vec<ConversationMessage>, HashMap<String, String>, Vec<String>, Option<String>)> {
+) -> Result<ParseResult> {
     let mut messages = Vec::new();
     let mut summaries = HashMap::new();
     let mut all_uuids = Vec::new();
@@ -463,7 +465,7 @@ pub fn parse_jsonl_file<R: BufRead>(
                             Some("user") => MessageRole::User,
                             _ => MessageRole::Assistant,
                         },
-                        uuid: uuid,
+                        uuid,
                         session_name: None, // Will be populated later
                     };
 
@@ -501,8 +503,8 @@ pub fn parse_jsonl_file<R: BufRead>(
                     }
 
                     // Capture fallback session name from the first user message
-                    if matches!(msg.role, MessageRole::User) && fallback_session_name.is_none() {
-                        if let Some(content_val) = &content {
+                    if matches!(msg.role, MessageRole::User) && fallback_session_name.is_none()
+                        && let Some(content_val) = &content {
                             // Extract user-visible text from either blocks or string content
                             let text_opt: Option<String> = match content_val {
                                 Content::Blocks(blocks) => {
@@ -532,7 +534,6 @@ pub fn parse_jsonl_file<R: BufRead>(
                                 fallback_session_name = Some(truncated);
                             }
                         }
-                    }
 
                     messages.push(msg);
                 }

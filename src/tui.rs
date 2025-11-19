@@ -43,6 +43,13 @@ enum StatsViewMode {
     Session,
 }
 
+struct UiState<'a> {
+    table_states: &'a mut [TableState],
+    _scroll_offset: usize,
+    selected_tab: usize,
+    stats_view_mode: StatsViewMode,
+}
+
 #[derive(Debug, Clone)]
 struct SessionAggregate {
     session_id: String,
@@ -279,15 +286,18 @@ async fn run_app(
         // Only redraw if something has changed
         if needs_redraw {
             terminal.draw(|frame| {
+                let mut ui_state = UiState {
+                    table_states: &mut table_states,
+                    _scroll_offset: *scroll_offset,
+                    selected_tab: *selected_tab,
+                    stats_view_mode: *stats_view_mode,
+                };
                 draw_ui(
                     frame,
                     &filtered_stats,
                     format_options,
-                    &mut table_states,
-                    *scroll_offset,
-                    *selected_tab,
+                    &mut ui_state,
                     upload_status.clone(),
-                    *stats_view_mode,
                     &session_stats_per_tool,
                 );
             })?;
@@ -521,14 +531,13 @@ async fn run_app(
                             StatsViewMode::Session => StatsViewMode::Daily,
                         };
 
-                        if let StatsViewMode::Session = *stats_view_mode {
-                            if let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
+                        if let StatsViewMode::Session = *stats_view_mode
+                            && let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
                                 && let Some(table_state) = table_states.get_mut(*selected_tab)
                                 && !session_rows.is_empty()
                             {
                                 table_state.select(Some(session_rows.len().saturating_sub(1)));
                             }
-                        }
 
                         needs_redraw = true;
                     }
@@ -545,11 +554,8 @@ fn draw_ui(
     frame: &mut Frame,
     filtered_stats: &[&AgenticCodingToolStats],
     format_options: &NumberFormatOptions,
-    table_states: &mut [TableState],
-    _scroll_offset: usize,
-    selected_tab: usize,
+    ui_state: &mut UiState,
     upload_status: Arc<Mutex<UploadStatus>>,
-    stats_view_mode: StatsViewMode,
     session_stats_per_tool: &[Vec<SessionAggregate>],
 ) {
     // Since we're already working with filtered stats, has_data is simply whether we have any stats
@@ -607,7 +613,7 @@ fn draw_ui(
             .collect();
 
         let tabs = Tabs::new(tab_titles)
-            .select(selected_tab)
+            .select(ui_state.selected_tab)
             // .style(Style::default().add_modifier(Modifier::DIM))
             .highlight_style(Style::new().black().on_light_green())
             .padding("", "")
@@ -616,11 +622,11 @@ fn draw_ui(
         frame.render_widget(tabs, chunks[1]);
 
         // Get current analyzer stats
-        if let Some(current_stats) = filtered_stats.get(selected_tab)
-            && let Some(current_table_state) = table_states.get_mut(selected_tab)
+        if let Some(current_stats) = filtered_stats.get(ui_state.selected_tab)
+            && let Some(current_table_state) = ui_state.table_states.get_mut(ui_state.selected_tab)
         {
             // Main table
-            match stats_view_mode {
+            match ui_state.stats_view_mode {
                 StatsViewMode::Daily => {
                     draw_daily_stats_table(
                         frame,
@@ -631,7 +637,7 @@ fn draw_ui(
                     );
                 }
                 StatsViewMode::Session => {
-                    if let Some(session_rows) = session_stats_per_tool.get(selected_tab) {
+                    if let Some(session_rows) = session_stats_per_tool.get(ui_state.selected_tab) {
                         draw_session_stats_table(
                             frame,
                             chunks[2],
@@ -657,7 +663,7 @@ fn draw_ui(
         ])
         .split(help_area);
 
-        let help_text = match stats_view_mode {
+        let help_text = match ui_state.stats_view_mode {
             StatsViewMode::Daily => {
                 "Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, Ctrl+T for per-session view, q/Esc to quit"
             }
