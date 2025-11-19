@@ -78,6 +78,56 @@ fn extract_and_hash_project_id_roo_code(file_path: &Path) -> String {
     hash_text(&file_path.to_string_lossy())
 }
 
+fn is_probably_tool_json_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    (trimmed.starts_with('{') || trimmed.starts_with("[{")) && trimmed.contains("\"tool\"")
+}
+
+fn is_probably_shell_command(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // Common shell command prefixes
+    let lower = trimmed.to_lowercase();
+    for prefix in [
+        "git ",
+        "cargo ",
+        "just ",
+        "npm ",
+        "pnpm ",
+        "yarn ",
+        "python ",
+        "pytest ",
+        "npx ",
+        "pip ",
+        "bundle ",
+        "rails ",
+        "docker ",
+        "kubectl ",
+        "helm ",
+        "make ",
+        "go ",
+        "node ",
+        "deno ",
+        "bash ",
+        "sh ",
+        "zsh ",
+    ] {
+        if lower.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Pipelines or multiple commands chained
+    if lower.contains(" && ") || lower.contains(" || ") || lower.contains(" | ") {
+        return true;
+    }
+
+    false
+}
+
 // Helper function to extract model from environment details text
 fn extract_model_from_text(text: &str) -> Option<String> {
     // Look for <model>...</model> tags in the text
@@ -137,6 +187,7 @@ fn parse_roo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMess
 
     let mut entries = Vec::new();
     let mut message_index = 0;
+    let mut fallback_session_name: Option<String> = None;
 
     // Process ui_messages to extract API requests with token/cost data
     for message in ui_messages {
@@ -178,13 +229,15 @@ fn parse_roo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMess
                             model: current_model.clone(),
                             stats,
                             role: MessageRole::Assistant, // API requests are from the assistant
+                            uuid: None,
+                            session_name: fallback_session_name.clone(),
                         });
 
                         message_index += 1;
                     }
                 }
             }
-            RooCodeUiMessage::Ask { ts, ask, .. } => {
+            RooCodeUiMessage::Ask { ts, ask, text, .. } => {
                 // Track user interactions (followup questions, confirmations)
                 if matches!(
                     ask.as_str(),
@@ -198,6 +251,24 @@ fn parse_roo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMess
                         project_hash, conversation_hash, message_index, ts
                     ));
 
+                    if !text.is_empty() {
+                        let text_str = text;
+                        if !is_probably_tool_json_text(&text_str)
+                            && !is_probably_shell_command(&text_str)
+                        {
+                            let truncated = if text_str.chars().count() > 50 {
+                                let chars: String = text_str.chars().take(50).collect();
+                                format!("{}...", chars)
+                            } else {
+                                text_str
+                            };
+
+                            if fallback_session_name.is_none() {
+                                fallback_session_name = Some(truncated);
+                            }
+                        }
+                    }
+
                     entries.push(ConversationMessage {
                         application: Application::RooCode,
                         date,
@@ -208,6 +279,8 @@ fn parse_roo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMess
                         model: None,
                         stats: Stats::default(), // User messages don't have token costs
                         role: MessageRole::User,
+                        uuid: None,
+                        session_name: fallback_session_name.clone(),
                     });
 
                     message_index += 1;
@@ -228,14 +301,15 @@ impl Analyzer for RooCodeAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron
+        // VSCode forks that might have Kilo Code installed: Code, Cursor, Windsurf, VSCodium, Positron, Antigravity
         let vscode_gui_forks = [
+            "Antigravity",
             "Code",
-            "Cursor",
-            "Windsurf",
-            "VSCodium",
-            "Positron",
             "Code - Insiders",
+            "Cursor",
+            "Positron",
+            "VSCodium",
+            "Windsurf",
         ];
         let vscode_cli_forks = ["vscode-server-insiders", "vscode-server"];
 

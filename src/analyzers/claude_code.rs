@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
@@ -61,21 +61,70 @@ impl Analyzer for ClaudeCodeAnalyzer {
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
         // Parse all the files in parallel
-        let all_entries: Vec<ConversationMessage> = sources
+        let results: Vec<_> = sources
             .into_par_iter()
-            .flat_map(|source| {
-                let file = match File::open(&source.path) {
-                    Ok(file) => file,
-                    Err(e) => {
-                        eprintln!("Failed to open file: {e}");
-                        return Vec::new();
+            .filter_map(|source| {
+                let project_hash = extract_and_hash_project_id(&source.path);
+                let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
+                match File::open(&source.path) {
+                    Ok(file) => {
+                        let reader = BufReader::new(file);
+                        match parse_jsonl_file(&source.path, reader, &project_hash, &conversation_hash) {
+                            Ok((msgs, summaries, uuids, fallback)) => Some((msgs, summaries, conversation_hash, uuids, fallback)),
+                            Err(e) => {
+                                eprintln!("Failed to parse {}: {}", source.path.display(), e);
+                                None
+                            }
+                        }
                     }
-                };
-                let mut reader = BufReader::new(file);
-                parse_jsonl_file(&source.path, &mut reader)
+                    Err(e) => {
+                        eprintln!("Failed to open {}: {}", source.path.display(), e);
+                        None
+                    }
+                }
             })
             .collect();
 
+        let mut all_entries = Vec::new();
+        let mut session_names: HashMap<String, String> = HashMap::new();
+        let mut conversation_summaries: HashMap<String, String> = HashMap::new();
+        let mut conversation_fallbacks: HashMap<String, String> = HashMap::new();
+        let mut conversation_uuids: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (msgs, summaries, conversation_hash, uuids, fallback) in results {
+            all_entries.extend(msgs);
+            session_names.extend(summaries);
+            conversation_uuids.insert(conversation_hash.clone(), uuids);
+            if let Some(fb) = fallback {
+                conversation_fallbacks.insert(conversation_hash, fb);
+            }
+        }
+
+        // First pass: Link via all_uuids (includes skipped messages)
+        for (conversation_hash, uuids) in conversation_uuids {
+            let mut found_summary = false;
+            for uuid in uuids {
+                if let Some(name) = session_names.get(&uuid) {
+                    conversation_summaries.insert(conversation_hash.clone(), name.clone());
+                    found_summary = true;
+                    break; // Found a name for this conversation
+                }
+            }
+            
+            // Fallback: If no summary found, use the fallback name (first user message)
+            if !found_summary {
+                if let Some(name) = conversation_fallbacks.get(&conversation_hash) {
+                    conversation_summaries.insert(conversation_hash, name.clone());
+                }
+            }
+        }
+
+        // Second pass: Apply session names to messages
+        for message in &mut all_entries {
+            if let Some(name) = conversation_summaries.get(&message.conversation_hash) {
+                message.session_name = Some(name.clone());
+            }
+        }
         Ok(deduplicate_messages_by_local_hash(all_entries))
     }
 
@@ -355,22 +404,20 @@ pub fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
     )
 }
 
-pub fn parse_jsonl_file<T>(
-    file_path: &Path,
-    buffer_reader: &mut BufReader<T>,
-) -> Vec<ConversationMessage>
-where
-    T: Read,
-{
-    // We do this instead of using the `sessionId` property on the message objects because
-    // forked conversations keep the `sessionId` from the parent.
-    let session_id = file_path.file_stem().unwrap().to_str().unwrap();
+pub fn parse_jsonl_file<R: BufRead>(
+    path: &Path,
+    reader: R,
+    project_hash: &str,
+    conversation_hash: &str,
+) -> Result<(Vec<ConversationMessage>, HashMap<String, String>, Vec<String>, Option<String>)> {
+    let mut messages = Vec::new();
+    let mut summaries = HashMap::new();
+    let mut all_uuids = Vec::new();
+    let mut fallback_session_name = None;
 
-    let project_hash = extract_and_hash_project_id(file_path);
-    let mut entries = Vec::new();
-    let file_path_str = file_path.to_string_lossy();
+    let mut current_model = None;
 
-    for (i, line_result) in buffer_reader.lines().enumerate() {
+    for (i, line_result) in reader.lines().enumerate() {
         let line = match line_result {
             Ok(l) if !l.trim().is_empty() => l,
             _ => continue,
@@ -378,105 +425,132 @@ where
 
         // Parse the line, filtering various invalid scenarios.
         let parsed_line = simd_json::from_slice::<ClaudeCodeEntry>(&mut line.clone().into_bytes());
-        let (message_id, model, content, usage, timestamp, request_id, tool_use_result, uuid) =
-            match parsed_line {
-                // Only get real user/AI messages; filter out summaries and any garbage message entries.
-                Ok(ClaudeCodeEntry::Message(ClaudeCodeMessageEntry {
-                                                message:
-                                                Some(Message {
-                                                         id: message_id,
-                                                         model,
-                                                         content: Some(content),
-                                                         usage,
-                                                         ..
-                                                     }),
-                                                timestamp,
-                                                tool_use_result,
-                                                request_id,
-                                                uuid,
-                                                ..
-                                                // Skip messages for which no model is specified, or the model is `<synthetic>`;
-                                                // i.e. Claude Code-generated system messages.  These have their token usage all
-                                                // 0 anyway.
-                                            })) if !matches!(model.as_deref(), Some("<synthetic>")) => {
-                    (
-                        message_id,
-                        model,
-                        content,
-                        usage,
-                        timestamp,
-                        request_id,
-                        tool_use_result,
-                        uuid,
-                    )
-                }
-                Err(e) => {
-                    crate::utils::warn_once(format!(
-                        "Skipping invalid entry in {} line {}: {}",
-                        file_path.display(),
-                        i + 1,
-                        e
-                    ));
-                    continue;
-                }
-                _ => continue,
-            };
+        match parsed_line {
+            Ok(ClaudeCodeEntry::Summary(summary)) => {
+                summaries.insert(summary.leaf_uuid, summary.summary);
+            }
+            Ok(ClaudeCodeEntry::Message(entry)) => {
+                // Track all UUIDs for summary linking, even if we skip the message
+                all_uuids.push(entry.uuid.clone());
 
-        let mut msg = ConversationMessage {
-            global_hash: hash_text(&format!("{session_id}_{uuid}")),
-            local_hash: None,
-            application: Application::ClaudeCode,
-            model: model.clone(),
-            date: timestamp,
-            project_hash: project_hash.clone(),
-            conversation_hash: hash_text(&file_path_str),
-            stats: extract_tool_stats(&content, &tool_use_result),
-            // Default to AI.
-            role: MessageRole::Assistant,
+                let model = entry.message.as_ref().and_then(|m| m.model.clone());
+                if let Some(m) = &model {
+                    current_model = Some(m.clone());
+                }
+
+                let timestamp = entry.timestamp;
+                let tool_use_result = entry.tool_use_result;
+                let request_id = entry.request_id;
+                let uuid = Some(entry.uuid);
+
+                // Skip synthetic messages (internal reasoning/planning)
+                if !matches!(model.as_deref(), Some("<synthetic>")) {
+                    let content = entry.message.as_ref().and_then(|m| m.content.clone());
+                    let usage = entry.message.as_ref().and_then(|m| m.usage.clone());
+                    let role = entry.message.as_ref().and_then(|m| m.role.clone());
+                    let message_id = entry.message.as_ref().and_then(|m| m.id.clone());
+
+                    let mut msg = ConversationMessage {
+                        global_hash: hash_text(&format!("{}_{}", conversation_hash, uuid.as_ref().unwrap_or(&"".to_string()))),
+                        local_hash: None,
+                        application: Application::ClaudeCode,
+                        model: model.clone(),
+                        date: timestamp,
+                        project_hash: project_hash.to_string(),
+                        conversation_hash: conversation_hash.to_string(),
+                        stats: Stats::default(), // Will be filled below
+                        role: match role.as_deref() {
+                            Some("user") => MessageRole::User,
+                            _ => MessageRole::Assistant,
+                        },
+                        uuid: uuid,
+                        session_name: None, // Will be populated later
+                    };
+
+                    // Always extract tool stats from content if present
+                    if let Some(content_val) = &content {
+                        msg.stats = extract_tool_stats(content_val, &tool_use_result);
+                        msg.stats.tool_calls = match content_val {
+                            Content::Blocks(blocks) => blocks
+                                .iter()
+                                .filter(|c| matches!(c, ContentBlock::ToolUse { .. }))
+                                .count() as u32,
+                            _ => 0,
+                        };
+                    }
+
+                    if let Some(usage_val) = usage {
+                        let model_name = model.as_ref().unwrap_or(&current_model.clone().unwrap_or_default()).to_owned();
+
+                        msg.stats.input_tokens = usage_val.input_tokens;
+                        msg.stats.output_tokens = usage_val.output_tokens;
+                        msg.stats.cache_creation_tokens = usage_val.cache_creation_input_tokens;
+                        msg.stats.cache_read_tokens = usage_val.cache_read_input_tokens;
+                        msg.stats.cached_tokens =
+                            usage_val.cache_creation_input_tokens + usage_val.cache_read_input_tokens;
+                        msg.stats.cost = calculate_cost_from_tokens(&usage_val, &model_name);
+
+                        if let Some(request_id) = request_id
+                            && let Some(message_id) = message_id
+                        {
+                            msg.local_hash = Some(hash_text(&format!("{request_id}_{message_id}")));
+                        }
+                    } else {
+                        // If no usage, it's likely a user message
+                        msg.role = MessageRole::User;
+                    }
+
+                    // Capture fallback session name from the first user message
+                    if matches!(msg.role, MessageRole::User) && fallback_session_name.is_none() {
+                        if let Some(content_val) = &content {
+                            // Extract user-visible text from either blocks or string content
+                            let text_opt: Option<String> = match content_val {
+                                Content::Blocks(blocks) => {
+                                    let mut result = None;
+                                    for block in blocks {
+                                        if let ContentBlock::Text { text } = block {
+                                            let text_str = String::from_utf8_lossy(text);
+                                            result = Some(text_str.to_string());
+                                            break;
+                                        }
+                                    }
+                                    result
+                                }
+                                Content::String(bytes) => {
+                                    let text_str = String::from_utf8_lossy(bytes);
+                                    Some(text_str.to_string())
+                                }
+                            };
+
+                            if let Some(text_str) = text_opt {
+                                let truncated = if text_str.chars().count() > 50 {
+                                    let chars: String = text_str.chars().take(50).collect();
+                                    format!("{}...", chars)
+                                } else {
+                                    text_str
+                                };
+                                fallback_session_name = Some(truncated);
+                            }
+                        }
+                    }
+
+                    messages.push(msg);
+                }
+            }
+            Err(e) => {
+                crate::utils::warn_once(format!(
+                    "Skipping invalid entry in {} line {}: {}",
+                    path.display(),
+                    i + 1,
+                    e
+                ));
+                continue;
+            }
+            _ => continue, // Skip other entry types like FileHistorySnapshot, QueueOperation
         };
-        match usage {
-            Some(usage) => {
-                let model = match &model {
-                    Some(m) => m.to_owned(),
-                    None => continue, // Invalid entry.
-                };
-
-                msg.stats.input_tokens = usage.input_tokens;
-                msg.stats.output_tokens = usage.output_tokens;
-                msg.stats.cache_creation_tokens = usage.cache_creation_input_tokens;
-                msg.stats.cache_read_tokens = usage.cache_read_input_tokens;
-                msg.stats.cached_tokens =
-                    usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
-                msg.stats.cost = calculate_cost_from_tokens(&usage, &model);
-                msg.stats.tool_calls = match content {
-                    Content::Blocks(blocks) => blocks
-                        .iter()
-                        .filter(|c| matches!(c, ContentBlock::ToolUse { .. }))
-                        .count() as u32,
-                    _ => 0,
-                };
-
-                if let Some(request_id) = request_id
-                    && let Some(message_id) = message_id
-                {
-                    // Claude Code stores the different parts of a message--thinking, tool calls, and normal
-                    // text--each in their own row in the JSONL file, with the same request ID and, redundantly,
-                    // the same token usage for each; therefore, we skip ones we've seen before to avoid
-                    // accumulating the redundant token counts.  It would be simpler to just skip
-                    // them here, but actually some message _across files_ can have the same
-                    // message ID and request ID (probably due to resuming sessions), so we need to
-                    // do it later when we have a complete pool of messages.
-                    msg.local_hash = Some(hash_text(&format!("{request_id}_{message_id}")));
-                }
-            }
-            None => {
-                msg.role = MessageRole::User;
-            }
-        }
-        entries.push(msg);
     }
 
-    entries
+    Ok((messages, summaries, all_uuids, fallback_session_name))
 }
 
 // Type alias for token fingerprint tracking to avoid type complexity
@@ -513,6 +587,12 @@ pub fn deduplicate_messages_by_local_hash(
                 if set.contains(&fp) {
                     // Merge non-token stats so we don't lose tool/activity counts
                     let existing_mut = &mut deduplicated_entries[existing_index];
+                    
+                    // Preserve session name if the new message has one and the existing one doesn't
+                    if existing_mut.session_name.is_none() && message.session_name.is_some() {
+                        existing_mut.session_name = message.session_name;
+                    }
+
                     existing_mut.stats.tool_calls =
                         existing_mut.stats.tool_calls.max(message.stats.tool_calls);
                     existing_mut.stats.files_read =
@@ -564,6 +644,11 @@ pub fn deduplicate_messages_by_local_hash(
                 // This is a split message with different/partial token counts.
                 // Aggregate all stats together.
                 let existing = &mut deduplicated_entries[existing_index];
+
+                // Preserve session name
+                if existing.session_name.is_none() && message.session_name.is_some() {
+                    existing.session_name = message.session_name;
+                }
 
                 // Aggregate token counts
                 existing.stats.input_tokens += message.stats.input_tokens;
@@ -649,6 +734,8 @@ mod tests {
                     tool_calls: 0,
                     ..Default::default()
                 },
+                uuid: None,
+                session_name: None,
             },
             ConversationMessage {
                 global_hash: "unique2".to_string(),
@@ -665,6 +752,8 @@ mod tests {
                     tool_calls: 0,
                     ..Default::default()
                 },
+                uuid: None,
+                session_name: None,
             },
             ConversationMessage {
                 global_hash: "unique3".to_string(),
@@ -681,6 +770,8 @@ mod tests {
                     tool_calls: 1,
                     ..Default::default()
                 },
+                uuid: None,
+                session_name: None,
             },
         ];
 
@@ -720,6 +811,8 @@ mod tests {
                     tool_calls: 2,
                     ..Default::default()
                 },
+                uuid: None,
+                session_name: None,
             },
             ConversationMessage {
                 global_hash: "unique2".to_string(),
@@ -736,6 +829,8 @@ mod tests {
                     tool_calls: 2,     // Not checked for identity, but will be kept
                     ..Default::default()
                 },
+                uuid: None,
+                session_name: None,
             },
         ];
 
@@ -775,6 +870,8 @@ mod tests {
                 tool_calls: 0,
                 ..Default::default()
             },
+            uuid: None,
+            session_name: None,
         };
 
         let msg2 = ConversationMessage {
@@ -795,6 +892,8 @@ mod tests {
                 tool_calls: 1,
                 ..Default::default()
             },
+            uuid: None,
+            session_name: None,
         };
 
         let dedup = deduplicate_messages_by_local_hash(vec![msg1, msg2]);
@@ -825,6 +924,8 @@ mod tests {
                 output_tokens: 2,
                 ..Default::default()
             },
+            uuid: None,
+            session_name: None,
         };
         // Exact duplicate of a1 (should be skipped)
         let a2 = ConversationMessage {
@@ -848,6 +949,8 @@ mod tests {
                 tool_calls: 1,
                 ..Default::default()
             },
+            uuid: None,
+            session_name: None,
         };
         // Exact duplicate of b1 (should be skipped)
         let b2 = ConversationMessage {

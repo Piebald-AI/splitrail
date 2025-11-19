@@ -194,6 +194,7 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
     let project_hash = extract_and_hash_project_id_qwen_code(file_path);
     let file_path_str = file_path.to_string_lossy();
     let mut entries = Vec::new();
+    let mut fallback_session_name: Option<String> = None;
 
     // Parse the complete session JSON
     let session: QwenCodeSession =
@@ -205,8 +206,19 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
             QwenCodeMessage::User {
                 id: _,
                 timestamp,
-                content: _,
+                content,
             } => {
+                if fallback_session_name.is_none() && !content.is_empty() {
+                    let text_str = content;
+                    let truncated = if text_str.chars().count() > 50 {
+                        let chars: String = text_str.chars().take(50).collect();
+                        format!("{}...", chars)
+                    } else {
+                        text_str
+                    };
+                    fallback_session_name = Some(truncated);
+                }
+
                 entries.push(ConversationMessage {
                     date: timestamp,
                     application: Application::QwenCode,
@@ -221,6 +233,8 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                     model: None,
                     stats: Stats::default(),
                     role: MessageRole::User,
+                    uuid: None,
+                    session_name: fallback_session_name.clone(),
                 });
             }
             QwenCodeMessage::Qwen {
@@ -257,6 +271,8 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                     conversation_hash: hash_text(&file_path.to_string_lossy()),
                     stats,
                     role: MessageRole::Assistant,
+                    uuid: None,
+                    session_name: fallback_session_name.clone(),
                 });
             }
             _ => {}

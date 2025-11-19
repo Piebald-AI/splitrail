@@ -106,6 +106,11 @@ fn extract_and_hash_project_id_cline(file_path: &Path) -> String {
     hash_text(&file_path.to_string_lossy())
 }
 
+fn is_probably_tool_json_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    (trimmed.starts_with('{') || trimmed.starts_with("[{")) && trimmed.contains("\"tool\"")
+}
+
 // Parse a single Cline task directory
 fn parse_cline_task_directory(task_dir: &Path) -> Result<Vec<ConversationMessage>> {
     let project_hash = extract_and_hash_project_id_cline(task_dir);
@@ -138,6 +143,7 @@ fn parse_cline_task_directory(task_dir: &Path) -> Result<Vec<ConversationMessage
         .context("Failed to parse ui_messages.json")?;
 
     let mut entries = Vec::new();
+    let mut fallback_session_name: Option<String> = None;
 
     // Process ui_messages to extract API requests with token/cost data
     for message in ui_messages {
@@ -198,6 +204,8 @@ fn parse_cline_task_directory(task_dir: &Path) -> Result<Vec<ConversationMessage
                             model,
                             stats,
                             role: MessageRole::Assistant, // API requests are from the assistant
+                            uuid: None,
+                            session_name: fallback_session_name.clone(),
                         });
                     }
                 }
@@ -205,6 +213,7 @@ fn parse_cline_task_directory(task_dir: &Path) -> Result<Vec<ConversationMessage
             ClineUiMessage::Ask {
                 ts,
                 ask,
+                text,
                 conversation_history_index,
                 ..
             } => {
@@ -219,6 +228,19 @@ fn parse_cline_task_directory(task_dir: &Path) -> Result<Vec<ConversationMessage
                         project_hash, conversation_hash, conversation_history_index, ts
                     ));
 
+                    if fallback_session_name.is_none() && !text.is_empty() {
+                        let text_str = text;
+                        if !is_probably_tool_json_text(&text_str) {
+                            let truncated = if text_str.chars().count() > 50 {
+                                let chars: String = text_str.chars().take(50).collect();
+                                format!("{}...", chars)
+                            } else {
+                                text_str
+                            };
+                            fallback_session_name = Some(truncated);
+                        }
+                    }
+
                     entries.push(ConversationMessage {
                         application: Application::Cline,
                         date,
@@ -229,6 +251,8 @@ fn parse_cline_task_directory(task_dir: &Path) -> Result<Vec<ConversationMessage
                         model: None,
                         stats: Stats::default(), // User messages don't have token costs
                         role: MessageRole::User,
+                        uuid: None,
+                        session_name: fallback_session_name.clone(),
                     });
                 }
             }

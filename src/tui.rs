@@ -1,8 +1,9 @@
-use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats};
+use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats, Stats};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
 use crate::watcher::{FileWatcher, RealtimeStatsManager};
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode};
+use chrono::{DateTime, Local, Utc};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::style::{Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -14,6 +15,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
+use std::collections::BTreeMap;
 use std::io::{Write, stdout};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,6 +35,115 @@ pub enum UploadStatus {
     MissingApiToken,
     MissingServerUrl,
     MissingConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatsViewMode {
+    Daily,
+    Session,
+}
+
+#[derive(Debug, Clone)]
+struct SessionAggregate {
+    session_id: String,
+    first_timestamp: DateTime<Utc>,
+    analyzer_name: String,
+    stats: Stats,
+    models: Vec<String>,
+    session_name: Option<String>,
+}
+
+fn accumulate_stats(dst: &mut Stats, src: &Stats) {
+    // Token and cost stats
+    dst.input_tokens += src.input_tokens;
+    dst.output_tokens += src.output_tokens;
+    dst.reasoning_tokens += src.reasoning_tokens;
+    dst.cache_creation_tokens += src.cache_creation_tokens;
+    dst.cache_read_tokens += src.cache_read_tokens;
+    dst.cached_tokens += src.cached_tokens;
+    dst.cost += src.cost;
+    dst.tool_calls += src.tool_calls;
+
+    // File operation stats
+    dst.terminal_commands += src.terminal_commands;
+    dst.file_searches += src.file_searches;
+    dst.file_content_searches += src.file_content_searches;
+    dst.files_read += src.files_read;
+    dst.files_added += src.files_added;
+    dst.files_edited += src.files_edited;
+    dst.files_deleted += src.files_deleted;
+    dst.lines_read += src.lines_read;
+    dst.lines_added += src.lines_added;
+    dst.lines_edited += src.lines_edited;
+    dst.lines_deleted += src.lines_deleted;
+    dst.bytes_read += src.bytes_read;
+    dst.bytes_added += src.bytes_added;
+    dst.bytes_edited += src.bytes_edited;
+    dst.bytes_deleted += src.bytes_deleted;
+
+    // Todo stats
+    dst.todos_created += src.todos_created;
+    dst.todos_completed += src.todos_completed;
+    dst.todos_in_progress += src.todos_in_progress;
+    dst.todo_writes += src.todo_writes;
+    dst.todo_reads += src.todo_reads;
+
+    // Composition stats
+    dst.code_lines += src.code_lines;
+    dst.docs_lines += src.docs_lines;
+    dst.data_lines += src.data_lines;
+    dst.media_lines += src.media_lines;
+    dst.config_lines += src.config_lines;
+    dst.other_lines += src.other_lines;
+}
+
+fn aggregate_sessions_for_tool(stats: &AgenticCodingToolStats) -> Vec<SessionAggregate> {
+    let mut sessions: BTreeMap<String, SessionAggregate> = BTreeMap::new();
+
+    for msg in &stats.messages {
+        let session_key = msg.conversation_hash.clone();
+        let entry = sessions.entry(session_key.clone()).or_insert_with(|| SessionAggregate {
+            session_id: session_key.clone(),
+            first_timestamp: msg.date,
+            analyzer_name: stats.analyzer_name.clone(),
+            stats: Stats::default(),
+            models: Vec::new(),
+            session_name: None,
+        });
+
+        if msg.date < entry.first_timestamp {
+            entry.first_timestamp = msg.date;
+        }
+
+        // Only aggregate stats for assistant/model messages and track models
+        if let Some(model) = &msg.model {
+            if !entry.models.iter().any(|m| m == model) {
+                entry.models.push(model.clone());
+            }
+            accumulate_stats(&mut entry.stats, &msg.stats);
+        }
+
+        // Capture session name if available (last one wins, or first one, doesn't matter much as they should be consistent per file/session)
+        if let Some(name) = &msg.session_name {
+            entry.session_name = Some(name.clone());
+        }
+    }
+
+    let mut result: Vec<SessionAggregate> = sessions.into_values().collect();
+
+    // Sort oldest sessions first so newest appear at the bottom (like per-day view)
+    result.sort_by_key(|s| s.first_timestamp);
+
+    result
+}
+
+fn aggregate_sessions_for_all_tools(
+    filtered_stats: &[&AgenticCodingToolStats],
+) -> Vec<Vec<SessionAggregate>> {
+    filtered_stats
+        .iter()
+        .map(|stats| aggregate_sessions_for_tool(stats))
+        .collect()
 }
 
 fn has_data(stats: &AgenticCodingToolStats) -> bool {
@@ -60,6 +171,7 @@ pub fn run_tui(
 
     let mut selected_tab = 0;
     let mut scroll_offset = 0;
+    let mut stats_view_mode = StatsViewMode::Daily;
 
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(run_app(
@@ -68,6 +180,7 @@ pub fn run_tui(
             format_options,
             &mut selected_tab,
             &mut scroll_offset,
+            &mut stats_view_mode,
             upload_status,
             file_watcher,
             &mut stats_manager,
@@ -86,6 +199,7 @@ async fn run_app(
     format_options: &NumberFormatOptions,
     selected_tab: &mut usize,
     scroll_offset: &mut usize,
+    stats_view_mode: &mut StatsViewMode,
     upload_status: Arc<Mutex<UploadStatus>>,
     file_watcher: FileWatcher,
     stats_manager: &mut RealtimeStatsManager,
@@ -110,17 +224,20 @@ async fn run_app(
         .filter(|stats| has_data(stats))
         .collect();
 
+    let mut session_stats_per_tool = aggregate_sessions_for_all_tools(&filtered_stats);
+
     loop {
         // Check for stats updates
         if stats_receiver.has_changed()? {
             current_stats = stats_receiver.borrow_and_update().clone();
-            update_table_states(&mut table_states, &current_stats, selected_tab);
             // Recalculate filtered stats only when stats change
             filtered_stats = current_stats
                 .analyzer_stats
                 .iter()
                 .filter(|stats| has_data(stats))
                 .collect();
+            update_table_states(&mut table_states, &current_stats, selected_tab);
+            session_stats_per_tool = aggregate_sessions_for_all_tools(&filtered_stats);
             needs_redraw = true;
         }
 
@@ -170,6 +287,8 @@ async fn run_app(
                     *scroll_offset,
                     *selected_tab,
                     upload_status.clone(),
+                    *stats_view_mode,
+                    &session_stats_per_tool,
                 );
             })?;
             needs_redraw = false;
@@ -206,45 +325,119 @@ async fn run_app(
                 KeyCode::Left | KeyCode::Char('h') => {
                     if *selected_tab > 0 {
                         *selected_tab -= 1;
+
+                        if let StatsViewMode::Session = *stats_view_mode {
+                            if let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
+                                && let Some(table_state) = table_states.get_mut(*selected_tab)
+                                && !session_rows.is_empty()
+                            {
+                                table_state.select(Some(session_rows.len().saturating_sub(1)));
+                            }
+                        }
+
                         needs_redraw = true;
                     }
                 }
                 KeyCode::Right | KeyCode::Char('l') => {
-                    if *selected_tab < filtered_stats.len() - 1 {
+                    if *selected_tab < filtered_stats.len().saturating_sub(1) {
                         *selected_tab += 1;
+
+                        if let StatsViewMode::Session = *stats_view_mode {
+                            if let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
+                                && let Some(table_state) = table_states.get_mut(*selected_tab)
+                                && !session_rows.is_empty()
+                            {
+                                table_state.select(Some(session_rows.len().saturating_sub(1)));
+                            }
+                        }
+
                         needs_redraw = true;
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if let Some(current_stats) = filtered_stats.get(*selected_tab) {
-                        let total_rows = current_stats.daily_stats.len();
-                        if let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some(selected) = table_state.selected()
-                            && selected < total_rows.saturating_add(1)
-                        {
-                            table_state.select(Some(if selected == total_rows.saturating_sub(1) {
-                                selected + 2
-                            } else {
-                                selected + 1
-                            }));
-                            needs_redraw = true;
+                    if let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected) = table_state.selected()
+                    {
+                        match *stats_view_mode {
+                            StatsViewMode::Daily => {
+                                if let Some(current_stats) = filtered_stats.get(*selected_tab) {
+                                    let total_rows = current_stats.daily_stats.len();
+                                    if selected < total_rows.saturating_add(1) {
+                                        table_state.select(Some(if selected
+                                            == total_rows.saturating_sub(1)
+                                        {
+                                            selected + 2
+                                        } else {
+                                            selected + 1
+                                        }));
+                                        needs_redraw = true;
+                                    }
+                                }
+                            }
+                            StatsViewMode::Session => {
+                                if let Some(session_rows) =
+                                    session_stats_per_tool.get(*selected_tab)
+                                {
+                                    let total_rows = session_rows.len();
+                                    if total_rows > 0
+                                        && selected < total_rows.saturating_add(1)
+                                    {
+                                        // sessions: 0..total_rows-1
+                                        // separator: total_rows
+                                        // totals: total_rows + 1
+                                        table_state.select(Some(if selected
+                                            == total_rows.saturating_sub(1)
+                                        {
+                                            // Jump from last session row to totals (skip separator)
+                                            selected + 2
+                                        } else {
+                                            // Move down one row (may land on separator or totals)
+                                            selected + 1
+                                        }));
+                                        needs_redraw = true;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if let Some(current_stats) = filtered_stats.get(*selected_tab)
-                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                    if let Some(table_state) = table_states.get_mut(*selected_tab)
                         && let Some(selected) = table_state.selected()
                         && selected > 0
                     {
-                        table_state.select(Some(selected.saturating_sub(
-                            if selected == current_stats.daily_stats.len() + 1 {
-                                2
-                            } else {
-                                1
-                            },
-                        )));
-                        needs_redraw = true;
+                        match *stats_view_mode {
+                            StatsViewMode::Daily => {
+                                if let Some(current_stats) = filtered_stats.get(*selected_tab) {
+                                    table_state.select(Some(selected.saturating_sub(
+                                        if selected
+                                            == current_stats.daily_stats.len() + 1
+                                        {
+                                            2
+                                        } else {
+                                            1
+                                        },
+                                    )));
+                                    needs_redraw = true;
+                                }
+                            }
+                            StatsViewMode::Session => {
+                                if let Some(session_rows) =
+                                    session_stats_per_tool.get(*selected_tab)
+                                {
+                                    // sessions: 0..len-1, separator: len, totals: len+1
+                                    table_state.select(Some(selected.saturating_sub(
+                                        if selected == session_rows.len() + 1 {
+                                            // Jump from totals back to last session (skip separator)
+                                            2
+                                        } else {
+                                            1
+                                        },
+                                    )));
+                                    needs_redraw = true;
+                                }
+                            }
+                        }
                     }
                 }
                 KeyCode::Home => {
@@ -254,23 +447,61 @@ async fn run_app(
                     }
                 }
                 KeyCode::End => {
-                    if let Some(current_stats) = filtered_stats.get(*selected_tab) {
-                        let total_rows = current_stats.daily_stats.len() + 2;
-                        if let Some(table_state) = table_states.get_mut(*selected_tab) {
-                            table_state.select(Some(total_rows.saturating_sub(1)));
-                            needs_redraw = true;
+                    if let Some(table_state) = table_states.get_mut(*selected_tab) {
+                        match *stats_view_mode {
+                            StatsViewMode::Daily => {
+                                if let Some(current_stats) = filtered_stats.get(*selected_tab) {
+                                    let total_rows = current_stats.daily_stats.len() + 2;
+                                    table_state
+                                        .select(Some(total_rows.saturating_sub(1)));
+                                    needs_redraw = true;
+                                }
+                            }
+                            StatsViewMode::Session => {
+                                if let Some(session_rows) =
+                                    session_stats_per_tool.get(*selected_tab)
+                                {
+                                    if !session_rows.is_empty() {
+                                        // sessions + separator + totals
+                                        let total_rows = session_rows.len() + 2;
+                                        // Move to totals row (last row)
+                                        table_state
+                                            .select(Some(total_rows.saturating_sub(1)));
+                                        needs_redraw = true;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 KeyCode::PageDown => {
-                    if let Some(current_stats) = filtered_stats.get(*selected_tab) {
-                        let total_rows = current_stats.daily_stats.len() + 2;
-                        if let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some(selected) = table_state.selected()
-                        {
-                            let new_selected = (selected + 10).min(total_rows.saturating_sub(1));
-                            table_state.select(Some(new_selected));
-                            needs_redraw = true;
+                    if let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected) = table_state.selected()
+                    {
+                        match *stats_view_mode {
+                            StatsViewMode::Daily => {
+                                if let Some(current_stats) = filtered_stats.get(*selected_tab) {
+                                    let total_rows = current_stats.daily_stats.len() + 2;
+                                    let new_selected =
+                                        (selected + 10).min(total_rows.saturating_sub(1));
+                                    table_state.select(Some(new_selected));
+                                    needs_redraw = true;
+                                }
+                            }
+                            StatsViewMode::Session => {
+                                if let Some(session_rows) =
+                                    session_stats_per_tool.get(*selected_tab)
+                                {
+                                    if !session_rows.is_empty() {
+                                        // sessions + separator + totals
+                                        let total_rows = session_rows.len() + 2;
+                                        let new_selected = (selected + 10)
+                                            .min(total_rows.saturating_sub(1));
+                                        table_state.select(Some(new_selected));
+                                        needs_redraw = true;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -280,6 +511,25 @@ async fn run_app(
                     {
                         let new_selected = selected.saturating_sub(10);
                         table_state.select(Some(new_selected));
+                        needs_redraw = true;
+                    }
+                }
+                KeyCode::Char('t') => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        *stats_view_mode = match *stats_view_mode {
+                            StatsViewMode::Daily => StatsViewMode::Session,
+                            StatsViewMode::Session => StatsViewMode::Daily,
+                        };
+
+                        if let StatsViewMode::Session = *stats_view_mode {
+                            if let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
+                                && let Some(table_state) = table_states.get_mut(*selected_tab)
+                                && !session_rows.is_empty()
+                            {
+                                table_state.select(Some(session_rows.len().saturating_sub(1)));
+                            }
+                        }
+
                         needs_redraw = true;
                     }
                 }
@@ -299,6 +549,8 @@ fn draw_ui(
     _scroll_offset: usize,
     selected_tab: usize,
     upload_status: Arc<Mutex<UploadStatus>>,
+    stats_view_mode: StatsViewMode,
+    session_stats_per_tool: &[Vec<SessionAggregate>],
 ) {
     // Since we're already working with filtered stats, has_data is simply whether we have any stats
     let has_data = !filtered_stats.is_empty();
@@ -368,13 +620,28 @@ fn draw_ui(
             && let Some(current_table_state) = table_states.get_mut(selected_tab)
         {
             // Main table
-            draw_daily_stats_table(
-                frame,
-                chunks[2],
-                current_stats,
-                format_options,
-                current_table_state,
-            );
+            match stats_view_mode {
+                StatsViewMode::Daily => {
+                    draw_daily_stats_table(
+                        frame,
+                        chunks[2],
+                        current_stats,
+                        format_options,
+                        current_table_state,
+                    );
+                }
+                StatsViewMode::Session => {
+                    if let Some(session_rows) = session_stats_per_tool.get(selected_tab) {
+                        draw_session_stats_table(
+                            frame,
+                            chunks[2],
+                            session_rows,
+                            format_options,
+                            current_table_state,
+                        );
+                    }
+                }
+            }
 
             // Summary stats - pass all filtered stats for aggregation
             draw_summary_stats(frame, chunks[3], filtered_stats, format_options);
@@ -390,9 +657,16 @@ fn draw_ui(
         ])
         .split(help_area);
 
-        let help =
-            Paragraph::new("Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, q/Esc to quit")
-                .style(Style::default().add_modifier(Modifier::DIM));
+        let help_text = match stats_view_mode {
+            StatsViewMode::Daily => {
+                "Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, Ctrl+T for per-session view, q/Esc to quit"
+            }
+            StatsViewMode::Session => {
+                "Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, Ctrl+T for per-day view, q/Esc to quit"
+            }
+        };
+        let help = Paragraph::new(help_text)
+            .style(Style::default().add_modifier(Modifier::DIM));
         frame.render_widget(help, help_chunks[0]);
 
         // Upload status in bottom-right
@@ -948,6 +1222,308 @@ fn draw_daily_stats_table(
 
     // Return the total number of rows in the table
     total_rows
+}
+
+fn draw_session_stats_table(
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &[SessionAggregate],
+    format_options: &NumberFormatOptions,
+    table_state: &mut TableState,
+) {
+    let header = Row::new(vec![
+        Cell::new(""),
+        Cell::new("Session"),
+        Cell::new("Started"),
+        Cell::new("Tool"),
+        Cell::new(Text::from("Cost").right_aligned()),
+        Cell::new(Text::from("Inp Tks").right_aligned()),
+        Cell::new(Text::from("Outp Tks").right_aligned()),
+        Cell::new(Text::from("Total Tks").right_aligned()),
+        Cell::new(Text::from("Tools").right_aligned()),
+        Cell::new("Models"),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .height(1);
+
+    let mut best_cost = 0.0;
+    let mut best_cost_i = 0usize;
+    let mut best_total_tokens = 0u64;
+    let mut best_total_tokens_i = 0usize;
+
+    let mut total_cost = 0.0;
+    let mut total_input_tokens = 0u64;
+    let mut total_output_tokens = 0u64;
+    let mut total_cached_tokens = 0u64;
+    let mut total_tool_calls = 0u64;
+
+    for (i, session) in sessions.iter().enumerate() {
+        if session.stats.cost > best_cost {
+            best_cost = session.stats.cost;
+            best_cost_i = i;
+        }
+        let total_tokens =
+            session.stats.input_tokens + session.stats.output_tokens + session.stats.cached_tokens;
+        if total_tokens > best_total_tokens {
+            best_total_tokens = total_tokens;
+            best_total_tokens_i = i;
+        }
+
+        total_cost += session.stats.cost;
+        total_input_tokens += session.stats.input_tokens;
+        total_output_tokens += session.stats.output_tokens;
+        total_cached_tokens += session.stats.cached_tokens;
+        total_tool_calls += session.stats.tool_calls as u64;
+    }
+
+    // Collect all unique models across sessions for the totals row
+    let mut all_models = std::collections::HashSet::new();
+    for session in sessions {
+        for model in &session.models {
+            all_models.insert(model.clone());
+        }
+    }
+    let mut all_models_vec = all_models.into_iter().collect::<Vec<_>>();
+    all_models_vec.sort();
+    let all_models_text = all_models_vec.join(", ");
+
+    let mut rows = Vec::new();
+
+    for (i, session) in sessions.iter().enumerate() {
+        let session_display_name = session
+            .session_name
+            .clone()
+            .unwrap_or_else(|| session.session_id.clone());
+
+        // Truncate by characters, not bytes, to avoid panicking on multi-byte UTF-8
+        let short_id = if session_display_name.chars().count() > 30 {
+            let truncated: String = session_display_name.chars().take(30).collect();
+            format!("{truncated}…")
+        } else {
+            session_display_name
+        };
+
+        let local_ts = session.first_timestamp.with_timezone(&Local);
+        let ts_str = local_ts.format("%Y-%m-%d %H:%M").to_string();
+
+        let arrow_cell = if table_state.selected() == Some(i) {
+            Line::from(Span::styled(
+                "→",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(Span::raw(""))
+        };
+
+        let session_cell = Line::from(Span::styled(
+            short_id,
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+
+        let started_cell = Line::from(Span::raw(ts_str));
+
+        let tool_cell = Line::from(Span::styled(
+            session.analyzer_name.clone(),
+            Style::default().fg(Color::Cyan),
+        ));
+
+        let cost_cell = if i == best_cost_i {
+            Line::from(Span::styled(
+                format!("${:.2}", session.stats.cost),
+                Style::default().fg(Color::Red),
+            ))
+        } else {
+            Line::from(Span::styled(
+                format!("${:.2}", session.stats.cost),
+                Style::default().fg(Color::Yellow),
+            ))
+        }
+        .right_aligned();
+
+        let input_cell = Line::from(Span::raw(format_number(
+            session.stats.input_tokens,
+            format_options,
+        )))
+        .right_aligned();
+
+        let output_cell = Line::from(Span::raw(format_number(
+            session.stats.output_tokens,
+            format_options,
+        )))
+        .right_aligned();
+
+        let total_tokens =
+            session.stats.input_tokens + session.stats.output_tokens + session.stats.cached_tokens;
+
+        let total_cell = if i == best_total_tokens_i {
+            Line::from(Span::styled(
+                format_number(total_tokens, format_options),
+                Style::default().fg(Color::Green),
+            ))
+        } else {
+            Line::from(Span::raw(format_number(total_tokens, format_options)))
+        }
+        .right_aligned();
+
+        let tools_cell = Line::from(Span::styled(
+            format_number(session.stats.tool_calls as u64, format_options),
+            Style::default().add_modifier(Modifier::DIM),
+        ))
+        .right_aligned();
+
+        // Per-session models column: sorted, deduplicated list of models used in this session
+        let mut models_vec = session.models.clone();
+        models_vec.sort();
+        models_vec.dedup();
+        let models_text = models_vec.join(", ");
+
+        let models_cell = Line::from(Span::styled(
+            models_text,
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+
+        let row = Row::new(vec![
+            arrow_cell,
+            session_cell,
+            started_cell,
+            tool_cell,
+            cost_cell,
+            input_cell,
+            output_cell,
+            total_cell,
+            tools_cell,
+            models_cell,
+        ]);
+
+        rows.push(row);
+    }
+
+    // Add separator row before totals
+    let separator_row = Row::new(vec![
+        Line::from(Span::styled(
+            "",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "────────────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "─────────────────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "──────────────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "──────────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "────────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "─────────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "────────────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "──────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        Line::from(Span::styled(
+            "────────────",
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    ]);
+    rows.push(separator_row);
+
+    let totals_row = Row::new(vec![
+        // Arrow indicator for totals row when selected
+        if table_state.selected() == Some(rows.len()) {
+            Line::from(Span::styled(
+                "→",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            Line::from(Span::raw(""))
+        },
+        Line::from(Span::styled(
+            format!("Total ({} sessions)", sessions.len()),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::raw("")),
+        Line::from(Span::raw("")),
+        Line::from(Span::styled(
+            format!("${total_cost:.2}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .right_aligned(),
+        Line::from(Span::styled(
+            format_number(total_input_tokens, format_options),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .right_aligned(),
+        Line::from(Span::styled(
+            format_number(total_output_tokens, format_options),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .right_aligned(),
+        Line::from(Span::styled(
+            format_number(
+                total_input_tokens + total_output_tokens + total_cached_tokens,
+                format_options,
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .right_aligned(),
+        Line::from(Span::styled(
+            format_number(total_tool_calls, format_options),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .right_aligned(),
+        Line::from(Span::styled(
+            all_models_text,
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    ]);
+
+    rows.push(totals_row);
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(1),  // Arrow
+            Constraint::Length(32), // Session (increased width for name)
+            Constraint::Length(17), // Started
+            Constraint::Length(14), // Tool
+            Constraint::Length(10), // Cost
+            Constraint::Length(8),  // Input
+            Constraint::Length(9),  // Output
+            Constraint::Length(11), // Total tokens
+            Constraint::Length(6),  // Tools
+            Constraint::Min(10),    // Models
+        ],
+    )
+    .header(header)
+    .block(Block::default().title(""))
+    .row_highlight_style(Style::new().blue())
+    .column_spacing(2);
+
+    frame.render_stateful_widget(table, area, table_state);
 }
 
 fn draw_summary_stats(

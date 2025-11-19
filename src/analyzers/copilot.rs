@@ -162,6 +162,11 @@ fn extract_and_hash_project_id_copilot(_file_path: &Path) -> String {
     hash_text("copilot-global")
 }
 
+fn is_probably_tool_json_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    (trimmed.starts_with('{') || trimmed.starts_with("[{")) && trimmed.contains("\"tool\"")
+}
+
 // Helper function to extract model from model_id field
 fn extract_model_from_model_id(model_id: &str) -> Option<String> {
     // Model ID format examples:
@@ -237,6 +242,7 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
         });
 
     let mut entries = Vec::new();
+    let mut fallback_session_name: Option<String> = None;
 
     // Process each request-response pair
     for (idx, request) in session.requests.iter().enumerate() {
@@ -296,6 +302,20 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
             }
         }
 
+        // Capture fallback session name from the first user message text
+        if fallback_session_name.is_none() && !request.message.text.is_empty() {
+            let text_str = request.message.text.clone();
+            if !is_probably_tool_json_text(&text_str) {
+                let truncated = if text_str.chars().count() > 50 {
+                    let chars: String = text_str.chars().take(50).collect();
+                    format!("{}...", chars)
+                } else {
+                    text_str
+                };
+                fallback_session_name = Some(truncated);
+            }
+        }
+
         // Create user message
         let user_date = DateTime::from_timestamp_millis(request.timestamp).unwrap_or_else(Utc::now);
 
@@ -315,6 +335,8 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
             model: None,
             stats: Stats::default(),
             role: MessageRole::User,
+            uuid: None,
+            session_name: fallback_session_name.clone(),
         });
 
         // Create assistant message
@@ -359,6 +381,8 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
             model,
             stats,
             role: MessageRole::Assistant,
+            uuid: None,
+            session_name: fallback_session_name.clone(),
         });
     }
 
@@ -374,7 +398,7 @@ impl Analyzer for CopilotAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        // VSCode forks that might have Copilot installed: Code, Cursor, Windsurf, VSCodium, Positron
+        // VSCode forks that might have Copilot installed: Code, Cursor, Windsurf, VSCodium, Positron, Antigravity
         let vscode_forks = [
             "Code",
             "Cursor",
@@ -382,6 +406,7 @@ impl Analyzer for CopilotAnalyzer {
             "VSCodium",
             "Positron",
             "Code - Insiders",
+            "Antigravity",
         ];
 
         if let Some(home_dir) = std::env::home_dir() {
