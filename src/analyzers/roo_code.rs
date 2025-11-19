@@ -92,28 +92,9 @@ fn is_probably_shell_command(text: &str) -> bool {
     // Common shell command prefixes
     let lower = trimmed.to_lowercase();
     for prefix in [
-        "git ",
-        "cargo ",
-        "just ",
-        "npm ",
-        "pnpm ",
-        "yarn ",
-        "python ",
-        "pytest ",
-        "npx ",
-        "pip ",
-        "bundle ",
-        "rails ",
-        "docker ",
-        "kubectl ",
-        "helm ",
-        "make ",
-        "go ",
-        "node ",
-        "deno ",
-        "bash ",
-        "sh ",
-        "zsh ",
+        "git ", "cargo ", "just ", "npm ", "pnpm ", "yarn ", "python ", "pytest ", "npx ", "pip ",
+        "bundle ", "rails ", "docker ", "kubectl ", "helm ", "make ", "go ", "node ", "deno ",
+        "bash ", "sh ", "zsh ",
     ] {
         if lower.starts_with(prefix) {
             return true;

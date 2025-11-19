@@ -14,7 +14,12 @@ use crate::utils::hash_text;
 use std::collections::{HashMap, HashSet};
 
 // Type alias for parse_jsonl_file return type
-type ParseResult = (Vec<ConversationMessage>, HashMap<String, String>, Vec<String>, Option<String>);
+type ParseResult = (
+    Vec<ConversationMessage>,
+    HashMap<String, String>,
+    Vec<String>,
+    Option<String>,
+);
 
 pub struct ClaudeCodeAnalyzer;
 
@@ -72,8 +77,15 @@ impl Analyzer for ClaudeCodeAnalyzer {
                 match File::open(&source.path) {
                     Ok(file) => {
                         let reader = BufReader::new(file);
-                        match parse_jsonl_file(&source.path, reader, &project_hash, &conversation_hash) {
-                            Ok((msgs, summaries, uuids, fallback)) => Some((msgs, summaries, conversation_hash, uuids, fallback)),
+                        match parse_jsonl_file(
+                            &source.path,
+                            reader,
+                            &project_hash,
+                            &conversation_hash,
+                        ) {
+                            Ok((msgs, summaries, uuids, fallback)) => {
+                                Some((msgs, summaries, conversation_hash, uuids, fallback))
+                            }
                             Err(e) => {
                                 eprintln!("Failed to parse {}: {}", source.path.display(), e);
                                 None
@@ -113,12 +125,11 @@ impl Analyzer for ClaudeCodeAnalyzer {
                     break; // Found a name for this conversation
                 }
             }
-            
+
             // Fallback: If no summary found, use the fallback name (first user message)
-            if !found_summary
-                && let Some(name) = conversation_fallbacks.get(&conversation_hash) {
-                    conversation_summaries.insert(conversation_hash, name.clone());
-                }
+            if !found_summary && let Some(name) = conversation_fallbacks.get(&conversation_hash) {
+                conversation_summaries.insert(conversation_hash, name.clone());
+            }
         }
 
         // Second pass: Apply session names to messages
@@ -453,7 +464,11 @@ pub fn parse_jsonl_file<R: BufRead>(
                     let message_id = entry.message.as_ref().and_then(|m| m.id.clone());
 
                     let mut msg = ConversationMessage {
-                        global_hash: hash_text(&format!("{}_{}", conversation_hash, uuid.as_ref().unwrap_or(&"".to_string()))),
+                        global_hash: hash_text(&format!(
+                            "{}_{}",
+                            conversation_hash,
+                            uuid.as_ref().unwrap_or(&"".to_string())
+                        )),
                         local_hash: None,
                         application: Application::ClaudeCode,
                         model: model.clone(),
@@ -476,20 +491,24 @@ pub fn parse_jsonl_file<R: BufRead>(
                             Content::Blocks(blocks) => blocks
                                 .iter()
                                 .filter(|c| matches!(c, ContentBlock::ToolUse { .. }))
-                                .count() as u32,
+                                .count()
+                                as u32,
                             _ => 0,
                         };
                     }
 
                     if let Some(usage_val) = usage {
-                        let model_name = model.as_ref().unwrap_or(&current_model.clone().unwrap_or_default()).to_owned();
+                        let model_name = model
+                            .as_ref()
+                            .unwrap_or(&current_model.clone().unwrap_or_default())
+                            .to_owned();
 
                         msg.stats.input_tokens = usage_val.input_tokens;
                         msg.stats.output_tokens = usage_val.output_tokens;
                         msg.stats.cache_creation_tokens = usage_val.cache_creation_input_tokens;
                         msg.stats.cache_read_tokens = usage_val.cache_read_input_tokens;
-                        msg.stats.cached_tokens =
-                            usage_val.cache_creation_input_tokens + usage_val.cache_read_input_tokens;
+                        msg.stats.cached_tokens = usage_val.cache_creation_input_tokens
+                            + usage_val.cache_read_input_tokens;
                         msg.stats.cost = calculate_cost_from_tokens(&usage_val, &model_name);
 
                         if let Some(request_id) = request_id
@@ -503,37 +522,39 @@ pub fn parse_jsonl_file<R: BufRead>(
                     }
 
                     // Capture fallback session name from the first user message
-                    if matches!(msg.role, MessageRole::User) && fallback_session_name.is_none()
-                        && let Some(content_val) = &content {
-                            // Extract user-visible text from either blocks or string content
-                            let text_opt: Option<String> = match content_val {
-                                Content::Blocks(blocks) => {
-                                    let mut result = None;
-                                    for block in blocks {
-                                        if let ContentBlock::Text { text } = block {
-                                            let text_str = String::from_utf8_lossy(text);
-                                            result = Some(text_str.to_string());
-                                            break;
-                                        }
+                    if matches!(msg.role, MessageRole::User)
+                        && fallback_session_name.is_none()
+                        && let Some(content_val) = &content
+                    {
+                        // Extract user-visible text from either blocks or string content
+                        let text_opt: Option<String> = match content_val {
+                            Content::Blocks(blocks) => {
+                                let mut result = None;
+                                for block in blocks {
+                                    if let ContentBlock::Text { text } = block {
+                                        let text_str = String::from_utf8_lossy(text);
+                                        result = Some(text_str.to_string());
+                                        break;
                                     }
-                                    result
                                 }
-                                Content::String(bytes) => {
-                                    let text_str = String::from_utf8_lossy(bytes);
-                                    Some(text_str.to_string())
-                                }
-                            };
-
-                            if let Some(text_str) = text_opt {
-                                let truncated = if text_str.chars().count() > 50 {
-                                    let chars: String = text_str.chars().take(50).collect();
-                                    format!("{}...", chars)
-                                } else {
-                                    text_str
-                                };
-                                fallback_session_name = Some(truncated);
+                                result
                             }
+                            Content::String(bytes) => {
+                                let text_str = String::from_utf8_lossy(bytes);
+                                Some(text_str.to_string())
+                            }
+                        };
+
+                        if let Some(text_str) = text_opt {
+                            let truncated = if text_str.chars().count() > 50 {
+                                let chars: String = text_str.chars().take(50).collect();
+                                format!("{}...", chars)
+                            } else {
+                                text_str
+                            };
+                            fallback_session_name = Some(truncated);
                         }
+                    }
 
                     messages.push(msg);
                 }
@@ -588,7 +609,7 @@ pub fn deduplicate_messages_by_local_hash(
                 if set.contains(&fp) {
                     // Merge non-token stats so we don't lose tool/activity counts
                     let existing_mut = &mut deduplicated_entries[existing_index];
-                    
+
                     // Preserve session name if the new message has one and the existing one doesn't
                     if existing_mut.session_name.is_none() && message.session_name.is_some() {
                         existing_mut.session_name = message.session_name;

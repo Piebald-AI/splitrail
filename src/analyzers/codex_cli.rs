@@ -298,67 +298,69 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
                     match role.as_str() {
                         "user" => {
                             if fallback_session_name.is_none()
-                                && let Some(content_val) = &message.content {
-                                    let text_opt = match content_val {
-                                        simd_json::OwnedValue::String(s) => {
-                                            if s.is_empty() { None } else { Some(s.clone()) }
+                                && let Some(content_val) = &message.content
+                            {
+                                let text_opt = match content_val {
+                                    simd_json::OwnedValue::String(s) => {
+                                        if s.is_empty() {
+                                            None
+                                        } else {
+                                            Some(s.clone())
                                         }
-                                        simd_json::OwnedValue::Array(items) => {
-                                            let mut result = None;
-                                            for item in items.iter() {
-                                                if let simd_json::OwnedValue::Object(map) = item {
-                                                    // Prefer input_text blocks for titles
-                                                    if let Some(simd_json::OwnedValue::String(kind)) =
-                                                        map.get("type")
-                                                        && kind == "input_text"
-                                                        && let Some(
-                                                            simd_json::OwnedValue::String(text),
-                                                        ) = map.get("text")
-                                                        && !text.is_empty()
-                                                        && !is_probably_tool_json_text(
-                                                            text,
-                                                        )
-                                                    {
-                                                        result = Some(text.clone());
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            result
-                                        }
-                                        simd_json::OwnedValue::Object(map) => {
-                                            if let Some(simd_json::OwnedValue::String(text)) =
-                                                map.get("text")
-                                            {
-                                                if !text.is_empty()
+                                    }
+                                    simd_json::OwnedValue::Array(items) => {
+                                        let mut result = None;
+                                        for item in items.iter() {
+                                            if let simd_json::OwnedValue::Object(map) = item {
+                                                // Prefer input_text blocks for titles
+                                                if let Some(simd_json::OwnedValue::String(kind)) =
+                                                    map.get("type")
+                                                    && kind == "input_text"
+                                                    && let Some(simd_json::OwnedValue::String(text)) =
+                                                        map.get("text")
+                                                    && !text.is_empty()
                                                     && !is_probably_tool_json_text(text)
                                                 {
-                                                    Some(text.clone())
-                                                } else {
-                                                    None
+                                                    result = Some(text.clone());
+                                                    break;
                                                 }
+                                            }
+                                        }
+                                        result
+                                    }
+                                    simd_json::OwnedValue::Object(map) => {
+                                        if let Some(simd_json::OwnedValue::String(text)) =
+                                            map.get("text")
+                                        {
+                                            if !text.is_empty() && !is_probably_tool_json_text(text)
+                                            {
+                                                Some(text.clone())
                                             } else {
                                                 None
                                             }
+                                        } else {
+                                            None
                                         }
-                                        _ => None,
+                                    }
+                                    _ => None,
+                                };
+
+                                if let Some(text_str) = text_opt
+                                    && !is_noise_title_candidate(&text_str)
+                                {
+                                    let truncated = if text_str.chars().count() > 50 {
+                                        let chars: String = text_str.chars().take(50).collect();
+                                        format!("{}...", chars)
+                                    } else {
+                                        text_str
                                     };
-
-                                    if let Some(text_str) = text_opt
-                                        && !is_noise_title_candidate(&text_str) {
-                                            let truncated = if text_str.chars().count() > 50 {
-                                                let chars: String =
-                                                    text_str.chars().take(50).collect();
-                                                format!("{}...", chars)
-                                            } else {
-                                                text_str
-                                            };
-                                            fallback_session_name = Some(truncated);
-                                        }
+                                    fallback_session_name = Some(truncated);
                                 }
+                            }
 
-                            let effective_name =
-                                session_name.clone().or_else(|| fallback_session_name.clone());
+                            let effective_name = session_name
+                                .clone()
+                                .or_else(|| fallback_session_name.clone());
 
                             entries.push(ConversationMessage {
                                 date: wrapper.timestamp,

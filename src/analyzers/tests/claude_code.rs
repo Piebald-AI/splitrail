@@ -33,7 +33,13 @@ static DUPLICATE_MESSAGES_DATA: LazyLock<String> = LazyLock::new(|| {
 fn test_parse_jsonl_file_basic() {
     let cursor = Cursor::new(JSONL_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, _, _, _) = parse_jsonl_file(Path::new("test.jsonl"), &mut buf_reader, "proj_hash", "conv_hash").unwrap();
+    let (messages, _, _, _) = parse_jsonl_file(
+        Path::new("test.jsonl"),
+        &mut buf_reader,
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
 
     assert_eq!(messages.len(), 4);
 
@@ -70,7 +76,13 @@ fn test_parse_jsonl_file_basic() {
 fn test_parse_jsonl_file_tool_operations() {
     let cursor = Cursor::new(TOOL_OPERATIONS_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, _, _, _) = parse_jsonl_file(Path::new("tools.jsonl"), &mut buf_reader, "proj_hash", "conv_hash").unwrap();
+    let (messages, _, _, _) = parse_jsonl_file(
+        Path::new("tools.jsonl"),
+        &mut buf_reader,
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
 
     assert_eq!(messages.len(), 2);
 
@@ -110,7 +122,13 @@ fn test_extract_and_hash_project_id() {
 fn test_deduplicate_messages_by_local_hash() {
     let cursor = Cursor::new(DUPLICATE_MESSAGES_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, _, _, _) = parse_jsonl_file(Path::new("duplicates.jsonl"), &mut buf_reader, "proj_hash", "conv_hash").unwrap();
+    let (messages, _, _, _) = parse_jsonl_file(
+        Path::new("duplicates.jsonl"),
+        &mut buf_reader,
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
 
     // Should have 2 messages before deduplication
     assert_eq!(messages.len(), 2);
@@ -176,7 +194,10 @@ fn test_deduplicate_messages_by_local_hash() {
     // Should sum cache tokens: 3 + 5 = 8
     assert_eq!(deduplicated_test[0].stats.cached_tokens, 8);
     // Should preserve session name
-    assert_eq!(deduplicated_test[0].session_name, Some("Session 1".to_string()));
+    assert_eq!(
+        deduplicated_test[0].session_name,
+        Some("Session 1".to_string())
+    );
 }
 
 #[test]
@@ -186,13 +207,22 @@ fn test_parse_jsonl_file_with_summary() {
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, summaries, _, _) = parse_jsonl_file(Path::new("summary.jsonl"), &mut buf_reader, "proj_hash", "conv_hash").unwrap();
+    let (messages, summaries, _, _) = parse_jsonl_file(
+        Path::new("summary.jsonl"),
+        &mut buf_reader,
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
 
     assert_eq!(messages.len(), 1);
     assert_eq!(summaries.len(), 1);
-    
+
     assert_eq!(messages[0].uuid, Some("msg-uuid-1".to_string()));
-    assert_eq!(summaries.get("msg-uuid-1"), Some(&"Test Session Summary".to_string()));
+    assert_eq!(
+        summaries.get("msg-uuid-1"),
+        Some(&"Test Session Summary".to_string())
+    );
 }
 
 #[test]
@@ -201,7 +231,13 @@ fn test_parse_jsonl_file_fallback_plain_string_content() {
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, summaries, _, fallback) = parse_jsonl_file(Path::new("fallback_plain.jsonl"), &mut buf_reader, "proj_hash", "conv_hash").unwrap();
+    let (messages, summaries, _, fallback) = parse_jsonl_file(
+        Path::new("fallback_plain.jsonl"),
+        &mut buf_reader,
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
 
     assert_eq!(messages.len(), 1);
     assert!(summaries.is_empty());
@@ -220,11 +256,17 @@ fn test_parse_jsonl_file_fallback_session_name() {
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, summaries, _, fallback) = parse_jsonl_file(Path::new("fallback.jsonl"), &mut buf_reader, "proj_hash", "conv_hash").unwrap();
+    let (messages, summaries, _, fallback) = parse_jsonl_file(
+        Path::new("fallback.jsonl"),
+        &mut buf_reader,
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
 
     assert_eq!(messages.len(), 1);
     assert!(summaries.is_empty());
-    
+
     // Check fallback name
     assert!(fallback.is_some());
     let name = fallback.unwrap();
@@ -237,16 +279,25 @@ fn test_parse_jsonl_file_fallback_session_name() {
 fn test_parse_jsonl_file_fallback_multibyte() {
     // String with emojis to test multi-byte truncation safety
     // "Hello 🌍! " repeated to exceed 50 chars. Each emoji is 4 bytes.
-    let text = "Hello 🌍! ".repeat(10); 
-    let jsonl_data = format!(r#"{{"uuid":"msg-uuid-1","type":"user","message":{{"role":"user","content":[{{"type":"text","text":"{}"}}]}},"timestamp":"2025-01-01T00:00:00Z"}}"#, text);
+    let text = "Hello 🌍! ".repeat(10);
+    let jsonl_data = format!(
+        r#"{{"uuid":"msg-uuid-1","type":"user","message":{{"role":"user","content":[{{"type":"text","text":"{}"}}]}},"timestamp":"2025-01-01T00:00:00Z"}}"#,
+        text
+    );
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, summaries, _, fallback) = parse_jsonl_file(Path::new("fallback_multibyte.jsonl"), &mut buf_reader, "proj_hash", "conv_hash").unwrap();
+    let (messages, summaries, _, fallback) = parse_jsonl_file(
+        Path::new("fallback_multibyte.jsonl"),
+        &mut buf_reader,
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
 
     assert_eq!(messages.len(), 1);
     assert!(summaries.is_empty());
-    
+
     // Check fallback name
     assert!(fallback.is_some());
     let name = fallback.unwrap();

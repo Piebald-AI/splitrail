@@ -46,9 +46,11 @@ fn test_parse_codex_cli_new_wrapper_format() {
     assert!(result.len() >= 2);
 
     // Session name should prefer the first user message over generic summaries like "auto"
-    assert!(result
-        .iter()
-        .any(|msg| msg.session_name.as_deref() == Some("Hey")));
+    assert!(
+        result
+            .iter()
+            .any(|msg| msg.session_name.as_deref() == Some("Hey"))
+    );
     // Find the assistant message
     let assistant_msg = result
         .iter()
