@@ -15,12 +15,93 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::{Write, stdout};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
+
+/// Check if a date string (YYYY-MM-DD format) matches the user's search buffer
+fn date_matches_buffer(day: &str, buffer: &str) -> bool {
+    if buffer.is_empty() {
+        return true;
+    }
+
+    // Check for month name match first
+    let lower = buffer.to_lowercase();
+    let month_num = match lower.as_str() {
+        s if "january".starts_with(s) && s.len() >= 3 => Some(1),
+        s if "february".starts_with(s) && s.len() >= 3 => Some(2),
+        s if "march".starts_with(s) && s.len() >= 3 => Some(3),
+        s if "april".starts_with(s) && s.len() >= 3 => Some(4),
+        s if "may".starts_with(s) && s.len() >= 3 => Some(5),
+        s if "june".starts_with(s) && s.len() >= 3 => Some(6),
+        s if "july".starts_with(s) && s.len() >= 3 => Some(7),
+        s if "august".starts_with(s) && s.len() >= 3 => Some(8),
+        s if "september".starts_with(s) && s.len() >= 3 => Some(9),
+        s if "october".starts_with(s) && s.len() >= 3 => Some(10),
+        s if "november".starts_with(s) && s.len() >= 3 => Some(11),
+        s if "december".starts_with(s) && s.len() >= 3 => Some(12),
+        _ => None,
+    };
+
+    if let Some(month) = month_num {
+        let target = format!("-{:02}-", month);
+        return day.contains(&target);
+    }
+
+    let normalized_input = buffer.replace('/', "-");
+
+    // Remove trailing separator for partial matches like "7/" or "7-"
+    let trimmed = normalized_input.trim_end_matches('-');
+
+    // Exact match
+    if day == buffer {
+        return true;
+    }
+
+    let parts: Vec<&str> = trimmed.split('-').filter(|s| !s.is_empty()).collect();
+    if parts.len() == 1 {
+        // Single number - match as month
+        if let Ok(month) = parts[0].parse::<u32>() {
+            let target = format!("-{:02}-", month);
+            return day.contains(&target);
+        }
+        // Otherwise match if the date contains this string
+        return day.contains(trimmed);
+    } else if parts.len() == 2 {
+        // Month and day only (M-D or MM-DD)
+        if let (Ok(month), Ok(day_num)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+            let target = format!("-{:02}-{:02}", month, day_num);
+            return day.ends_with(&target);
+        }
+    } else if parts.len() == 3 {
+        // Could be YYYY-M-D or M/D/YYYY
+        if let (Ok(p0), Ok(p1), Ok(p2)) = (
+            parts[0].parse::<u32>(),
+            parts[1].parse::<u32>(),
+            parts[2].parse::<u32>(),
+        ) {
+            // Determine format based on which part looks like a year
+            let (year, month, day_num) = if p0 > 31 {
+                // YYYY-M-D format
+                (p0, p1, p2)
+            } else if p2 > 31 {
+                // M/D/YYYY format
+                (p2, p0, p1)
+            } else {
+                // Ambiguous, assume YYYY-M-D
+                (p0, p1, p2)
+            };
+            let target = format!("{:04}-{:02}-{:02}", year, month, day_num);
+            return day == target;
+        }
+    }
+
+    false
+}
 
 #[derive(Debug, Clone)]
 pub enum UploadStatus {
@@ -49,6 +130,9 @@ struct UiState<'a> {
     selected_tab: usize,
     stats_view_mode: StatsViewMode,
     session_window_offsets: &'a mut [usize],
+    session_day_filters: &'a mut [Option<String>],
+    date_jump_active: bool,
+    date_jump_buffer: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +143,7 @@ struct SessionAggregate {
     stats: Stats,
     models: Vec<String>,
     session_name: Option<String>,
+    day_key: String,
 }
 
 fn accumulate_stats(dst: &mut Stats, src: &Stats) {
@@ -119,10 +204,12 @@ fn aggregate_sessions_for_tool(stats: &AgenticCodingToolStats) -> Vec<SessionAgg
                 stats: Stats::default(),
                 models: Vec::new(),
                 session_name: None,
+                day_key: msg.date.format("%Y-%m-%d").to_string(),
             });
 
         if msg.date < entry.first_timestamp {
             entry.first_timestamp = msg.date;
+            entry.day_key = msg.date.format("%Y-%m-%d").to_string();
         }
 
         // Only aggregate stats for assistant/model messages and track models
@@ -164,69 +251,10 @@ fn aggregate_sessions_for_all_tools_owned(
 #[derive(Debug, Clone)]
 struct SessionTableCache {
     sessions: Vec<SessionAggregate>,
-    best_cost_i: Option<usize>,
-    best_total_tokens_i: Option<usize>,
-    total_cost: f64,
-    total_input_tokens: u64,
-    total_output_tokens: u64,
-    total_cached_tokens: u64,
-    total_tool_calls: u64,
-    all_models_text: String,
 }
 
 fn build_session_table_cache(sessions: Vec<SessionAggregate>) -> SessionTableCache {
-    let mut best_cost = None;
-    let mut best_cost_i = None;
-    let mut best_total_tokens = None;
-    let mut best_total_tokens_i = None;
-
-    let mut total_cost = 0.0;
-    let mut total_input_tokens = 0u64;
-    let mut total_output_tokens = 0u64;
-    let mut total_cached_tokens = 0u64;
-    let mut total_tool_calls = 0u64;
-
-    for (i, session) in sessions.iter().enumerate() {
-        if best_cost.is_none_or(|best| session.stats.cost > best) {
-            best_cost = Some(session.stats.cost);
-            best_cost_i = Some(i);
-        }
-
-        let total_tokens =
-            session.stats.input_tokens + session.stats.output_tokens + session.stats.cached_tokens;
-        if best_total_tokens.is_none_or(|best| total_tokens > best) {
-            best_total_tokens = Some(total_tokens);
-            best_total_tokens_i = Some(i);
-        }
-
-        total_cost += session.stats.cost;
-        total_input_tokens += session.stats.input_tokens;
-        total_output_tokens += session.stats.output_tokens;
-        total_cached_tokens += session.stats.cached_tokens;
-        total_tool_calls += session.stats.tool_calls as u64;
-    }
-
-    let mut all_models = std::collections::HashSet::new();
-    for session in &sessions {
-        for model in &session.models {
-            all_models.insert(model.clone());
-        }
-    }
-    let mut all_models_vec = all_models.into_iter().collect::<Vec<_>>();
-    all_models_vec.sort();
-    let all_models_text = all_models_vec.join(", ");
-
-    SessionTableCache {
-        sessions,
-        best_cost_i,
-        best_total_tokens_i,
-        total_cost,
-        total_input_tokens,
-        total_output_tokens,
-        total_cached_tokens,
-        total_tool_calls,
-        all_models_text,
-    }
+    SessionTableCache { sessions }
 }
 
 fn has_data(stats: &AgenticCodingToolStats) -> bool {
@@ -299,11 +327,15 @@ async fn run_app(
 ) -> Result<()> {
     let mut table_states: Vec<TableState> = Vec::new();
     let mut session_window_offsets: Vec<usize> = Vec::new();
+    let mut session_day_filters: Vec<Option<String>> = Vec::new();
+    let mut date_jump_active = false;
+    let mut date_jump_buffer = String::new();
     let mut current_stats = stats_receiver.borrow().clone();
 
     // Initialize table states for current stats
     update_table_states(&mut table_states, &current_stats, selected_tab);
     update_window_offsets(&mut session_window_offsets, &table_states.len());
+    update_day_filters(&mut session_day_filters, &table_states.len());
 
     let mut needs_redraw = true;
     let mut last_upload_status = {
@@ -343,6 +375,7 @@ async fn run_app(
                 .collect();
             update_table_states(&mut table_states, &current_stats, selected_tab);
             update_window_offsets(&mut session_window_offsets, &table_states.len());
+            update_day_filters(&mut session_day_filters, &table_states.len());
             recompute_version = recompute_version.wrapping_add(1);
             let version = recompute_version;
             if let Some(handle) = pending_session_recompute.take() {
@@ -404,6 +437,9 @@ async fn run_app(
                     selected_tab: *selected_tab,
                     stats_view_mode: *stats_view_mode,
                     session_window_offsets: &mut session_window_offsets,
+                    session_day_filters: &mut session_day_filters,
+                    date_jump_active,
+                    date_jump_buffer: &date_jump_buffer,
                 };
                 draw_ui(
                     frame,
@@ -457,17 +493,67 @@ async fn run_app(
                 continue;
             }
 
+            if date_jump_active {
+                match key.code {
+                    KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '-' || c == '/' => {
+                        date_jump_buffer.push(c);
+                        // Auto-jump to first matching date
+                        if let Some(current_stats) = filtered_stats.get(*selected_tab)
+                            && let Some(table_state) = table_states.get_mut(*selected_tab)
+                            && let Some((index, _)) =
+                                current_stats.daily_stats.iter().enumerate().find(
+                                    |(_, (day, _))| date_matches_buffer(day, &date_jump_buffer),
+                                )
+                        {
+                            table_state.select(Some(index));
+                        }
+                        needs_redraw = true;
+                    }
+                    KeyCode::Backspace => {
+                        date_jump_buffer.pop();
+                        // Re-evaluate match after backspace
+                        if let Some(current_stats) = filtered_stats.get(*selected_tab)
+                            && let Some(table_state) = table_states.get_mut(*selected_tab)
+                            && let Some((index, _)) =
+                                current_stats.daily_stats.iter().enumerate().find(
+                                    |(_, (day, _))| date_matches_buffer(day, &date_jump_buffer),
+                                )
+                        {
+                            table_state.select(Some(index));
+                        }
+                        needs_redraw = true;
+                    }
+                    KeyCode::Enter | KeyCode::Esc => {
+                        date_jump_active = false;
+                        date_jump_buffer.clear();
+                        needs_redraw = true;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             match key.code {
                 KeyCode::Left | KeyCode::Char('h') => {
                     if *selected_tab > 0 {
                         *selected_tab -= 1;
 
                         if let StatsViewMode::Session = *stats_view_mode
-                            && let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && !session_rows.is_empty()
+                            && let Some(cache) = session_table_cache.get(*selected_tab)
                         {
-                            table_state.select(Some(session_rows.len().saturating_sub(1)));
+                            let target_len = match session_day_filters
+                                .get(*selected_tab)
+                                .and_then(|f| f.as_ref())
+                            {
+                                Some(day) => {
+                                    cache.sessions.iter().filter(|s| &s.day_key == day).count()
+                                }
+                                None => cache.sessions.len(),
+                            };
+                            if target_len > 0 {
+                                table_state.select(Some(target_len.saturating_sub(1)));
+                            }
                         }
 
                         needs_redraw = true;
@@ -478,11 +564,21 @@ async fn run_app(
                         *selected_tab += 1;
 
                         if let StatsViewMode::Session = *stats_view_mode
-                            && let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && !session_rows.is_empty()
+                            && let Some(cache) = session_table_cache.get(*selected_tab)
                         {
-                            table_state.select(Some(session_rows.len().saturating_sub(1)));
+                            let target_len = match session_day_filters
+                                .get(*selected_tab)
+                                .and_then(|f| f.as_ref())
+                            {
+                                Some(day) => {
+                                    cache.sessions.iter().filter(|s| &s.day_key == day).count()
+                                }
+                                None => cache.sessions.len(),
+                            };
+                            if target_len > 0 {
+                                table_state.select(Some(target_len.saturating_sub(1)));
+                            }
                         }
 
                         needs_redraw = true;
@@ -509,25 +605,33 @@ async fn run_app(
                                 }
                             }
                             StatsViewMode::Session => {
-                                if let Some(session_rows) =
-                                    session_stats_per_tool.get(*selected_tab)
-                                {
-                                    let total_rows = session_rows.len();
-                                    if total_rows > 0 && selected < total_rows.saturating_add(1) {
-                                        // sessions: 0..total_rows-1
-                                        // separator: total_rows
-                                        // totals: total_rows + 1
-                                        table_state.select(Some(
-                                            if selected == total_rows.saturating_sub(1) {
-                                                // Jump from last session row to totals (skip separator)
-                                                selected + 2
-                                            } else {
-                                                // Move down one row (may land on separator or totals)
-                                                selected + 1
-                                            },
-                                        ));
-                                        needs_redraw = true;
-                                    }
+                                let filtered_len = session_table_cache
+                                    .get(*selected_tab)
+                                    .map(|cache| {
+                                        session_day_filters
+                                            .get(*selected_tab)
+                                            .and_then(|f| f.as_ref())
+                                            .map(|day| {
+                                                cache
+                                                    .sessions
+                                                    .iter()
+                                                    .filter(|s| &s.day_key == day)
+                                                    .count()
+                                            })
+                                            .unwrap_or_else(|| cache.sessions.len())
+                                    })
+                                    .unwrap_or(0);
+
+                                if filtered_len > 0 && selected < filtered_len.saturating_add(1) {
+                                    // sessions: 0..len-1, separator: len, totals: len+1
+                                    table_state.select(Some(
+                                        if selected == filtered_len.saturating_sub(1) {
+                                            selected + 2
+                                        } else {
+                                            selected + 1
+                                        },
+                                    ));
+                                    needs_redraw = true;
                                 }
                             }
                         }
@@ -552,20 +656,32 @@ async fn run_app(
                                 }
                             }
                             StatsViewMode::Session => {
-                                if let Some(session_rows) =
-                                    session_stats_per_tool.get(*selected_tab)
-                                {
-                                    // sessions: 0..len-1, separator: len, totals: len+1
-                                    table_state.select(Some(selected.saturating_sub(
-                                        if selected == session_rows.len() + 1 {
-                                            // Jump from totals back to last session (skip separator)
-                                            2
-                                        } else {
-                                            1
-                                        },
-                                    )));
-                                    needs_redraw = true;
-                                }
+                                let filtered_len = session_table_cache
+                                    .get(*selected_tab)
+                                    .map(|cache| {
+                                        session_day_filters
+                                            .get(*selected_tab)
+                                            .and_then(|f| f.as_ref())
+                                            .map(|day| {
+                                                cache
+                                                    .sessions
+                                                    .iter()
+                                                    .filter(|s| &s.day_key == day)
+                                                    .count()
+                                            })
+                                            .unwrap_or_else(|| cache.sessions.len())
+                                    })
+                                    .unwrap_or(0);
+
+                                // sessions: 0..len-1, separator: len, totals: len+1
+                                table_state.select(Some(selected.saturating_sub(
+                                    if selected == filtered_len.saturating_add(1) {
+                                        2
+                                    } else {
+                                        1
+                                    },
+                                )));
+                                needs_redraw = true;
                             }
                         }
                     }
@@ -587,13 +703,25 @@ async fn run_app(
                                 }
                             }
                             StatsViewMode::Session => {
-                                if let Some(session_rows) =
-                                    session_stats_per_tool.get(*selected_tab)
-                                    && !session_rows.is_empty()
-                                {
-                                    // sessions + separator + totals
-                                    let total_rows = session_rows.len() + 2;
-                                    // Move to totals row (last row)
+                                let filtered_len = session_table_cache
+                                    .get(*selected_tab)
+                                    .map(|cache| {
+                                        session_day_filters
+                                            .get(*selected_tab)
+                                            .and_then(|f| f.as_ref())
+                                            .map(|day| {
+                                                cache
+                                                    .sessions
+                                                    .iter()
+                                                    .filter(|s| &s.day_key == day)
+                                                    .count()
+                                            })
+                                            .unwrap_or_else(|| cache.sessions.len())
+                                    })
+                                    .unwrap_or(0);
+
+                                if filtered_len > 0 {
+                                    let total_rows = filtered_len + 2;
                                     table_state.select(Some(total_rows.saturating_sub(1)));
                                     needs_redraw = true;
                                 }
@@ -616,12 +744,25 @@ async fn run_app(
                                 }
                             }
                             StatsViewMode::Session => {
-                                if let Some(session_rows) =
-                                    session_stats_per_tool.get(*selected_tab)
-                                    && !session_rows.is_empty()
-                                {
-                                    // sessions + separator + totals
-                                    let total_rows = session_rows.len() + 2;
+                                let filtered_len = session_table_cache
+                                    .get(*selected_tab)
+                                    .map(|cache| {
+                                        session_day_filters
+                                            .get(*selected_tab)
+                                            .and_then(|f| f.as_ref())
+                                            .map(|day| {
+                                                cache
+                                                    .sessions
+                                                    .iter()
+                                                    .filter(|s| &s.day_key == day)
+                                                    .count()
+                                            })
+                                            .unwrap_or_else(|| cache.sessions.len())
+                                    })
+                                    .unwrap_or(0);
+
+                                if filtered_len > 0 {
+                                    let total_rows = filtered_len + 2;
                                     let new_selected =
                                         (selected + 10).min(total_rows.saturating_sub(1));
                                     table_state.select(Some(new_selected));
@@ -640,21 +781,59 @@ async fn run_app(
                         needs_redraw = true;
                     }
                 }
+                KeyCode::Char('/') => {
+                    if let StatsViewMode::Daily = *stats_view_mode {
+                        date_jump_active = true;
+                        date_jump_buffer.clear();
+                        needs_redraw = true;
+                    }
+                }
                 KeyCode::Char('t') => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                         *stats_view_mode = match *stats_view_mode {
-                            StatsViewMode::Daily => StatsViewMode::Session,
+                            StatsViewMode::Daily => {
+                                session_day_filters[*selected_tab] = None;
+                                StatsViewMode::Session
+                            }
                             StatsViewMode::Session => StatsViewMode::Daily,
                         };
 
+                        date_jump_active = false;
+                        date_jump_buffer.clear();
+
                         if let StatsViewMode::Session = *stats_view_mode
-                            && let Some(session_rows) = session_stats_per_tool.get(*selected_tab)
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && !session_rows.is_empty()
+                            && let Some(cache) = session_table_cache.get(*selected_tab)
+                            && !cache.sessions.is_empty()
                         {
-                            table_state.select(Some(session_rows.len().saturating_sub(1)));
+                            let target_len = session_day_filters
+                                .get(*selected_tab)
+                                .and_then(|f| f.as_ref())
+                                .map(|day| {
+                                    cache.sessions.iter().filter(|s| &s.day_key == day).count()
+                                })
+                                .unwrap_or_else(|| cache.sessions.len());
+                            if target_len > 0 {
+                                table_state.select(Some(target_len.saturating_sub(1)));
+                            }
                         }
 
+                        needs_redraw = true;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let StatsViewMode::Daily = *stats_view_mode
+                        && let Some(current_stats) = filtered_stats.get(*selected_tab)
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected_idx) = table_state.selected()
+                        && selected_idx < current_stats.daily_stats.len()
+                        && let Some((day_key, _)) =
+                            current_stats.daily_stats.iter().nth(selected_idx)
+                    {
+                        session_day_filters[*selected_tab] = Some(day_key.to_string());
+                        *stats_view_mode = StatsViewMode::Session;
+                        session_window_offsets[*selected_tab] = 0;
+                        table_state.select(Some(0));
                         needs_redraw = true;
                     }
                 }
@@ -750,6 +929,11 @@ fn draw_ui(
                         current_stats,
                         format_options,
                         current_table_state,
+                        if ui_state.date_jump_active {
+                            ui_state.date_jump_buffer
+                        } else {
+                            ""
+                        },
                     );
                 }
                 StatsViewMode::Session => {
@@ -761,6 +945,7 @@ fn draw_ui(
                             format_options,
                             current_table_state,
                             &mut ui_state.session_window_offsets[ui_state.selected_tab],
+                            ui_state.session_day_filters[ui_state.selected_tab].as_ref(),
                         );
                     }
                 }
@@ -780,13 +965,20 @@ fn draw_ui(
         ])
         .split(help_area);
 
-        let help_text = match ui_state.stats_view_mode {
-            StatsViewMode::Daily => {
-                "Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, Ctrl+T for per-session view, q/Esc to quit"
-            }
-            StatsViewMode::Session => {
-                "Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, Ctrl+T for per-day view, q/Esc to quit"
-            }
+        let help_text: Cow<'_, str> = if ui_state.date_jump_active {
+            Cow::Owned(format!(
+                "Date jump (YYYY-MM-DD): {}",
+                ui_state.date_jump_buffer
+            ))
+        } else {
+            Cow::Borrowed(match ui_state.stats_view_mode {
+                StatsViewMode::Daily => {
+                    "Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, / for quick date jump, Enter to drill into a day, Ctrl+T for per-session view, q/Esc to quit"
+                }
+                StatsViewMode::Session => {
+                    "Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, Ctrl+T for per-day view, q/Esc to quit"
+                }
+            })
         };
         let help = Paragraph::new(help_text).style(Style::default().add_modifier(Modifier::DIM));
         frame.render_widget(help, help_chunks[0]);
@@ -868,6 +1060,7 @@ fn draw_daily_stats_table(
     stats: &AgenticCodingToolStats,
     format_options: &NumberFormatOptions,
     table_state: &mut TableState,
+    date_filter: &str,
 ) -> usize {
     let header = Row::new(vec![
         Cell::new(""),
@@ -941,14 +1134,21 @@ fn draw_daily_stats_table(
     let mut total_output = 0;
     let mut total_reasoning = 0;
     let mut total_tool_calls = 0;
+    let mut total_conversations = 0;
 
     for (i, (date, day_stats)) in stats.daily_stats.iter().enumerate() {
+        // Filter rows based on date search
+        if !date_filter.is_empty() && !date_matches_buffer(date, date_filter) {
+            continue;
+        }
+
         total_cost += day_stats.stats.cost;
         total_cached += day_stats.stats.cached_tokens;
         total_input += day_stats.stats.input_tokens;
         total_output += day_stats.stats.output_tokens;
         total_reasoning += day_stats.stats.reasoning_tokens;
         total_tool_calls += day_stats.stats.tool_calls;
+        total_conversations += day_stats.conversations;
 
         let mut models_vec = day_stats.models.keys().cloned().collect::<Vec<String>>();
         models_vec.sort();
@@ -1283,7 +1483,7 @@ fn draw_daily_stats_table(
         ))
         .right_aligned(),
         Line::from(Span::styled(
-            format_number(stats.num_conversations, format_options),
+            format_number(total_conversations as u64, format_options),
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
@@ -1353,6 +1553,7 @@ fn draw_session_stats_table(
     format_options: &NumberFormatOptions,
     table_state: &mut TableState,
     window_offset: &mut usize,
+    day_filter: Option<&String>,
 ) {
     let header = Row::new(vec![
         Cell::new(""),
@@ -1369,7 +1570,16 @@ fn draw_session_stats_table(
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
 
-    let total_session_rows = cache.sessions.len();
+    let filtered_sessions: Vec<&SessionAggregate> = match day_filter {
+        Some(day) => cache
+            .sessions
+            .iter()
+            .filter(|s| &s.day_key == day)
+            .collect(),
+        None => cache.sessions.iter().collect(),
+    };
+
+    let total_session_rows = filtered_sessions.len();
     // Total rows in the table body: sessions + optional separator + totals row
     let total_rows = if total_session_rows > 0 {
         total_session_rows + 2
@@ -1407,10 +1617,60 @@ fn draw_session_stats_table(
 
     let mut rows = Vec::new();
 
-    for i in window_start..window_end {
-        if i < total_session_rows {
-            let session = &cache.sessions[i];
+    // Recompute bests/totals for the filtered subset so highlighting and totals stay accurate.
+    let mut best_cost_i: Option<usize> = None;
+    let mut best_total_tokens_i: Option<usize> = None;
+    let mut total_cost = 0.0;
+    let mut total_input_tokens = 0u64;
+    let mut total_output_tokens = 0u64;
+    let mut total_cached_tokens = 0u64;
+    let mut total_tool_calls = 0u64;
+    let mut all_models = std::collections::HashSet::new();
 
+    for (idx, session) in filtered_sessions.iter().enumerate() {
+        if best_cost_i
+            .map(|best_idx| session.stats.cost > filtered_sessions[best_idx].stats.cost)
+            .unwrap_or(true)
+        {
+            best_cost_i = Some(idx);
+        }
+
+        let total_tokens =
+            session.stats.input_tokens + session.stats.output_tokens + session.stats.cached_tokens;
+        if best_total_tokens_i
+            .map(|best_idx| {
+                total_tokens
+                    > filtered_sessions[best_idx].stats.input_tokens
+                        + filtered_sessions[best_idx].stats.output_tokens
+                        + filtered_sessions[best_idx].stats.cached_tokens
+            })
+            .unwrap_or(true)
+        {
+            best_total_tokens_i = Some(idx);
+        }
+
+        total_cost += session.stats.cost;
+        total_input_tokens += session.stats.input_tokens;
+        total_output_tokens += session.stats.output_tokens;
+        total_cached_tokens += session.stats.cached_tokens;
+        total_tool_calls += session.stats.tool_calls as u64;
+
+        for model in &session.models {
+            all_models.insert(model.clone());
+        }
+    }
+
+    let mut all_models_vec = all_models.into_iter().collect::<Vec<_>>();
+    all_models_vec.sort();
+    let all_models_text = all_models_vec.join(", ");
+
+    for (i, session) in filtered_sessions
+        .iter()
+        .enumerate()
+        .take(window_end)
+        .skip(window_start)
+    {
+        if i < total_session_rows {
             let session_display_name = session
                 .session_name
                 .clone()
@@ -1439,7 +1699,7 @@ fn draw_session_stats_table(
                 Style::default().fg(Color::Cyan),
             ));
 
-            let cost_cell = if cache.best_cost_i == Some(i) {
+            let cost_cell = if best_cost_i == Some(i) {
                 Line::from(Span::styled(
                     format!("${:.2}", session.stats.cost),
                     Style::default().fg(Color::Red),
@@ -1468,7 +1728,7 @@ fn draw_session_stats_table(
                 + session.stats.output_tokens
                 + session.stats.cached_tokens;
 
-            let total_cell = if cache.best_total_tokens_i == Some(i) {
+            let total_cell = if best_total_tokens_i == Some(i) {
                 Line::from(Span::styled(
                     format_number(total_tokens, format_options),
                     Style::default().fg(Color::Green),
@@ -1565,41 +1825,39 @@ fn draw_session_stats_table(
                 Line::from(Span::raw("")),
                 Line::from(Span::raw("")),
                 Line::from(Span::styled(
-                    format!("${:.2}", cache.total_cost),
+                    format!("${total_cost:.2}"),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
-                    format_number(cache.total_input_tokens, format_options),
+                    format_number(total_input_tokens, format_options),
                     Style::default().add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
-                    format_number(cache.total_output_tokens, format_options),
+                    format_number(total_output_tokens, format_options),
                     Style::default().add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
                     format_number(
-                        cache.total_input_tokens
-                            + cache.total_output_tokens
-                            + cache.total_cached_tokens,
+                        total_input_tokens + total_output_tokens + total_cached_tokens,
                         format_options,
                     ),
                     Style::default().add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
-                    format_number(cache.total_tool_calls, format_options),
+                    format_number(total_tool_calls, format_options),
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
-                    cache.all_models_text.clone(),
+                    all_models_text.clone(),
                     Style::default().add_modifier(Modifier::DIM),
                 )),
             ]);
@@ -1801,6 +2059,19 @@ fn update_window_offsets(window_offsets: &mut Vec<usize>, filtered_count: &usize
             window_offsets.push(old[i]);
         } else {
             window_offsets.push(0);
+        }
+    }
+}
+
+fn update_day_filters(filters: &mut Vec<Option<String>>, filtered_count: &usize) {
+    let old = filters.clone();
+    filters.clear();
+
+    for i in 0..*filtered_count {
+        if i < old.len() {
+            filters.push(old[i].clone());
+        } else {
+            filters.push(None);
         }
     }
 }
