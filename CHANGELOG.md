@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2025-11-20
+
+- Add support for estimated pricing; add GPT-5.1-Codex-Mini and (estimated) GPT-5.1-Codex-Max (#39) - @mike1858
+- Add support for searching across days (#37) - @mike1858
+- Allow `content` to be an array of content blocks or a string in CC analyzer (#38) - @mike1858
+- Greatly improve performance (#36) - @mike1858
+- Various fixes and improvments to Splitrail Cloud - @mike1858
+
 ## [2.1.0] - 2025-11-19
 
 - Add support for Copilot - @mcowger
