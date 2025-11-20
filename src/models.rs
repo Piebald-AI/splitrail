@@ -58,6 +58,8 @@ pub struct ModelInfo {
     pub pricing: PricingStructure,
     /// Caching support and pricing
     pub caching: CachingSupport,
+    /// Whether pricing is estimated (not officially published by provider)
+    pub is_estimated: bool,
 }
 
 static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
@@ -70,6 +72,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.275,
         },
+        is_estimated: false,
     },
     "o3" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -79,6 +82,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.5,
         },
+        is_estimated: false,
     },
     "o3-pro" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -86,6 +90,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             output_per_1m: 80.0,
         },
         caching: CachingSupport::None,
+        is_estimated: false,
     },
     "o3-mini" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -95,6 +100,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.55,
         },
+        is_estimated: false,
     },
     "o1" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -104,6 +110,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 7.5,
         },
+        is_estimated: false,
     },
     "o1-preview" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -113,6 +120,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 7.5,
         },
+        is_estimated: false,
     },
     "o1-mini" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -122,6 +130,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.55,
         },
+        is_estimated: false,
     },
     "o1-pro" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -129,6 +138,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             output_per_1m: 600.0,
         },
         caching: CachingSupport::None,
+        is_estimated: false,
     },
     "gpt-4.1" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -138,6 +148,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.5,
         },
+        is_estimated: false,
     },
     "gpt-4o" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -147,6 +158,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 1.25,
         },
+        is_estimated: false,
     },
     "gpt-4o-2024-05-13" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -154,6 +166,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             output_per_1m: 10.0,
         },
         caching: CachingSupport::None,
+        is_estimated: false,
     },
     "gpt-4.1-mini" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -163,6 +176,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.1,
         },
+        is_estimated: false,
     },
     "gpt-4.1-nano" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -172,6 +186,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.025,
         },
+        is_estimated: false,
     },
     "gpt-4o-mini" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -181,6 +196,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.075,
         },
+        is_estimated: false,
     },
     "codex-mini-latest" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -190,6 +206,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.375,
         },
+        is_estimated: false,
     },
     "gpt-4-turbo" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -197,6 +214,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             output_per_1m: 30.0,
         },
         caching: CachingSupport::None,
+        is_estimated: false,
     },
     "gpt-5" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -206,6 +224,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.125,
         },
+        is_estimated: false,
     },
     "gpt-5.1" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -215,6 +234,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.125,
         },
+        is_estimated: false,
     },
     "gpt-5-mini" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -224,6 +244,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.025,
         },
+        is_estimated: false,
     },
     "gpt-5-nano" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -233,6 +254,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.005,
         },
+        is_estimated: false,
     },
     "gpt-5-codex-mini" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -242,6 +264,38 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.025,
         },
+        is_estimated: false,
+    },
+    // GPT-5.1 Codex models (estimated pricing - API not yet published)
+    "gpt-5.1-codex" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.25,
+            output_per_1m: 10.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.125,
+        },
+        is_estimated: false,
+    },
+    "gpt-5.1-codex-mini" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.25,
+            output_per_1m: 2.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.025,
+        },
+        is_estimated: false,
+    },
+    "gpt-5.1-codex-max" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 2.5,
+            output_per_1m: 20.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.25,
+        },
+        is_estimated: true,
     },
 
     // Anthropic Models
@@ -254,6 +308,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 18.75,
             cache_read_per_1m: 1.5,
         },
+        is_estimated: false,
     },
     "claude-opus-4" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -264,6 +319,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 18.75,
             cache_read_per_1m: 1.5,
         },
+        is_estimated: false,
     },
     "claude-sonnet-4" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -274,6 +330,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 3.75,
             cache_read_per_1m: 0.3,
         },
+        is_estimated: false,
     },
     "claude-sonnet-4-5" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -284,6 +341,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 3.75,
             cache_read_per_1m: 0.3,
         },
+        is_estimated: false,
     },
     "claude-3-7-sonnet" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -294,6 +352,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 3.75,
             cache_read_per_1m: 0.3,
         },
+        is_estimated: false,
     },
     "claude-3-5-sonnet" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -304,6 +363,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 3.75,
             cache_read_per_1m: 0.3,
         },
+        is_estimated: false,
     },
     "claude-3-5-haiku" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -314,6 +374,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 1.0,
             cache_read_per_1m: 0.08,
         },
+        is_estimated: false,
     },
     "claude-haiku-4-5" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -324,6 +385,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 1.25,
             cache_read_per_1m: 0.10,
         },
+        is_estimated: false,
     },
     "claude-3-opus" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -334,6 +396,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 18.75,
             cache_read_per_1m: 1.5,
         },
+        is_estimated: false,
     },
     "claude-3-haiku" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -344,6 +407,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             cache_write_per_1m: 0.3,
             cache_read_per_1m: 0.03,
         },
+        is_estimated: false,
     },
 
     // Google Models
@@ -363,6 +427,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             ],
         },
         caching: CachingSupport::None,
+        is_estimated: false,
     },
     "gemini-2.5-pro" => ModelInfo {
         pricing: PricingStructure::Tiered {
@@ -391,6 +456,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                 },
             ],
         },
+        is_estimated: false,
     },
     "gemini-2.5-flash" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -405,6 +471,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                 },
             ],
         },
+        is_estimated: false,
     },
     "gemini-2.5-flash-lite" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -419,6 +486,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                 },
             ],
         },
+        is_estimated: false,
     },
     "gemini-2.0-pro-exp-02-05" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -433,6 +501,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                 },
             ],
         },
+        is_estimated: false,
     },
     "gemini-2.0-flash" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -447,6 +516,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                 },
             ],
         },
+        is_estimated: false,
     },
     "gemini-2.0-flash-lite" => ModelInfo {
         pricing: PricingStructure::Flat {
@@ -454,6 +524,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             output_per_1m: 0.3,
         },
         caching: CachingSupport::None,
+        is_estimated: false,
     },
     "gemini-1.5-flash" => ModelInfo {
         pricing: PricingStructure::Tiered {
@@ -482,6 +553,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                 },
             ],
         },
+        is_estimated: false,
     },
     "gemini-1.5-flash-8b" => ModelInfo {
         pricing: PricingStructure::Tiered {
@@ -510,6 +582,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                 },
             ],
         },
+        is_estimated: false,
     },
     "gemini-1.5-pro" => ModelInfo {
         pricing: PricingStructure::Tiered {
@@ -538,6 +611,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                 },
             ],
         },
+        is_estimated: false,
     },
 };
 
@@ -584,6 +658,9 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5-nano" => "gpt-5-nano",
     "gpt-5-nano-2025-08-07" => "gpt-5-nano",
     "gpt-5-codex-mini" => "gpt-5-codex-mini",
+    "gpt-5.1-codex" => "gpt-5.1-codex",
+    "gpt-5.1-codex-mini" => "gpt-5.1-codex-mini",
+    "gpt-5.1-codex-max" => "gpt-5.1-codex-max",
 
     // Anthropic aliases
     "claude-opus-4" => "claude-opus-4",
@@ -665,6 +742,13 @@ pub fn get_model_info(model_name: &str) -> Option<&ModelInfo> {
     }
 
     None
+}
+
+/// Check if a model's pricing is estimated (not officially published)
+pub fn is_model_estimated(model_name: &str) -> bool {
+    get_model_info(model_name)
+        .map(|info| info.is_estimated)
+        .unwrap_or(false)
 }
 
 /// Calculate cost for input tokens using the model's pricing structure

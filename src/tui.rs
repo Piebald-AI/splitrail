@@ -1,3 +1,4 @@
+use crate::models::is_model_estimated;
 use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats, Stats};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
 use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
@@ -15,7 +16,6 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::{Write, stdout};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -870,7 +870,7 @@ fn draw_ui(
             Constraint::Length(1),                             // Tabs
             Constraint::Min(3),                                // Main table
             Constraint::Length(9),                             // Summary stats
-            Constraint::Length(if has_error { 3 } else { 1 }), // Help text
+            Constraint::Length(if has_error { 4 } else { 2 }), // Help text
         ])
         .split(frame.area())
     } else {
@@ -921,9 +921,9 @@ fn draw_ui(
             && let Some(current_table_state) = ui_state.table_states.get_mut(ui_state.selected_tab)
         {
             // Main table
-            match ui_state.stats_view_mode {
+            let has_estimated_models = match ui_state.stats_view_mode {
                 StatsViewMode::Daily => {
-                    draw_daily_stats_table(
+                    let (_, has_estimated) = draw_daily_stats_table(
                         frame,
                         chunks[2],
                         current_stats,
@@ -935,6 +935,7 @@ fn draw_ui(
                             ""
                         },
                     );
+                    has_estimated
                 }
                 StatsViewMode::Session => {
                     if let Some(cache) = session_table_cache.get(ui_state.selected_tab) {
@@ -948,95 +949,96 @@ fn draw_ui(
                             ui_state.session_day_filters[ui_state.selected_tab].as_ref(),
                         );
                     }
+                    false // Session view doesn't track estimated models yet
                 }
-            }
+            };
 
             // Summary stats - pass all filtered stats for aggregation
             draw_summary_stats(frame, chunks[3], filtered_stats, format_options);
-        }
 
-        // Help text for data view with upload status
-        let help_area = chunks[4];
+            // Help text for data view with upload status
+            let help_area = chunks[4];
 
-        // Split help area horizontally: help text on left, upload status on right
-        let help_chunks = Layout::horizontal([
-            Constraint::Min(0),
-            Constraint::Min(20), // Allow flexible space for error messages
-        ])
-        .split(help_area);
+            // Split help area horizontally: help text on left, upload status on right
+            let help_chunks = Layout::horizontal([
+                Constraint::Fill(1),    // Help text takes remaining space
+                Constraint::Length(30), // Fixed space for upload status
+            ])
+            .split(help_area);
 
-        let help_text: Cow<'_, str> = if ui_state.date_jump_active {
-            Cow::Owned(format!(
-                "Date jump (YYYY-MM-DD): {}",
-                ui_state.date_jump_buffer
-            ))
-        } else {
-            Cow::Borrowed(match ui_state.stats_view_mode {
+            let base_help_text = match ui_state.stats_view_mode {
                 StatsViewMode::Daily => {
-                    "Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, / for quick date jump, Enter to drill into a day, Ctrl+T for per-session view, q/Esc to quit"
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • / for date jump • Enter to drill into day • Ctrl+T for per-session view • q/Esc to quit"
                 }
                 StatsViewMode::Session => {
-                    "Use ←/→ or h/l to switch tabs, ↑/↓ or j/k to navigate, Ctrl+T for per-day view, q/Esc to quit"
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • Ctrl+T for per-day view • q/Esc to quit"
                 }
-            })
-        };
-        let help = Paragraph::new(help_text).style(Style::default().add_modifier(Modifier::DIM));
-        frame.render_widget(help, help_chunks[0]);
-
-        // Upload status in bottom-right
-        if let Ok(status) = upload_status.lock() {
-            let (status_text, status_style) = match &*status {
-                UploadStatus::None => (String::new(), Style::default()),
-                UploadStatus::Uploading {
-                    current,
-                    total,
-                    dots,
-                } => {
-                    // Always show animated dots - ignore is_counting
-                    let dots_str = match dots % 4 {
-                        0 => "   ",
-                        1 => ".  ",
-                        2 => ".. ",
-                        _ => "...",
-                    };
-                    (
-                        format!(
-                            "Uploading {}/{} messages{}",
-                            format_number(*current as u64, format_options),
-                            format_number(*total as u64, format_options),
-                            dots_str
-                        ),
-                        Style::default().add_modifier(Modifier::DIM),
-                    )
-                }
-                UploadStatus::Uploaded => (
-                    "✓ Uploaded successfully".to_string(),
-                    Style::default().fg(Color::Green),
-                ),
-                UploadStatus::Failed(error) => {
-                    // Show full error message - let the widget handle wrapping/display
-                    (format!("✕ {error}"), Style::default().fg(Color::Red))
-                }
-                UploadStatus::MissingApiToken => (
-                    "No API token for uploading".to_string(),
-                    Style::default().fg(Color::Yellow),
-                ),
-                UploadStatus::MissingServerUrl => (
-                    "No server URL for uploading".to_string(),
-                    Style::default().fg(Color::Yellow),
-                ),
-                UploadStatus::MissingConfig => (
-                    "Upload config incomplete".to_string(),
-                    Style::default().fg(Color::Yellow),
-                ),
             };
 
-            if !status_text.is_empty() {
-                let status_widget = Paragraph::new(status_text)
-                    .style(status_style)
-                    .alignment(ratatui::layout::Alignment::Right)
-                    .wrap(ratatui::widgets::Wrap { trim: true });
-                frame.render_widget(status_widget, help_chunks[1]);
+            let help_text = if has_estimated_models {
+                format!("{} • * = estimated pricing", base_help_text)
+            } else {
+                base_help_text.to_string()
+            };
+
+            let help = Paragraph::new(help_text)
+                .style(Style::default().add_modifier(Modifier::DIM))
+                .wrap(ratatui::widgets::Wrap { trim: true });
+            frame.render_widget(help, help_chunks[0]);
+
+            // Upload status on right side
+            if let Ok(status) = upload_status.lock() {
+                let (status_text, status_style) = match &*status {
+                    UploadStatus::None => (String::new(), Style::default()),
+                    UploadStatus::Uploading {
+                        current,
+                        total,
+                        dots,
+                    } => {
+                        let dots_str = match dots % 4 {
+                            0 => "   ",
+                            1 => ".  ",
+                            2 => ".. ",
+                            _ => "...",
+                        };
+                        (
+                            format!(
+                                "Uploading {}/{} messages{}",
+                                format_number(*current as u64, format_options),
+                                format_number(*total as u64, format_options),
+                                dots_str
+                            ),
+                            Style::default().add_modifier(Modifier::DIM),
+                        )
+                    }
+                    UploadStatus::Uploaded => (
+                        "✓ Uploaded successfully".to_string(),
+                        Style::default().fg(Color::Green),
+                    ),
+                    UploadStatus::Failed(error) => {
+                        (format!("✕ {error}"), Style::default().fg(Color::Red))
+                    }
+                    UploadStatus::MissingApiToken => (
+                        "No API token for uploading".to_string(),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    UploadStatus::MissingServerUrl => (
+                        "No server URL for uploading".to_string(),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    UploadStatus::MissingConfig => (
+                        "Upload config incomplete".to_string(),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                };
+
+                if !status_text.is_empty() {
+                    let status_widget = Paragraph::new(status_text)
+                        .style(status_style)
+                        .alignment(ratatui::layout::Alignment::Right)
+                        .wrap(ratatui::widgets::Wrap { trim: true });
+                    frame.render_widget(status_widget, help_chunks[1]);
+                }
             }
         }
     } else {
@@ -1061,7 +1063,7 @@ fn draw_daily_stats_table(
     format_options: &NumberFormatOptions,
     table_state: &mut TableState,
     date_filter: &str,
-) -> usize {
+) -> (usize, bool) {
     let header = Row::new(vec![
         Cell::new(""),
         Cell::new("Date"),
@@ -1150,7 +1152,17 @@ fn draw_daily_stats_table(
         total_tool_calls += day_stats.stats.tool_calls;
         total_conversations += day_stats.conversations;
 
-        let mut models_vec = day_stats.models.keys().cloned().collect::<Vec<String>>();
+        let mut models_vec: Vec<String> = day_stats
+            .models
+            .keys()
+            .map(|m| {
+                if is_model_estimated(m) {
+                    format!("{}*", m)
+                } else {
+                    m.clone()
+                }
+            })
+            .collect();
         models_vec.sort();
         let models = models_vec.join(", ");
 
@@ -1357,15 +1369,25 @@ fn draw_daily_stats_table(
 
     // Collect all unique models for the totals row
     let mut all_models = std::collections::HashSet::new();
+    let mut has_estimated_models = false;
     for day_stats in stats.daily_stats.values() {
         for model in day_stats.models.keys() {
             all_models.insert(model);
+            if is_model_estimated(model) {
+                has_estimated_models = true;
+            }
         }
     }
-    let mut all_models_vec = all_models
+    let mut all_models_vec: Vec<String> = all_models
         .iter()
-        .map(|k| k.to_string())
-        .collect::<Vec<String>>();
+        .map(|k| {
+            if is_model_estimated(k) {
+                format!("{}*", k)
+            } else {
+                k.to_string()
+            }
+        })
+        .collect();
     all_models_vec.sort();
     let all_models_text = all_models_vec.join(", ");
 
@@ -1542,8 +1564,8 @@ fn draw_daily_stats_table(
 
     frame.render_stateful_widget(table, area, table_state);
 
-    // Return the total number of rows in the table
-    total_rows
+    // Return the total number of rows in the table and whether there are estimated models
+    (total_rows, has_estimated_models)
 }
 
 fn draw_session_stats_table(
