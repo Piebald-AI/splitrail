@@ -961,7 +961,7 @@ fn draw_ui(
 
             // Split help area horizontally: help text on left, upload status on right
             let help_chunks = Layout::horizontal([
-                Constraint::Fill(1), // Help text takes remaining space
+                Constraint::Fill(1),    // Help text takes remaining space
                 Constraint::Length(30), // Fixed space for upload status
             ])
             .split(help_area);
