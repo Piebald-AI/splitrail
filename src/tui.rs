@@ -159,10 +159,7 @@ fn aggregate_sessions_for_all_tools(
 fn aggregate_sessions_for_all_tools_owned(
     stats: &[AgenticCodingToolStats],
 ) -> Vec<Vec<SessionAggregate>> {
-    stats
-        .iter()
-        .map(|stats| aggregate_sessions_for_tool(stats))
-        .collect()
+    stats.iter().map(aggregate_sessions_for_tool).collect()
 }
 #[derive(Debug, Clone)]
 struct SessionTableCache {
@@ -190,16 +187,14 @@ fn build_session_table_cache(sessions: Vec<SessionAggregate>) -> SessionTableCac
     let mut total_tool_calls = 0u64;
 
     for (i, session) in sessions.iter().enumerate() {
-        if best_cost.map_or(true, |best| session.stats.cost > best) {
+        if best_cost.is_none_or(|best| session.stats.cost > best) {
             best_cost = Some(session.stats.cost);
             best_cost_i = Some(i);
         }
 
         let total_tokens =
             session.stats.input_tokens + session.stats.output_tokens + session.stats.cached_tokens;
-        if best_total_tokens
-            .map_or(true, |best| total_tokens > best)
-        {
+        if best_total_tokens.is_none_or(|best| total_tokens > best) {
             best_total_tokens = Some(total_tokens);
             best_total_tokens_i = Some(i);
         }
@@ -330,10 +325,11 @@ async fn run_app(
         .cloned()
         .map(build_session_table_cache)
         .collect();
+    type SessionRecomputeHandle =
+        tokio::task::JoinHandle<(u64, Vec<Vec<SessionAggregate>>, Vec<SessionTableCache>)>;
+
     let mut recompute_version: u64 = 0;
-    let mut pending_session_recompute:
-        Option<tokio::task::JoinHandle<(u64, Vec<Vec<SessionAggregate>>, Vec<SessionTableCache>)>> =
-        None;
+    let mut pending_session_recompute: Option<SessionRecomputeHandle> = None;
 
     loop {
         // Check for stats updates
@@ -421,17 +417,17 @@ async fn run_app(
             needs_redraw = false;
         }
 
-        if let Some(handle) = pending_session_recompute.as_mut() {
-            if handle.is_finished() {
-                if let Ok((version, new_sessions, new_cache)) = handle.await {
-                    if version == recompute_version {
-                        session_stats_per_tool = new_sessions;
-                        session_table_cache = new_cache;
-                        needs_redraw = true;
-                    }
-                }
-                pending_session_recompute = None;
+        if let Some(handle) = pending_session_recompute.as_mut()
+            && handle.is_finished()
+        {
+            if let Ok((version, new_sessions, new_cache)) = handle.await
+                && version == recompute_version
+            {
+                session_stats_per_tool = new_sessions;
+                session_table_cache = new_cache;
+                needs_redraw = true;
             }
+            pending_session_recompute = None;
         }
 
         // Use a timeout to allow periodic refreshes for upload status updates
@@ -1387,10 +1383,7 @@ fn draw_session_stats_table(
         .min(total_rows.saturating_sub(1));
 
     // Estimate how many rows fit: header takes 1 row, keep the rest for body.
-    let max_body_rows = area
-        .height
-        .saturating_sub(1)
-        .max(1) as usize;
+    let max_body_rows = area.height.saturating_sub(1).max(1) as usize;
 
     // Render only a window that keeps the selection visible; maintain offset unless we hit edges.
     let mut window_start = if total_rows > 0 {
