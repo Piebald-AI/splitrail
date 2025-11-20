@@ -284,7 +284,8 @@ struct ClaudeCodeMessageEntry {
 struct ClaudeCodeQueueOperationEntry {
     operation: String, // "enqueue" or "dequeue"
     timestamp: DateTime<Utc>,
-    content: Option<String>,
+    #[allow(dead_code)]
+    content: Option<simd_json::OwnedValue>, // Can be array of content blocks or string
     session_id: String,
 }
 
