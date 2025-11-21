@@ -17,7 +17,7 @@ pub async fn upload_message_stats<F>(
 where
     F: FnMut(usize, usize),
 {
-    const CHUNK_SIZE: usize = 1000;
+    const CHUNK_SIZE: usize = 3000;
     if messages.is_empty() {
         return Ok(());
     }
