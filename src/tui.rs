@@ -1642,7 +1642,12 @@ fn draw_session_stats_table(
 
     // Recompute bests/totals for the filtered subset so highlighting and totals stay accurate.
     let mut best_cost_i: Option<usize> = None;
+    let mut best_input_tokens_i: Option<usize> = None;
+    let mut best_output_tokens_i: Option<usize> = None;
+    let mut best_reasoning_tokens_i: Option<usize> = None;
     let mut best_total_tokens_i: Option<usize> = None;
+    let mut best_tool_calls_i: Option<usize> = None;
+    
     let mut total_cost = 0.0;
     let mut total_input_tokens = 0u64;
     let mut total_output_tokens = 0u64;
@@ -1659,6 +1664,27 @@ fn draw_session_stats_table(
             best_cost_i = Some(idx);
         }
 
+        if best_input_tokens_i
+            .map(|best_idx| session.stats.input_tokens > filtered_sessions[best_idx].stats.input_tokens)
+            .unwrap_or(true)
+        {
+            best_input_tokens_i = Some(idx);
+        }
+
+        if best_output_tokens_i
+            .map(|best_idx| session.stats.output_tokens > filtered_sessions[best_idx].stats.output_tokens)
+            .unwrap_or(true)
+        {
+            best_output_tokens_i = Some(idx);
+        }
+
+        if best_reasoning_tokens_i
+            .map(|best_idx| session.stats.reasoning_tokens > filtered_sessions[best_idx].stats.reasoning_tokens)
+            .unwrap_or(true)
+        {
+            best_reasoning_tokens_i = Some(idx);
+        }
+
         let total_tokens =
             session.stats.input_tokens + session.stats.output_tokens + session.stats.cached_tokens;
         if best_total_tokens_i
@@ -1671,6 +1697,13 @@ fn draw_session_stats_table(
             .unwrap_or(true)
         {
             best_total_tokens_i = Some(idx);
+        }
+
+        if best_tool_calls_i
+            .map(|best_idx| session.stats.tool_calls > filtered_sessions[best_idx].stats.tool_calls)
+            .unwrap_or(true)
+        {
+            best_tool_calls_i = Some(idx);
         }
 
         total_cost += session.stats.cost;
@@ -1737,22 +1770,43 @@ fn draw_session_stats_table(
             }
             .right_aligned();
 
-            let input_cell = Line::from(Span::raw(format_number(
-                session.stats.input_tokens,
-                format_options,
-            )))
+            let input_cell = if best_input_tokens_i == Some(i) {
+                Line::from(Span::styled(
+                    format_number(session.stats.input_tokens, format_options),
+                    Style::default().fg(Color::Red),
+                ))
+            } else {
+                Line::from(Span::raw(format_number(
+                    session.stats.input_tokens,
+                    format_options,
+                )))
+            }
             .right_aligned();
 
-            let output_cell = Line::from(Span::raw(format_number(
-                session.stats.output_tokens,
-                format_options,
-            )))
+            let output_cell = if best_output_tokens_i == Some(i) {
+                Line::from(Span::styled(
+                    format_number(session.stats.output_tokens, format_options),
+                    Style::default().fg(Color::Red),
+                ))
+            } else {
+                Line::from(Span::raw(format_number(
+                    session.stats.output_tokens,
+                    format_options,
+                )))
+            }
             .right_aligned();
 
-            let reasoning_cell = Line::from(Span::raw(format_number(
-                session.stats.reasoning_tokens,
-                format_options,
-            )))
+            let reasoning_cell = if best_reasoning_tokens_i == Some(i) {
+                Line::from(Span::styled(
+                    format_number(session.stats.reasoning_tokens, format_options),
+                    Style::default().fg(Color::Red),
+                ))
+            } else {
+                Line::from(Span::raw(format_number(
+                    session.stats.reasoning_tokens,
+                    format_options,
+                )))
+            }
             .right_aligned();
 
             let total_tokens = session.stats.input_tokens
@@ -1762,17 +1816,24 @@ fn draw_session_stats_table(
             let total_cell = if best_total_tokens_i == Some(i) {
                 Line::from(Span::styled(
                     format_number(total_tokens, format_options),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(Color::Red),
                 ))
             } else {
                 Line::from(Span::raw(format_number(total_tokens, format_options)))
             }
             .right_aligned();
 
-            let tools_cell = Line::from(Span::styled(
-                format_number(session.stats.tool_calls as u64, format_options),
-                Style::default().add_modifier(Modifier::DIM),
-            ))
+            let tools_cell = if best_tool_calls_i == Some(i) {
+                 Line::from(Span::styled(
+                    format_number(session.stats.tool_calls as u64, format_options),
+                    Style::default().fg(Color::Red),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format_number(session.stats.tool_calls as u64, format_options),
+                    Style::default().add_modifier(Modifier::DIM),
+                ))
+            }
             .right_aligned();
 
             // Per-session models column: sorted, deduplicated list of models used in this session
