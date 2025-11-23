@@ -63,7 +63,6 @@ struct UploadArgs {
     force_analyzer: Option<String>,
 }
 
-
 #[derive(Args)]
 struct ConfigArgs {
     #[command(subcommand)]
@@ -110,13 +109,15 @@ async fn main() {
             // No subcommand - run default behavior
             run_default(format_options).await;
         }
-        Some(Commands::Upload(args)) => match run_upload(args).await.context("Failed to run upload") {
-            Ok(_) => {}
-            Err(e) => {
-                tui::show_upload_error(&format!("{e:#}"));
-                std::process::exit(1);
+        Some(Commands::Upload(args)) => {
+            match run_upload(args).await.context("Failed to run upload") {
+                Ok(_) => {}
+                Err(e) => {
+                    tui::show_upload_error(&format!("{e:#}"));
+                    std::process::exit(1);
+                }
             }
-        },
+        }
         Some(Commands::Config(config_args)) => {
             handle_config_subcommand(config_args).await;
         }
@@ -257,8 +258,11 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
                 messages
             } else {
                 // Default behavior: Get all messages newer than the last upload date
-                let all_messages: Vec<_> =
-                    stats.analyzer_stats.into_iter().flat_map(|s| s.messages).collect();
+                let all_messages: Vec<_> = stats
+                    .analyzer_stats
+                    .into_iter()
+                    .flat_map(|s| s.messages)
+                    .collect();
                 utils::get_messages_later_than(config.upload.last_date_uploaded, all_messages)
                     .await
                     .context("Failed to get messages later than last saved date")?
