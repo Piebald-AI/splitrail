@@ -251,6 +251,7 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                 // Update stats with token information
                 stats.input_tokens = tokens.input;
                 stats.output_tokens = tokens.output;
+                stats.reasoning_tokens = tokens.thoughts;
                 stats.cache_creation_tokens = 0;
                 stats.cache_read_tokens = 0;
                 stats.cached_tokens = tokens.cached;

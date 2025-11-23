@@ -204,12 +204,20 @@ fn aggregate_sessions_for_tool(stats: &AgenticCodingToolStats) -> Vec<SessionAgg
                 stats: Stats::default(),
                 models: Vec::new(),
                 session_name: None,
-                day_key: msg.date.format("%Y-%m-%d").to_string(),
+                day_key: msg
+                    .date
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d")
+                    .to_string(),
             });
 
         if msg.date < entry.first_timestamp {
             entry.first_timestamp = msg.date;
-            entry.day_key = msg.date.format("%Y-%m-%d").to_string();
+            entry.day_key = msg
+                .date
+                .with_timezone(&Local)
+                .format("%Y-%m-%d")
+                .to_string();
         }
 
         // Only aggregate stats for assistant/model messages and track models
@@ -351,7 +359,7 @@ async fn run_app(
         .filter(|stats| has_data(stats))
         .collect();
 
-    let mut session_stats_per_tool = aggregate_sessions_for_all_tools(&filtered_stats);
+    let session_stats_per_tool = aggregate_sessions_for_all_tools(&filtered_stats);
     let mut session_table_cache: Vec<SessionTableCache> = session_stats_per_tool
         .iter()
         .cloned()
@@ -456,10 +464,9 @@ async fn run_app(
         if let Some(handle) = pending_session_recompute.as_mut()
             && handle.is_finished()
         {
-            if let Ok((version, new_sessions, new_cache)) = handle.await
+            if let Ok((version, _, new_cache)) = handle.await
                 && version == recompute_version
             {
-                session_stats_per_tool = new_sessions;
                 session_table_cache = new_cache;
                 needs_redraw = true;
             }
@@ -1585,6 +1592,7 @@ fn draw_session_stats_table(
         Cell::new(Text::from("Cost").right_aligned()),
         Cell::new(Text::from("Inp Tks").right_aligned()),
         Cell::new(Text::from("Outp Tks").right_aligned()),
+        Cell::new(Text::from("Reason Tks").right_aligned()),
         Cell::new(Text::from("Total Tks").right_aligned()),
         Cell::new(Text::from("Tools").right_aligned()),
         Cell::new("Models"),
@@ -1641,11 +1649,17 @@ fn draw_session_stats_table(
 
     // Recompute bests/totals for the filtered subset so highlighting and totals stay accurate.
     let mut best_cost_i: Option<usize> = None;
+    let mut best_input_tokens_i: Option<usize> = None;
+    let mut best_output_tokens_i: Option<usize> = None;
+    let mut best_reasoning_tokens_i: Option<usize> = None;
     let mut best_total_tokens_i: Option<usize> = None;
+    let mut best_tool_calls_i: Option<usize> = None;
+
     let mut total_cost = 0.0;
     let mut total_input_tokens = 0u64;
     let mut total_output_tokens = 0u64;
     let mut total_cached_tokens = 0u64;
+    let mut total_reasoning_tokens = 0u64;
     let mut total_tool_calls = 0u64;
     let mut all_models = std::collections::HashSet::new();
 
@@ -1655,6 +1669,33 @@ fn draw_session_stats_table(
             .unwrap_or(true)
         {
             best_cost_i = Some(idx);
+        }
+
+        if best_input_tokens_i
+            .map(|best_idx| {
+                session.stats.input_tokens > filtered_sessions[best_idx].stats.input_tokens
+            })
+            .unwrap_or(true)
+        {
+            best_input_tokens_i = Some(idx);
+        }
+
+        if best_output_tokens_i
+            .map(|best_idx| {
+                session.stats.output_tokens > filtered_sessions[best_idx].stats.output_tokens
+            })
+            .unwrap_or(true)
+        {
+            best_output_tokens_i = Some(idx);
+        }
+
+        if best_reasoning_tokens_i
+            .map(|best_idx| {
+                session.stats.reasoning_tokens > filtered_sessions[best_idx].stats.reasoning_tokens
+            })
+            .unwrap_or(true)
+        {
+            best_reasoning_tokens_i = Some(idx);
         }
 
         let total_tokens =
@@ -1671,10 +1712,18 @@ fn draw_session_stats_table(
             best_total_tokens_i = Some(idx);
         }
 
+        if best_tool_calls_i
+            .map(|best_idx| session.stats.tool_calls > filtered_sessions[best_idx].stats.tool_calls)
+            .unwrap_or(true)
+        {
+            best_tool_calls_i = Some(idx);
+        }
+
         total_cost += session.stats.cost;
         total_input_tokens += session.stats.input_tokens;
         total_output_tokens += session.stats.output_tokens;
         total_cached_tokens += session.stats.cached_tokens;
+        total_reasoning_tokens += session.stats.reasoning_tokens;
         total_tool_calls += session.stats.tool_calls as u64;
 
         for model in &session.models {
@@ -1734,16 +1783,43 @@ fn draw_session_stats_table(
             }
             .right_aligned();
 
-            let input_cell = Line::from(Span::raw(format_number(
-                session.stats.input_tokens,
-                format_options,
-            )))
+            let input_cell = if best_input_tokens_i == Some(i) {
+                Line::from(Span::styled(
+                    format_number(session.stats.input_tokens, format_options),
+                    Style::default().fg(Color::Red),
+                ))
+            } else {
+                Line::from(Span::raw(format_number(
+                    session.stats.input_tokens,
+                    format_options,
+                )))
+            }
             .right_aligned();
 
-            let output_cell = Line::from(Span::raw(format_number(
-                session.stats.output_tokens,
-                format_options,
-            )))
+            let output_cell = if best_output_tokens_i == Some(i) {
+                Line::from(Span::styled(
+                    format_number(session.stats.output_tokens, format_options),
+                    Style::default().fg(Color::Red),
+                ))
+            } else {
+                Line::from(Span::raw(format_number(
+                    session.stats.output_tokens,
+                    format_options,
+                )))
+            }
+            .right_aligned();
+
+            let reasoning_cell = if best_reasoning_tokens_i == Some(i) {
+                Line::from(Span::styled(
+                    format_number(session.stats.reasoning_tokens, format_options),
+                    Style::default().fg(Color::Red),
+                ))
+            } else {
+                Line::from(Span::raw(format_number(
+                    session.stats.reasoning_tokens,
+                    format_options,
+                )))
+            }
             .right_aligned();
 
             let total_tokens = session.stats.input_tokens
@@ -1753,17 +1829,24 @@ fn draw_session_stats_table(
             let total_cell = if best_total_tokens_i == Some(i) {
                 Line::from(Span::styled(
                     format_number(total_tokens, format_options),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(Color::Red),
                 ))
             } else {
                 Line::from(Span::raw(format_number(total_tokens, format_options)))
             }
             .right_aligned();
 
-            let tools_cell = Line::from(Span::styled(
-                format_number(session.stats.tool_calls as u64, format_options),
-                Style::default().add_modifier(Modifier::DIM),
-            ))
+            let tools_cell = if best_tool_calls_i == Some(i) {
+                Line::from(Span::styled(
+                    format_number(session.stats.tool_calls as u64, format_options),
+                    Style::default().fg(Color::Red),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format_number(session.stats.tool_calls as u64, format_options),
+                    Style::default().add_modifier(Modifier::DIM),
+                ))
+            }
             .right_aligned();
 
             // Per-session models column: sorted, deduplicated list of models used in this session
@@ -1785,6 +1868,7 @@ fn draw_session_stats_table(
                 cost_cell,
                 input_cell,
                 output_cell,
+                reasoning_cell,
                 total_cell,
                 tools_cell,
                 models_cell,
@@ -1820,6 +1904,10 @@ fn draw_session_stats_table(
                 )),
                 Line::from(Span::styled(
                     "─────────",
+                    Style::default().add_modifier(Modifier::DIM),
+                )),
+                Line::from(Span::styled(
+                    "───────────",
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
@@ -1864,6 +1952,11 @@ fn draw_session_stats_table(
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
+                    format_number(total_reasoning_tokens, format_options),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))
+                .right_aligned(),
+                Line::from(Span::styled(
                     format_number(
                         total_input_tokens + total_output_tokens + total_cached_tokens,
                         format_options,
@@ -1900,6 +1993,7 @@ fn draw_session_stats_table(
             Constraint::Length(10), // Cost
             Constraint::Length(8),  // Input
             Constraint::Length(9),  // Output
+            Constraint::Length(11), // Reason Tks
             Constraint::Length(11), // Total tokens
             Constraint::Length(6),  // Tools
             Constraint::Min(10),    // Models
@@ -2165,4 +2259,58 @@ pub fn show_upload_error(error: &str) {
         Print(format!("✕ {error}\n")),
         ResetColor
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
+    };
+    use chrono::{TimeZone, Utc};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_aggregate_sessions_timezone_consistency() {
+        let date_utc = Utc.with_ymd_and_hms(2025, 11, 20, 2, 0, 0).unwrap();
+
+        let msg = ConversationMessage {
+            application: Application::GeminiCli,
+            date: date_utc,
+            project_hash: "hash".to_string(),
+            conversation_hash: "conv_hash".to_string(),
+            local_hash: None,
+            global_hash: "global_hash".to_string(),
+            model: Some("model".to_string()),
+            stats: Stats::default(),
+            role: MessageRole::Assistant,
+            uuid: None,
+            session_name: None,
+        };
+
+        let stats = AgenticCodingToolStats {
+            daily_stats: BTreeMap::new(),
+            num_conversations: 1,
+            messages: vec![msg.clone()],
+            analyzer_name: "Test".to_string(),
+        };
+
+        let sessions = aggregate_sessions_for_tool(&stats);
+        assert_eq!(sessions.len(), 1);
+
+        let session_day_key = &sessions[0].day_key;
+
+        let daily_stats_map = crate::utils::aggregate_by_date(&[msg]);
+
+        let local_date_str = date_utc
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+
+        assert!(daily_stats_map.contains_key(&local_date_str));
+        assert_eq!(
+            session_day_key, &local_date_str,
+            "Session day key should match Local date string"
+        );
+    }
 }
