@@ -351,7 +351,7 @@ async fn run_app(
         .filter(|stats| has_data(stats))
         .collect();
 
-    let mut session_stats_per_tool = aggregate_sessions_for_all_tools(&filtered_stats);
+    let session_stats_per_tool = aggregate_sessions_for_all_tools(&filtered_stats);
     let mut session_table_cache: Vec<SessionTableCache> = session_stats_per_tool
         .iter()
         .cloned()
@@ -456,10 +456,9 @@ async fn run_app(
         if let Some(handle) = pending_session_recompute.as_mut()
             && handle.is_finished()
         {
-            if let Ok((version, new_sessions, new_cache)) = handle.await
+            if let Ok((version, _, new_cache)) = handle.await
                 && version == recompute_version
             {
-                session_stats_per_tool = new_sessions;
                 session_table_cache = new_cache;
                 needs_redraw = true;
             }
