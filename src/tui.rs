@@ -1585,6 +1585,7 @@ fn draw_session_stats_table(
         Cell::new(Text::from("Cost").right_aligned()),
         Cell::new(Text::from("Inp Tks").right_aligned()),
         Cell::new(Text::from("Outp Tks").right_aligned()),
+        Cell::new(Text::from("Reason Tks").right_aligned()),
         Cell::new(Text::from("Total Tks").right_aligned()),
         Cell::new(Text::from("Tools").right_aligned()),
         Cell::new("Models"),
@@ -1646,6 +1647,7 @@ fn draw_session_stats_table(
     let mut total_input_tokens = 0u64;
     let mut total_output_tokens = 0u64;
     let mut total_cached_tokens = 0u64;
+    let mut total_reasoning_tokens = 0u64;
     let mut total_tool_calls = 0u64;
     let mut all_models = std::collections::HashSet::new();
 
@@ -1675,6 +1677,7 @@ fn draw_session_stats_table(
         total_input_tokens += session.stats.input_tokens;
         total_output_tokens += session.stats.output_tokens;
         total_cached_tokens += session.stats.cached_tokens;
+        total_reasoning_tokens += session.stats.reasoning_tokens;
         total_tool_calls += session.stats.tool_calls as u64;
 
         for model in &session.models {
@@ -1746,6 +1749,12 @@ fn draw_session_stats_table(
             )))
             .right_aligned();
 
+            let reasoning_cell = Line::from(Span::raw(format_number(
+                session.stats.reasoning_tokens,
+                format_options,
+            )))
+            .right_aligned();
+
             let total_tokens = session.stats.input_tokens
                 + session.stats.output_tokens
                 + session.stats.cached_tokens;
@@ -1785,6 +1794,7 @@ fn draw_session_stats_table(
                 cost_cell,
                 input_cell,
                 output_cell,
+                reasoning_cell,
                 total_cell,
                 tools_cell,
                 models_cell,
@@ -1820,6 +1830,10 @@ fn draw_session_stats_table(
                 )),
                 Line::from(Span::styled(
                     "─────────",
+                    Style::default().add_modifier(Modifier::DIM),
+                )),
+                Line::from(Span::styled(
+                    "───────────",
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
@@ -1864,6 +1878,11 @@ fn draw_session_stats_table(
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
+                    format_number(total_reasoning_tokens, format_options),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))
+                .right_aligned(),
+                Line::from(Span::styled(
                     format_number(
                         total_input_tokens + total_output_tokens + total_cached_tokens,
                         format_options,
@@ -1900,6 +1919,7 @@ fn draw_session_stats_table(
             Constraint::Length(10), // Cost
             Constraint::Length(8),  // Input
             Constraint::Length(9),  // Output
+            Constraint::Length(11), // Reason Tks
             Constraint::Length(11), // Total tokens
             Constraint::Length(6),  // Tools
             Constraint::Min(10),    // Models
