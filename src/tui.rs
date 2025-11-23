@@ -204,12 +204,12 @@ fn aggregate_sessions_for_tool(stats: &AgenticCodingToolStats) -> Vec<SessionAgg
                 stats: Stats::default(),
                 models: Vec::new(),
                 session_name: None,
-                day_key: msg.date.format("%Y-%m-%d").to_string(),
+                day_key: msg.date.with_timezone(&Local).format("%Y-%m-%d").to_string(),
             });
 
         if msg.date < entry.first_timestamp {
             entry.first_timestamp = msg.date;
-            entry.day_key = msg.date.format("%Y-%m-%d").to_string();
+            entry.day_key = msg.date.with_timezone(&Local).format("%Y-%m-%d").to_string();
         }
 
         // Only aggregate stats for assistant/model messages and track models
@@ -2165,4 +2165,50 @@ pub fn show_upload_error(error: &str) {
         Print(format!("✕ {error}\n")),
         ResetColor
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Application, ConversationMessage, MessageRole, Stats, AgenticCodingToolStats};
+    use chrono::{TimeZone, Utc};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_aggregate_sessions_timezone_consistency() {
+        let date_utc = Utc.with_ymd_and_hms(2025, 11, 20, 2, 0, 0).unwrap();
+        
+        let msg = ConversationMessage {
+            application: Application::GeminiCli,
+            date: date_utc,
+            project_hash: "hash".to_string(),
+            conversation_hash: "conv_hash".to_string(),
+            local_hash: None,
+            global_hash: "global_hash".to_string(),
+            model: Some("model".to_string()),
+            stats: Stats::default(),
+            role: MessageRole::Assistant,
+            uuid: None,
+            session_name: None,
+        };
+
+        let stats = AgenticCodingToolStats {
+            daily_stats: BTreeMap::new(), 
+            num_conversations: 1,
+            messages: vec![msg.clone()],
+            analyzer_name: "Test".to_string(),
+        };
+
+        let sessions = aggregate_sessions_for_tool(&stats);
+        assert_eq!(sessions.len(), 1);
+        
+        let session_day_key = &sessions[0].day_key;
+        
+        let daily_stats_map = crate::utils::aggregate_by_date(&[msg]);
+        
+        let local_date_str = date_utc.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
+        
+        assert!(daily_stats_map.contains_key(&local_date_str));
+        assert_eq!(session_day_key, &local_date_str, "Session day key should match Local date string");
+    }
 }
