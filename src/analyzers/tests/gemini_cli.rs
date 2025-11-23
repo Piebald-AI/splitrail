@@ -1,5 +1,5 @@
-use crate::analyzers::gemini_cli::GeminiCliAnalyzer;
 use crate::analyzer::Analyzer;
+use crate::analyzers::gemini_cli::GeminiCliAnalyzer;
 use std::fs::File;
 use std::io::Write;
 use tempfile::tempdir;
@@ -45,16 +45,19 @@ async fn test_gemini_cli_reasoning_tokens() {
     file.write_all(json_content.as_bytes()).unwrap();
 
     let analyzer = GeminiCliAnalyzer::new();
-    
+
     // We can't easily inject sources into `get_stats` without mocking `glob` or `discover_data_sources`.
     // But `parse_conversations` takes a list of sources.
-    
+
     let sources = vec![crate::analyzer::DataSource { path: session_path }];
     let messages = analyzer.parse_conversations(sources).await.unwrap();
-    
+
     assert_eq!(messages.len(), 2);
-    
-    let assistant_msg = messages.iter().find(|m| m.role == crate::types::MessageRole::Assistant).unwrap();
+
+    let assistant_msg = messages
+        .iter()
+        .find(|m| m.role == crate::types::MessageRole::Assistant)
+        .unwrap();
     assert_eq!(assistant_msg.stats.reasoning_tokens, 123);
     assert_eq!(assistant_msg.stats.input_tokens, 10);
     assert_eq!(assistant_msg.stats.output_tokens, 20);

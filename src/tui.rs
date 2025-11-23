@@ -204,12 +204,20 @@ fn aggregate_sessions_for_tool(stats: &AgenticCodingToolStats) -> Vec<SessionAgg
                 stats: Stats::default(),
                 models: Vec::new(),
                 session_name: None,
-                day_key: msg.date.with_timezone(&Local).format("%Y-%m-%d").to_string(),
+                day_key: msg
+                    .date
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d")
+                    .to_string(),
             });
 
         if msg.date < entry.first_timestamp {
             entry.first_timestamp = msg.date;
-            entry.day_key = msg.date.with_timezone(&Local).format("%Y-%m-%d").to_string();
+            entry.day_key = msg
+                .date
+                .with_timezone(&Local)
+                .format("%Y-%m-%d")
+                .to_string();
         }
 
         // Only aggregate stats for assistant/model messages and track models
@@ -1646,7 +1654,7 @@ fn draw_session_stats_table(
     let mut best_reasoning_tokens_i: Option<usize> = None;
     let mut best_total_tokens_i: Option<usize> = None;
     let mut best_tool_calls_i: Option<usize> = None;
-    
+
     let mut total_cost = 0.0;
     let mut total_input_tokens = 0u64;
     let mut total_output_tokens = 0u64;
@@ -1664,21 +1672,27 @@ fn draw_session_stats_table(
         }
 
         if best_input_tokens_i
-            .map(|best_idx| session.stats.input_tokens > filtered_sessions[best_idx].stats.input_tokens)
+            .map(|best_idx| {
+                session.stats.input_tokens > filtered_sessions[best_idx].stats.input_tokens
+            })
             .unwrap_or(true)
         {
             best_input_tokens_i = Some(idx);
         }
 
         if best_output_tokens_i
-            .map(|best_idx| session.stats.output_tokens > filtered_sessions[best_idx].stats.output_tokens)
+            .map(|best_idx| {
+                session.stats.output_tokens > filtered_sessions[best_idx].stats.output_tokens
+            })
             .unwrap_or(true)
         {
             best_output_tokens_i = Some(idx);
         }
 
         if best_reasoning_tokens_i
-            .map(|best_idx| session.stats.reasoning_tokens > filtered_sessions[best_idx].stats.reasoning_tokens)
+            .map(|best_idx| {
+                session.stats.reasoning_tokens > filtered_sessions[best_idx].stats.reasoning_tokens
+            })
             .unwrap_or(true)
         {
             best_reasoning_tokens_i = Some(idx);
@@ -1823,7 +1837,7 @@ fn draw_session_stats_table(
             .right_aligned();
 
             let tools_cell = if best_tool_calls_i == Some(i) {
-                 Line::from(Span::styled(
+                Line::from(Span::styled(
                     format_number(session.stats.tool_calls as u64, format_options),
                     Style::default().fg(Color::Red),
                 ))
@@ -2250,14 +2264,16 @@ pub fn show_upload_error(error: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Application, ConversationMessage, MessageRole, Stats, AgenticCodingToolStats};
+    use crate::types::{
+        AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
+    };
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
 
     #[test]
     fn test_aggregate_sessions_timezone_consistency() {
         let date_utc = Utc.with_ymd_and_hms(2025, 11, 20, 2, 0, 0).unwrap();
-        
+
         let msg = ConversationMessage {
             application: Application::GeminiCli,
             date: date_utc,
@@ -2273,7 +2289,7 @@ mod tests {
         };
 
         let stats = AgenticCodingToolStats {
-            daily_stats: BTreeMap::new(), 
+            daily_stats: BTreeMap::new(),
             num_conversations: 1,
             messages: vec![msg.clone()],
             analyzer_name: "Test".to_string(),
@@ -2281,14 +2297,20 @@ mod tests {
 
         let sessions = aggregate_sessions_for_tool(&stats);
         assert_eq!(sessions.len(), 1);
-        
+
         let session_day_key = &sessions[0].day_key;
-        
+
         let daily_stats_map = crate::utils::aggregate_by_date(&[msg]);
-        
-        let local_date_str = date_utc.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
-        
+
+        let local_date_str = date_utc
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+
         assert!(daily_stats_map.contains_key(&local_date_str));
-        assert_eq!(session_day_key, &local_date_str, "Session day key should match Local date string");
+        assert_eq!(
+            session_day_key, &local_date_str,
+            "Session day key should match Local date string"
+        );
     }
 }
