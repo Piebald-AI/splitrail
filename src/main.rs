@@ -47,10 +47,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Manually upload stats to Splitrail Cloud
-    Upload,
+    Upload(UploadArgs),
     /// Manage configuration
     Config(ConfigArgs),
 }
+
+#[derive(Args)]
+struct UploadArgs {
+    /// Perform a full re-upload, ignoring the last upload date.
+    #[arg(long, default_value_t = false)]
+    full: bool,
+}
+
 
 #[derive(Args)]
 struct ConfigArgs {
@@ -98,7 +106,7 @@ async fn main() {
             // No subcommand - run default behavior
             run_default(format_options).await;
         }
-        Some(Commands::Upload) => match run_upload().await.context("Failed to run upload") {
+        Some(Commands::Upload(args)) => match run_upload(args).await.context("Failed to run upload") {
             Ok(_) => {}
             Err(e) => {
                 tui::show_upload_error(&format!("{e:#}"));
@@ -199,7 +207,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     }
 }
 
-async fn run_upload() -> Result<()> {
+async fn run_upload(args: UploadArgs) -> Result<()> {
     let registry = create_analyzer_registry();
     let stats = registry.load_all_stats().await?;
     let mut messages = vec![];
@@ -218,15 +226,18 @@ async fn run_upload() -> Result<()> {
 
     match config::Config::load() {
         Ok(Some(mut config)) if config.is_configured() => {
-            let messages =
+            let messages_to_upload = if args.full {
+                messages
+            } else {
                 utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
                     .await
-                    .context("Failed to get messages later than last saved date")?;
+                    .context("Failed to get messages later than last saved date")?
+            };
             let progress_callback = tui::create_upload_progress_callback(&format_options);
-            upload::upload_message_stats(&messages, &mut config, progress_callback)
+            upload::upload_message_stats(&messages_to_upload, &mut config, progress_callback)
                 .await
                 .context("Failed to upload messages")?;
-            tui::show_upload_success(messages.len(), &format_options);
+            tui::show_upload_success(messages_to_upload.len(), &format_options);
             Ok(())
         }
         Ok(Some(_)) => {
