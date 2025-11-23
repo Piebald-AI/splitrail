@@ -57,6 +57,10 @@ struct UploadArgs {
     /// Perform a full re-upload, ignoring the last upload date.
     #[arg(long, default_value_t = false)]
     full: bool,
+
+    /// Force re-upload for a specific analyzer (e.g., "Claude Code").
+    #[arg(long)]
+    force_analyzer: Option<String>,
 }
 
 
@@ -210,12 +214,8 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
 async fn run_upload(args: UploadArgs) -> Result<()> {
     let registry = create_analyzer_registry();
     let stats = registry.load_all_stats().await?;
-    let mut messages = vec![];
-    for analyzer_stats in stats.analyzer_stats {
-        messages.extend(analyzer_stats.messages);
-    }
 
-    // Load config file to get formatting options
+    // Load config file to get formatting options and upload date
     let config_file = config::Config::load().unwrap_or(None).unwrap_or_default();
     let format_options = utils::NumberFormatOptions {
         use_comma: config_file.formatting.number_comma,
@@ -227,12 +227,43 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
     match config::Config::load() {
         Ok(Some(mut config)) if config.is_configured() => {
             let messages_to_upload = if args.full {
+                // --full flag: Flatten all messages from all analyzers
+                stats
+                    .analyzer_stats
+                    .into_iter()
+                    .flat_map(|s| s.messages)
+                    .collect()
+            } else if let Some(forced_analyzer_name) = args.force_analyzer {
+                // --force-analyzer flag: Selectively filter analyzers
+                let mut messages = vec![];
+                for analyzer_stats in stats.analyzer_stats {
+                    if analyzer_stats
+                        .analyzer_name
+                        .eq_ignore_ascii_case(&forced_analyzer_name)
+                    {
+                        // For the forced analyzer, add all its messages
+                        messages.extend(analyzer_stats.messages);
+                    } else {
+                        // For all other analyzers, only add new messages
+                        messages.extend(
+                            utils::get_messages_later_than(
+                                config.upload.last_date_uploaded,
+                                analyzer_stats.messages,
+                            )
+                            .await?,
+                        );
+                    }
+                }
                 messages
             } else {
-                utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
+                // Default behavior: Get all messages newer than the last upload date
+                let all_messages: Vec<_> =
+                    stats.analyzer_stats.into_iter().flat_map(|s| s.messages).collect();
+                utils::get_messages_later_than(config.upload.last_date_uploaded, all_messages)
                     .await
                     .context("Failed to get messages later than last saved date")?
             };
+
             let progress_callback = tui::create_upload_progress_callback(&format_options);
             upload::upload_message_stats(&messages_to_upload, &mut config, progress_callback)
                 .await
