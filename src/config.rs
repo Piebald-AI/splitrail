@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 
@@ -55,8 +56,24 @@ impl Default for Config {
     }
 }
 
+thread_local! {
+    static TEST_CONFIG_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub fn set_test_config_path(path: PathBuf) {
+    TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = Some(path));
+}
+
 impl Config {
     pub fn config_path() -> Result<PathBuf> {
+        #[cfg(test)]
+        {
+            if let Some(path) = TEST_CONFIG_PATH.with(|p| p.borrow().clone()) {
+                return Ok(path);
+            }
+        }
+
         Ok(std::env::home_dir()
             .context("Could not find home directory")?
             .join(".splitrail.toml"))
@@ -209,30 +226,18 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use tempfile::TempDir;
 
-    use std::sync::OnceLock;
-
-    static TEST_HOME_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
-
-    fn set_test_home() -> std::path::PathBuf {
-        let path = TEST_HOME_DIR
-            .get_or_init(|| {
-                let dir = TempDir::new().expect("tempdir");
-                dir.into_path()
-            })
-            .clone();
-        // Setting environment variables is unsafe in Rust 2024.
-        unsafe {
-            env::set_var("HOME", &path);
-        }
-        path
+    fn setup_test_config() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("tempdir");
+        let config_path = dir.path().join(".splitrail.toml");
+        set_test_config_path(config_path.clone());
+        (dir, config_path)
     }
 
     #[test]
     fn default_config_round_trip() {
-        set_test_home();
+        let (_dir, _path) = setup_test_config();
         // Ensure there is a default config on disk using the CLI helper.
         create_default_config(true).expect("create_default_config");
 
@@ -248,7 +253,7 @@ mod tests {
 
     #[test]
     fn set_config_value_behaviour() {
-        let _home = set_test_home();
+        let (_dir, _path) = setup_test_config();
 
         // Ensure base config exists.
         create_default_config(true).expect("create_default_config");

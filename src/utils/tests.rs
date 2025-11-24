@@ -48,10 +48,10 @@ fn test_format_number_plain() {
 fn test_format_date_for_display() {
     assert_eq!(format_date_for_display("unknown"), "Unknown");
     assert_eq!(format_date_for_display("invalid"), "invalid");
-    
+
     // Test a specific past date
     assert_eq!(format_date_for_display("2023-01-15"), "1/15/2023");
-    
+
     // Test today's date (dynamic)
     let today = chrono::Local::now().date_naive();
     let today_str = today.format("%Y-%m-%d").to_string();
@@ -108,7 +108,10 @@ async fn test_get_messages_later_than() {
 #[test]
 fn test_aggregate_by_date_basic() {
     let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
-    let local_date_str = date.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
+    let local_date_str = date
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
 
     let msg = ConversationMessage {
         date,
@@ -129,7 +132,7 @@ fn test_aggregate_by_date_basic() {
     };
 
     let result = aggregate_by_date(&[msg]);
-    
+
     assert!(result.contains_key(&local_date_str));
     let stats = &result[&local_date_str];
     assert_eq!(stats.ai_messages, 1);
@@ -167,9 +170,18 @@ fn test_aggregate_by_date_gap_filling() {
 
     let result = aggregate_by_date(&[msg1, msg3]);
 
-    let date1_str = date1.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
-    let date2_str = (date1 + chrono::Duration::days(1)).with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
-    let date3_str = date3.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
+    let date1_str = date1
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let date2_str = (date1 + chrono::Duration::days(1))
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let date3_str = date3
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
 
     assert!(result.contains_key(&date1_str));
     assert!(result.contains_key(&date2_str)); // The gap should be filled

@@ -5,28 +5,21 @@ use crate::types::{
 };
 use chrono::Utc;
 use std::collections::BTreeMap;
-use std::env;
 use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-static TEST_HOME_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+use crate::config::set_test_config_path;
 
-fn set_test_home() -> std::path::PathBuf {
-    let path = TEST_HOME_DIR
-        .get_or_init(|| {
-            let dir = TempDir::new().expect("tempdir");
-            dir.into_path()
-        })
-        .clone();
-    // Setting environment variables is unsafe in Rust 2024.
-    unsafe {
-        env::set_var("HOME", &path);
-    }
-    path
+fn setup_test_config() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().expect("tempdir");
+    let config_path = dir.path().join(".splitrail.toml");
+    set_test_config_path(config_path.clone());
+    (dir, config_path)
 }
 
 fn make_test_message(conversation_hash: &str) -> ConversationMessage {
@@ -122,7 +115,7 @@ async fn upload_message_stats_empty_messages_returns_ok_and_no_progress() {
 
 #[tokio::test]
 async fn upload_message_stats_success_updates_progress_and_config() {
-    set_test_home();
+    let (_dir, _path) = setup_test_config();
 
     let request_counter = Arc::new(AtomicUsize::new(0));
     let base_url = match start_test_server(
@@ -145,8 +138,7 @@ async fn upload_message_stats_success_updates_progress_and_config() {
     config.server.api_token = "TEST_TOKEN".to_string();
 
     let messages = vec![make_test_message("c1")];
-    let progress_values: Arc<Mutex<Vec<(usize, usize)>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let progress_values: Arc<Mutex<Vec<(usize, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let progress_values_clone = progress_values.clone();
 
     upload_message_stats(&messages, &mut config, move |current, total| {
@@ -172,12 +164,15 @@ async fn upload_message_stats_success_updates_progress_and_config() {
     let saved = Config::load()
         .expect("load config")
         .expect("config should exist on disk");
-    assert_eq!(saved.upload.last_date_uploaded, config.upload.last_date_uploaded);
+    assert_eq!(
+        saved.upload.last_date_uploaded,
+        config.upload.last_date_uploaded
+    );
 }
 
 #[tokio::test]
 async fn upload_message_stats_server_error_plain_text_propagates_message() {
-    set_test_home();
+    let (_dir, _path) = setup_test_config();
 
     let request_counter = Arc::new(AtomicUsize::new(0));
     let base_url = match start_test_server(
@@ -215,7 +210,7 @@ async fn upload_message_stats_server_error_plain_text_propagates_message() {
 
 #[tokio::test]
 async fn upload_message_stats_server_error_json_uses_error_field() {
-    set_test_home();
+    let (_dir, _path) = setup_test_config();
 
     let request_counter = Arc::new(AtomicUsize::new(0));
     let base_url = match start_test_server(
@@ -253,7 +248,7 @@ async fn upload_message_stats_server_error_json_uses_error_field() {
 
 #[tokio::test]
 async fn upload_message_stats_large_batch_is_split_into_chunks() {
-    set_test_home();
+    let (_dir, _path) = setup_test_config();
 
     // Use more than 3000 messages to trigger multiple chunks.
     let message_count = 3005usize;
@@ -297,10 +292,9 @@ async fn upload_message_stats_large_batch_is_split_into_chunks() {
 
 #[tokio::test]
 async fn perform_background_upload_no_config_keeps_status_unchanged() {
-    let _home = set_test_home();
+    let (_dir, config_path) = setup_test_config();
 
     // Ensure there is no config file.
-    let config_path = Config::config_path().expect("config_path");
     if config_path.exists() {
         std::fs::remove_file(&config_path).expect("remove existing config");
     }
@@ -323,7 +317,7 @@ async fn perform_background_upload_no_config_keeps_status_unchanged() {
 
 #[tokio::test]
 async fn perform_background_upload_unconfigured_config_keeps_status_unchanged() {
-    let _home = set_test_home();
+    let (_dir, _path) = setup_test_config();
 
     // Save a default config which is not configured (missing API token).
     let config = Config::default();
@@ -347,7 +341,7 @@ async fn perform_background_upload_unconfigured_config_keeps_status_unchanged() 
 
 #[tokio::test]
 async fn perform_background_upload_propagates_upload_errors_to_status() {
-    let _home = set_test_home();
+    let (_dir, _path) = setup_test_config();
 
     let request_counter = Arc::new(AtomicUsize::new(0));
     let base_url = match start_test_server(

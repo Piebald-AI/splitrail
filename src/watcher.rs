@@ -67,7 +67,7 @@ impl FileWatcher {
     pub fn for_tests() -> Self {
         let (_tx, event_rx) = mpsc::channel();
         let watcher =
-            notify::recommended_watcher(|_res| {}) .expect("failed to create test file watcher");
+            notify::recommended_watcher(|_res| {}).expect("failed to create test file watcher");
 
         Self {
             _watcher: watcher,
@@ -314,7 +314,9 @@ impl RealtimeStatsManager {
 mod tests {
     use super::*;
     use crate::analyzer::{Analyzer, DataSource};
-    use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+    use crate::types::{
+        AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
+    };
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use notify_types::event::{CreateKind, Event as NotifyEvent, EventKind as NotifyEventKind};
@@ -423,12 +425,13 @@ mod tests {
             available: true,
         });
 
-        let mut manager = RealtimeStatsManager::new(registry)
-            .await
-            .expect("manager");
+        let mut manager = RealtimeStatsManager::new(registry).await.expect("manager");
 
         let initial = manager.get_stats_receiver().borrow().clone();
-        assert!(initial.analyzer_stats.is_empty() || initial.analyzer_stats[0].analyzer_name == "test-analyzer");
+        assert!(
+            initial.analyzer_stats.is_empty()
+                || initial.analyzer_stats[0].analyzer_name == "test-analyzer"
+        );
 
         manager
             .handle_watcher_event(WatcherEvent::DataChanged("test-analyzer".into()))

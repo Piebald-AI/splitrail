@@ -118,7 +118,9 @@ impl AnalyzerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgenticCodingToolStats, ConversationMessage, MessageRole, Stats, Application};
+    use crate::types::{
+        AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
+    };
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use std::collections::BTreeMap;
@@ -266,9 +268,6 @@ mod tests {
 
         let mapping = registry.get_directory_to_analyzer_mapping();
         // Parent directory of the source should be mapped to "mapper".
-        assert_eq!(
-            mapping.get(&base).map(String::as_str),
-            Some("mapper")
-        );
+        assert_eq!(mapping.get(&base).map(String::as_str), Some("mapper"));
     }
 }

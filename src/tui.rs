@@ -30,7 +30,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
 
-
 #[derive(Debug, Clone)]
 pub enum UploadStatus {
     None,
@@ -63,7 +62,6 @@ struct UiState<'a> {
     date_jump_buffer: &'a str,
 }
 
-
 #[derive(Debug, Clone)]
 struct SessionTableCache {
     sessions: Vec<SessionAggregate>,
@@ -72,7 +70,6 @@ struct SessionTableCache {
 fn build_session_table_cache(sessions: Vec<SessionAggregate>) -> SessionTableCache {
     SessionTableCache { sessions }
 }
-
 
 pub fn run_tui(
     stats_receiver: watch::Receiver<MultiAnalyzerStats>,
@@ -274,8 +271,12 @@ where
             needs_redraw = false;
         }
 
-        if let Some(handle) = pending_session_recompute.as_mut() && handle.is_finished() {
-            if let Ok((version, _, new_cache)) = handle.await && version == recompute_version {
+        if let Some(handle) = pending_session_recompute.as_mut()
+            && handle.is_finished()
+        {
+            if let Ok((version, _, new_cache)) = handle.await
+                && version == recompute_version
+            {
                 session_table_cache = new_cache;
                 needs_redraw = true;
             }
@@ -316,11 +317,10 @@ where
                         // Auto-jump to first matching date
                         if let Some(current_stats) = filtered_stats.get(*selected_tab)
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some((index, _)) = current_stats
-                                .daily_stats
-                                .iter()
-                                .enumerate()
-                                .find(|(_, (day, _))| date_matches_buffer(day, &date_jump_buffer))
+                            && let Some((index, _)) =
+                                current_stats.daily_stats.iter().enumerate().find(
+                                    |(_, (day, _))| date_matches_buffer(day, &date_jump_buffer),
+                                )
                         {
                             table_state.select(Some(index));
                         }
@@ -331,11 +331,10 @@ where
                         // Re-evaluate match after backspace
                         if let Some(current_stats) = filtered_stats.get(*selected_tab)
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some((index, _)) = current_stats
-                                .daily_stats
-                                .iter()
-                                .enumerate()
-                                .find(|(_, (day, _))| date_matches_buffer(day, &date_jump_buffer))
+                            && let Some((index, _)) =
+                                current_stats.daily_stats.iter().enumerate().find(
+                                    |(_, (day, _))| date_matches_buffer(day, &date_jump_buffer),
+                                )
                         {
                             table_state.select(Some(index));
                         }
@@ -461,41 +460,41 @@ where
                     {
                         match *stats_view_mode {
                             StatsViewMode::Daily => {
-                                if selected > 0 {
-                                    if let Some(current_stats) = filtered_stats.get(*selected_tab) {
-                                        let total_rows = current_stats.daily_stats.len();
-                                        table_state.select(Some(if selected == total_rows + 1 {
+                                if selected > 0
+                                    && let Some(current_stats) = filtered_stats.get(*selected_tab)
+                                {
+                                    let total_rows = current_stats.daily_stats.len();
+                                    table_state.select(Some(if selected == total_rows + 1 {
+                                        selected.saturating_sub(2)
+                                    } else {
+                                        selected.saturating_sub(1)
+                                    }));
+                                    needs_redraw = true;
+                                }
+                            }
+                            StatsViewMode::Session => {
+                                if selected > 0
+                                    && let Some(cache) = session_table_cache.get(*selected_tab)
+                                {
+                                    let filtered_len = session_day_filters
+                                        .get(*selected_tab)
+                                        .and_then(|f| f.as_ref())
+                                        .map(|day| {
+                                            cache
+                                                .sessions
+                                                .iter()
+                                                .filter(|s| &s.day_key == day)
+                                                .count()
+                                        })
+                                        .unwrap_or_else(|| cache.sessions.len());
+
+                                    if filtered_len > 0 {
+                                        table_state.select(Some(if selected == filtered_len + 1 {
                                             selected.saturating_sub(2)
                                         } else {
                                             selected.saturating_sub(1)
                                         }));
                                         needs_redraw = true;
-                                    }
-                                }
-                            }
-                            StatsViewMode::Session => {
-                                if selected > 0 {
-                                    if let Some(cache) = session_table_cache.get(*selected_tab) {
-                                        let filtered_len = session_day_filters
-                                            .get(*selected_tab)
-                                            .and_then(|f| f.as_ref())
-                                            .map(|day| {
-                                                cache
-                                                    .sessions
-                                                    .iter()
-                                                    .filter(|s| &s.day_key == day)
-                                                    .count()
-                                            })
-                                            .unwrap_or_else(|| cache.sessions.len());
-
-                                        if filtered_len > 0 {
-                                            table_state.select(Some(if selected == filtered_len + 1 {
-                                                selected.saturating_sub(2)
-                                            } else {
-                                                selected.saturating_sub(1)
-                                            }));
-                                            needs_redraw = true;
-                                        }
                                     }
                                 }
                             }
