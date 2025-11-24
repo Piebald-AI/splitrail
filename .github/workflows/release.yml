@@ -122,9 +122,7 @@ jobs:
 
       - name: Install cross
         if: matrix.job.use-cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
+        uses: taiki-e/install-action@cross
 
       - name: Overwrite build command env variable
         if: matrix.job.use-cross
