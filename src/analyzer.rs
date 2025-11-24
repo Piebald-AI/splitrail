@@ -114,3 +114,160 @@ impl AnalyzerRegistry {
         dir_to_analyzer
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
+    };
+    use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
+    use std::collections::BTreeMap;
+
+    struct TestAnalyzer {
+        name: &'static str,
+        available: bool,
+        stats: Option<AgenticCodingToolStats>,
+        sources: Vec<PathBuf>,
+        fail_stats: bool,
+    }
+
+    #[async_trait]
+    impl Analyzer for TestAnalyzer {
+        fn display_name(&self) -> &'static str {
+            self.name
+        }
+
+        fn get_data_glob_patterns(&self) -> Vec<String> {
+            vec!["*.json".to_string()]
+        }
+
+        fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
+            Ok(self
+                .sources
+                .iter()
+                .cloned()
+                .map(|path| DataSource { path })
+                .collect())
+        }
+
+        async fn parse_conversations(
+            &self,
+            _sources: Vec<DataSource>,
+        ) -> Result<Vec<ConversationMessage>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+            if self.fail_stats {
+                anyhow::bail!("stats failed");
+            }
+            self.stats
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no stats"))
+        }
+
+        fn is_available(&self) -> bool {
+            self.available
+        }
+    }
+
+    fn sample_stats(name: &str) -> AgenticCodingToolStats {
+        let date = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let msg = ConversationMessage {
+            application: Application::ClaudeCode,
+            date,
+            project_hash: "proj".into(),
+            conversation_hash: "conv".into(),
+            local_hash: None,
+            global_hash: "global".into(),
+            model: Some("model".into()),
+            stats: Stats {
+                input_tokens: 1,
+                ..Stats::default()
+            },
+            role: MessageRole::Assistant,
+            uuid: None,
+            session_name: Some("session".into()),
+        };
+
+        AgenticCodingToolStats {
+            daily_stats: BTreeMap::new(),
+            num_conversations: 1,
+            messages: vec![msg],
+            analyzer_name: name.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_filters_available_analyzers_and_loads_stats() {
+        let mut registry = AnalyzerRegistry::new();
+
+        let analyzer_ok = TestAnalyzer {
+            name: "ok",
+            available: true,
+            stats: Some(sample_stats("ok")),
+            sources: Vec::new(),
+            fail_stats: false,
+        };
+
+        let analyzer_unavailable = TestAnalyzer {
+            name: "unavailable",
+            available: false,
+            stats: Some(sample_stats("unavailable")),
+            sources: Vec::new(),
+            fail_stats: false,
+        };
+
+        let analyzer_fails = TestAnalyzer {
+            name: "fails",
+            available: true,
+            stats: None,
+            sources: Vec::new(),
+            fail_stats: true,
+        };
+
+        registry.register(analyzer_ok);
+        registry.register(analyzer_unavailable);
+        registry.register(analyzer_fails);
+
+        let avail = registry.available_analyzers();
+        assert_eq!(avail.len(), 2); // "ok" and "fails"
+
+        let by_name = registry
+            .get_analyzer_by_display_name("ok")
+            .expect("analyzer 'ok'");
+        assert_eq!(by_name.display_name(), "ok");
+
+        let stats = registry.load_all_stats().await.expect("load stats");
+        // Only the successful analyzer should contribute stats.
+        assert_eq!(stats.analyzer_stats.len(), 1);
+        assert_eq!(stats.analyzer_stats[0].analyzer_name, "ok");
+    }
+
+    #[tokio::test]
+    async fn registry_builds_directory_mapping() {
+        use std::fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let base = temp_dir.path().join("proj").join("chats");
+        fs::create_dir_all(&base).expect("mkdirs");
+        let file_path = base.join("session.json");
+
+        let mut registry = AnalyzerRegistry::new();
+        let analyzer = TestAnalyzer {
+            name: "mapper",
+            available: true,
+            stats: Some(sample_stats("mapper")),
+            sources: vec![file_path.clone()],
+            fail_stats: false,
+        };
+
+        registry.register(analyzer);
+
+        let mapping = registry.get_directory_to_analyzer_mapping();
+        // Parent directory of the source should be mapped to "mapper".
+        assert_eq!(mapping.get(&base).map(String::as_str), Some("mapper"));
+    }
+}

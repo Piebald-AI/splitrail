@@ -63,6 +63,18 @@ impl FileWatcher {
         })
     }
 
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        let (_tx, event_rx) = mpsc::channel();
+        let watcher =
+            notify::recommended_watcher(|_res| {}).expect("failed to create test file watcher");
+
+        Self {
+            _watcher: watcher,
+            event_rx,
+        }
+    }
+
     pub fn try_recv(&self) -> Option<WatcherEvent> {
         self.event_rx.try_recv().ok()
     }
@@ -295,5 +307,146 @@ impl RealtimeStatsManager {
                 upload::perform_background_upload(stats, upload_status, None).await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analyzer::{Analyzer, DataSource};
+    use crate::types::{
+        AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
+    };
+    use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
+    use notify_types::event::{CreateKind, Event as NotifyEvent, EventKind as NotifyEventKind};
+    use std::collections::BTreeMap;
+
+    fn sample_stats(name: &str) -> AgenticCodingToolStats {
+        let date = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let msg = ConversationMessage {
+            application: Application::ClaudeCode,
+            date,
+            project_hash: "proj".into(),
+            conversation_hash: "conv".into(),
+            local_hash: None,
+            global_hash: "global".into(),
+            model: Some("model".into()),
+            stats: Stats {
+                input_tokens: 1,
+                ..Stats::default()
+            },
+            role: MessageRole::Assistant,
+            uuid: None,
+            session_name: Some("session".into()),
+        };
+
+        AgenticCodingToolStats {
+            daily_stats: BTreeMap::new(),
+            num_conversations: 1,
+            messages: vec![msg],
+            analyzer_name: name.to_string(),
+        }
+    }
+
+    struct TestAnalyzer {
+        name: &'static str,
+        stats: AgenticCodingToolStats,
+        available: bool,
+    }
+
+    #[async_trait]
+    impl Analyzer for TestAnalyzer {
+        fn display_name(&self) -> &'static str {
+            self.name
+        }
+
+        fn get_data_glob_patterns(&self) -> Vec<String> {
+            vec![]
+        }
+
+        fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
+            Ok(Vec::new())
+        }
+
+        async fn parse_conversations(
+            &self,
+            _sources: Vec<DataSource>,
+        ) -> Result<Vec<ConversationMessage>> {
+            Ok(self.stats.messages.clone())
+        }
+
+        async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+            Ok(self.stats.clone())
+        }
+
+        fn is_available(&self) -> bool {
+            self.available
+        }
+    }
+
+    #[test]
+    fn find_analyzer_prefers_more_specific_directory() {
+        let mut mapping = HashMap::new();
+        mapping.insert(PathBuf::from("/tmp/project"), "root".to_string());
+        mapping.insert(PathBuf::from("/tmp/project/chats"), "chats".to_string());
+
+        let path = Path::new("/tmp/project/chats/session.json");
+        let analyzer = find_analyzer_for_path(path, &mapping).expect("analyzer");
+        assert_eq!(analyzer, "chats");
+    }
+
+    #[test]
+    fn handle_fs_event_emits_data_changed_for_create() {
+        let mut mapping = HashMap::new();
+        let dir = PathBuf::from("/tmp/project/chats");
+        mapping.insert(dir.clone(), "analyzer".to_string());
+
+        let file_path = dir.join("session.json");
+        let event = NotifyEvent::new(NotifyEventKind::Create(CreateKind::File)).add_path(file_path);
+
+        let (tx, rx) = mpsc::channel();
+        handle_fs_event(event, &tx, &mapping).expect("handle_fs_event");
+
+        let evt = rx.try_recv().expect("event");
+        match evt {
+            WatcherEvent::DataChanged(name) => assert_eq!(name, "analyzer"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_watcher_event_updates_stats_for_data_change() {
+        let stats = sample_stats("test-analyzer");
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test-analyzer",
+            stats: stats.clone(),
+            available: true,
+        });
+
+        let mut manager = RealtimeStatsManager::new(registry).await.expect("manager");
+
+        let initial = manager.get_stats_receiver().borrow().clone();
+        assert!(
+            initial.analyzer_stats.is_empty()
+                || initial.analyzer_stats[0].analyzer_name == "test-analyzer"
+        );
+
+        manager
+            .handle_watcher_event(WatcherEvent::DataChanged("test-analyzer".into()))
+            .await
+            .expect("handle_watcher_event");
+
+        let updated = manager.get_stats_receiver().borrow().clone();
+        // After handling DataChanged, we should still have stats for the analyzer.
+        assert!(!updated.analyzer_stats.is_empty());
+        assert_eq!(updated.analyzer_stats[0].analyzer_name, "test-analyzer");
+
+        // Also exercise the error branch.
+        manager
+            .handle_watcher_event(WatcherEvent::Error("something went wrong".into()))
+            .await
+            .expect("handle_watcher_event error");
     }
 }

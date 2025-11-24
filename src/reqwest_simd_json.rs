@@ -42,3 +42,36 @@ impl ResponseSimdJsonExt for Response {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn simd_json_sets_body_and_content_type() {
+        let client = reqwest::Client::new();
+        let builder = client.post("http://example.com");
+
+        #[derive(Serialize)]
+        struct Payload {
+            value: u32,
+        }
+
+        let request = builder
+            .simd_json(&Payload { value: 42 })
+            .build()
+            .expect("Failed to build request");
+
+        // Verify Content-Type header is set correctly
+        let content_type = request
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .expect("Content-Type header should be set");
+        assert_eq!(content_type, "application/json");
+
+        // Verify body is set with correct JSON content
+        let body = request.body().expect("Body should be set");
+        let body_bytes = body.as_bytes().expect("Body should be bytes");
+        assert_eq!(body_bytes, b"{\"value\":42}");
+    }
+}

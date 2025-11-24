@@ -1,107 +1,34 @@
+pub mod logic;
+#[cfg(test)]
+mod tests;
+
 use crate::models::is_model_estimated;
-use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats, Stats};
+use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
 use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
 use anyhow::Result;
-use chrono::{DateTime, Local, Utc};
+use chrono::Local;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::style::{Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{ExecutableCommand, execute};
+use logic::{
+    SessionAggregate, aggregate_sessions_for_all_tools, aggregate_sessions_for_all_tools_owned,
+    date_matches_buffer, has_data,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
-use std::collections::BTreeMap;
 use std::io::{Write, stdout};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
-
-/// Check if a date string (YYYY-MM-DD format) matches the user's search buffer
-fn date_matches_buffer(day: &str, buffer: &str) -> bool {
-    if buffer.is_empty() {
-        return true;
-    }
-
-    // Check for month name match first
-    let lower = buffer.to_lowercase();
-    let month_num = match lower.as_str() {
-        s if "january".starts_with(s) && s.len() >= 3 => Some(1),
-        s if "february".starts_with(s) && s.len() >= 3 => Some(2),
-        s if "march".starts_with(s) && s.len() >= 3 => Some(3),
-        s if "april".starts_with(s) && s.len() >= 3 => Some(4),
-        s if "may".starts_with(s) && s.len() >= 3 => Some(5),
-        s if "june".starts_with(s) && s.len() >= 3 => Some(6),
-        s if "july".starts_with(s) && s.len() >= 3 => Some(7),
-        s if "august".starts_with(s) && s.len() >= 3 => Some(8),
-        s if "september".starts_with(s) && s.len() >= 3 => Some(9),
-        s if "october".starts_with(s) && s.len() >= 3 => Some(10),
-        s if "november".starts_with(s) && s.len() >= 3 => Some(11),
-        s if "december".starts_with(s) && s.len() >= 3 => Some(12),
-        _ => None,
-    };
-
-    if let Some(month) = month_num {
-        let target = format!("-{:02}-", month);
-        return day.contains(&target);
-    }
-
-    let normalized_input = buffer.replace('/', "-");
-
-    // Remove trailing separator for partial matches like "7/" or "7-"
-    let trimmed = normalized_input.trim_end_matches('-');
-
-    // Exact match
-    if day == buffer {
-        return true;
-    }
-
-    let parts: Vec<&str> = trimmed.split('-').filter(|s| !s.is_empty()).collect();
-    if parts.len() == 1 {
-        // Single number - match as month
-        if let Ok(month) = parts[0].parse::<u32>() {
-            let target = format!("-{:02}-", month);
-            return day.contains(&target);
-        }
-        // Otherwise match if the date contains this string
-        return day.contains(trimmed);
-    } else if parts.len() == 2 {
-        // Month and day only (M-D or MM-DD)
-        if let (Ok(month), Ok(day_num)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-            let target = format!("-{:02}-{:02}", month, day_num);
-            return day.ends_with(&target);
-        }
-    } else if parts.len() == 3 {
-        // Could be YYYY-M-D or M/D/YYYY
-        if let (Ok(p0), Ok(p1), Ok(p2)) = (
-            parts[0].parse::<u32>(),
-            parts[1].parse::<u32>(),
-            parts[2].parse::<u32>(),
-        ) {
-            // Determine format based on which part looks like a year
-            let (year, month, day_num) = if p0 > 31 {
-                // YYYY-M-D format
-                (p0, p1, p2)
-            } else if p2 > 31 {
-                // M/D/YYYY format
-                (p2, p0, p1)
-            } else {
-                // Ambiguous, assume YYYY-M-D
-                (p0, p1, p2)
-            };
-            let target = format!("{:04}-{:02}-{:02}", year, month, day_num);
-            return day == target;
-        }
-    }
-
-    false
-}
 
 #[derive(Debug, Clone)]
 pub enum UploadStatus {
@@ -136,144 +63,12 @@ struct UiState<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct SessionAggregate {
-    session_id: String,
-    first_timestamp: DateTime<Utc>,
-    analyzer_name: String,
-    stats: Stats,
-    models: Vec<String>,
-    session_name: Option<String>,
-    day_key: String,
-}
-
-fn accumulate_stats(dst: &mut Stats, src: &Stats) {
-    // Token and cost stats
-    dst.input_tokens += src.input_tokens;
-    dst.output_tokens += src.output_tokens;
-    dst.reasoning_tokens += src.reasoning_tokens;
-    dst.cache_creation_tokens += src.cache_creation_tokens;
-    dst.cache_read_tokens += src.cache_read_tokens;
-    dst.cached_tokens += src.cached_tokens;
-    dst.cost += src.cost;
-    dst.tool_calls += src.tool_calls;
-
-    // File operation stats
-    dst.terminal_commands += src.terminal_commands;
-    dst.file_searches += src.file_searches;
-    dst.file_content_searches += src.file_content_searches;
-    dst.files_read += src.files_read;
-    dst.files_added += src.files_added;
-    dst.files_edited += src.files_edited;
-    dst.files_deleted += src.files_deleted;
-    dst.lines_read += src.lines_read;
-    dst.lines_added += src.lines_added;
-    dst.lines_edited += src.lines_edited;
-    dst.lines_deleted += src.lines_deleted;
-    dst.bytes_read += src.bytes_read;
-    dst.bytes_added += src.bytes_added;
-    dst.bytes_edited += src.bytes_edited;
-    dst.bytes_deleted += src.bytes_deleted;
-
-    // Todo stats
-    dst.todos_created += src.todos_created;
-    dst.todos_completed += src.todos_completed;
-    dst.todos_in_progress += src.todos_in_progress;
-    dst.todo_writes += src.todo_writes;
-    dst.todo_reads += src.todo_reads;
-
-    // Composition stats
-    dst.code_lines += src.code_lines;
-    dst.docs_lines += src.docs_lines;
-    dst.data_lines += src.data_lines;
-    dst.media_lines += src.media_lines;
-    dst.config_lines += src.config_lines;
-    dst.other_lines += src.other_lines;
-}
-
-fn aggregate_sessions_for_tool(stats: &AgenticCodingToolStats) -> Vec<SessionAggregate> {
-    let mut sessions: BTreeMap<String, SessionAggregate> = BTreeMap::new();
-
-    for msg in &stats.messages {
-        let session_key = msg.conversation_hash.clone();
-        let entry = sessions
-            .entry(session_key.clone())
-            .or_insert_with(|| SessionAggregate {
-                session_id: session_key.clone(),
-                first_timestamp: msg.date,
-                analyzer_name: stats.analyzer_name.clone(),
-                stats: Stats::default(),
-                models: Vec::new(),
-                session_name: None,
-                day_key: msg
-                    .date
-                    .with_timezone(&Local)
-                    .format("%Y-%m-%d")
-                    .to_string(),
-            });
-
-        if msg.date < entry.first_timestamp {
-            entry.first_timestamp = msg.date;
-            entry.day_key = msg
-                .date
-                .with_timezone(&Local)
-                .format("%Y-%m-%d")
-                .to_string();
-        }
-
-        // Only aggregate stats for assistant/model messages and track models
-        if let Some(model) = &msg.model {
-            if !entry.models.iter().any(|m| m == model) {
-                entry.models.push(model.clone());
-            }
-            accumulate_stats(&mut entry.stats, &msg.stats);
-        }
-
-        // Capture session name if available (last one wins, or first one, doesn't matter much as they should be consistent per file/session)
-        if let Some(name) = &msg.session_name {
-            entry.session_name = Some(name.clone());
-        }
-    }
-
-    let mut result: Vec<SessionAggregate> = sessions.into_values().collect();
-
-    // Sort oldest sessions first so newest appear at the bottom (like per-day view)
-    result.sort_by_key(|s| s.first_timestamp);
-
-    result
-}
-
-fn aggregate_sessions_for_all_tools(
-    filtered_stats: &[&AgenticCodingToolStats],
-) -> Vec<Vec<SessionAggregate>> {
-    filtered_stats
-        .iter()
-        .map(|stats| aggregate_sessions_for_tool(stats))
-        .collect()
-}
-
-fn aggregate_sessions_for_all_tools_owned(
-    stats: &[AgenticCodingToolStats],
-) -> Vec<Vec<SessionAggregate>> {
-    stats.iter().map(aggregate_sessions_for_tool).collect()
-}
-#[derive(Debug, Clone)]
 struct SessionTableCache {
     sessions: Vec<SessionAggregate>,
 }
 
 fn build_session_table_cache(sessions: Vec<SessionAggregate>) -> SessionTableCache {
     SessionTableCache { sessions }
-}
-
-fn has_data(stats: &AgenticCodingToolStats) -> bool {
-    stats.num_conversations > 0
-        || stats.daily_stats.values().any(|day| {
-            day.stats.cost > 0.0
-                || day.stats.input_tokens > 0
-                || day.stats.output_tokens > 0
-                || day.stats.reasoning_tokens > 0
-                || day.stats.tool_calls > 0
-        })
 }
 
 pub fn run_tui(
@@ -319,6 +114,507 @@ pub fn run_tui(
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     result
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn run_app_for_tests<B, FPoll, FRead>(
+    terminal: &mut Terminal<B>,
+    mut stats_receiver: watch::Receiver<MultiAnalyzerStats>,
+    format_options: &NumberFormatOptions,
+    selected_tab: &mut usize,
+    scroll_offset: &mut usize,
+    stats_view_mode: &mut StatsViewMode,
+    upload_status: Arc<Mutex<UploadStatus>>,
+    file_watcher: FileWatcher,
+    watcher_tx: mpsc::UnboundedSender<WatcherEvent>,
+    mut poll: FPoll,
+    mut read: FRead,
+    max_iterations: usize,
+) -> Result<()>
+where
+    B: ratatui::backend::Backend,
+    FPoll: FnMut(Duration) -> std::io::Result<bool>,
+    FRead: FnMut() -> std::io::Result<Event>,
+{
+    let mut table_states: Vec<TableState> = Vec::new();
+    let mut session_window_offsets: Vec<usize> = Vec::new();
+    let mut session_day_filters: Vec<Option<String>> = Vec::new();
+    let mut date_jump_active = false;
+    let mut date_jump_buffer = String::new();
+    let mut current_stats = stats_receiver.borrow().clone();
+
+    // Initialize table states for current stats
+    update_table_states(&mut table_states, &current_stats, selected_tab);
+    update_window_offsets(&mut session_window_offsets, &table_states.len());
+    update_day_filters(&mut session_day_filters, &table_states.len());
+
+    let mut needs_redraw = true;
+    let mut last_upload_status = {
+        let status = upload_status.lock().unwrap();
+        format!("{:?}", *status)
+    };
+    let mut dots_counter = 0; // Counter for dots animation (advance every 5 frames = 500ms)
+
+    // Filter analyzer stats to only include those with data - calculate once and update when stats change
+    let mut filtered_stats: Vec<&AgenticCodingToolStats> = current_stats
+        .analyzer_stats
+        .iter()
+        .filter(|stats| has_data(stats))
+        .collect();
+
+    let session_stats_per_tool = aggregate_sessions_for_all_tools(&filtered_stats);
+    let mut session_table_cache: Vec<SessionTableCache> = session_stats_per_tool
+        .iter()
+        .cloned()
+        .map(build_session_table_cache)
+        .collect();
+    type SessionRecomputeHandle =
+        tokio::task::JoinHandle<(u64, Vec<Vec<SessionAggregate>>, Vec<SessionTableCache>)>;
+
+    let mut recompute_version: u64 = 0;
+    let mut pending_session_recompute: Option<SessionRecomputeHandle> = None;
+    let mut iterations: usize = 0;
+
+    loop {
+        if iterations >= max_iterations {
+            break;
+        }
+        iterations = iterations.saturating_add(1);
+
+        // Check for stats updates
+        if stats_receiver.has_changed()? {
+            current_stats = stats_receiver.borrow_and_update().clone();
+            // Recalculate filtered stats only when stats change
+            filtered_stats = current_stats
+                .analyzer_stats
+                .iter()
+                .filter(|stats| has_data(stats))
+                .collect();
+            update_table_states(&mut table_states, &current_stats, selected_tab);
+            update_window_offsets(&mut session_window_offsets, &table_states.len());
+            update_day_filters(&mut session_day_filters, &table_states.len());
+            recompute_version = recompute_version.wrapping_add(1);
+            let version = recompute_version;
+            if let Some(handle) = pending_session_recompute.take() {
+                handle.abort();
+            }
+            let stats_for_recompute: Vec<AgenticCodingToolStats> =
+                filtered_stats.iter().map(|s| (*s).clone()).collect();
+            pending_session_recompute = Some(tokio::task::spawn_blocking(move || {
+                let session_stats = aggregate_sessions_for_all_tools_owned(&stats_for_recompute);
+                let caches = session_stats
+                    .iter()
+                    .cloned()
+                    .map(build_session_table_cache)
+                    .collect();
+                (version, session_stats, caches)
+            }));
+            needs_redraw = true;
+        }
+
+        // Check for file watcher events; hand off processing so UI thread stays responsive
+        while let Some(watcher_event) = file_watcher.try_recv() {
+            let _ = watcher_tx.send(watcher_event);
+        }
+
+        // Check if upload status has changed or advance dots animation
+        let current_upload_status = {
+            let mut status = upload_status.lock().unwrap();
+            // Advance dots animation for uploading status every 500ms (5 frames at 100ms)
+            if let UploadStatus::Uploading {
+                current: _,
+                total: _,
+                dots,
+            } = &mut *status
+            {
+                // Always animate dots during upload
+                dots_counter += 1;
+                if dots_counter >= 5 {
+                    *dots = (*dots + 1) % 4;
+                    dots_counter = 0;
+                    needs_redraw = true;
+                }
+            } else {
+                // Reset counter when not uploading
+                dots_counter = 0;
+            }
+            format!("{:?}", *status)
+        };
+        if current_upload_status != last_upload_status {
+            last_upload_status = current_upload_status;
+            needs_redraw = true;
+        }
+
+        // Only redraw if something has changed
+        if needs_redraw {
+            terminal.draw(|frame| {
+                let mut ui_state = UiState {
+                    table_states: &mut table_states,
+                    _scroll_offset: *scroll_offset,
+                    selected_tab: *selected_tab,
+                    stats_view_mode: *stats_view_mode,
+                    session_window_offsets: &mut session_window_offsets,
+                    session_day_filters: &mut session_day_filters,
+                    date_jump_active,
+                    date_jump_buffer: &date_jump_buffer,
+                };
+                draw_ui(
+                    frame,
+                    &filtered_stats,
+                    format_options,
+                    &mut ui_state,
+                    upload_status.clone(),
+                    &session_table_cache,
+                );
+            })?;
+            needs_redraw = false;
+        }
+
+        if let Some(handle) = pending_session_recompute.as_mut()
+            && handle.is_finished()
+        {
+            if let Ok((version, _, new_cache)) = handle.await
+                && version == recompute_version
+            {
+                session_table_cache = new_cache;
+                needs_redraw = true;
+            }
+            pending_session_recompute = None;
+        }
+
+        // Use a timeout to allow periodic refreshes for upload status updates
+        if let Ok(event_available) = poll(Duration::from_millis(100)) {
+            if !event_available {
+                continue;
+            }
+
+            // Handle different event types
+            let key = match read()? {
+                Event::Key(key) if key.is_press() => key,
+                Event::Resize(_, _) => {
+                    // Terminal was resized, trigger redraw
+                    needs_redraw = true;
+                    continue;
+                }
+                _ => continue,
+            };
+
+            // Handle quitting.
+            if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                break;
+            }
+
+            // Only handle navigation keys if we have data (`filtered_stats` is non-empty).
+            if filtered_stats.is_empty() {
+                continue;
+            }
+
+            if date_jump_active {
+                match key.code {
+                    KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '-' || c == '/' => {
+                        date_jump_buffer.push(c);
+                        // Auto-jump to first matching date
+                        if let Some(current_stats) = filtered_stats.get(*selected_tab)
+                            && let Some(table_state) = table_states.get_mut(*selected_tab)
+                            && let Some((index, _)) =
+                                current_stats.daily_stats.iter().enumerate().find(
+                                    |(_, (day, _))| date_matches_buffer(day, &date_jump_buffer),
+                                )
+                        {
+                            table_state.select(Some(index));
+                        }
+                        needs_redraw = true;
+                    }
+                    KeyCode::Backspace => {
+                        date_jump_buffer.pop();
+                        // Re-evaluate match after backspace
+                        if let Some(current_stats) = filtered_stats.get(*selected_tab)
+                            && let Some(table_state) = table_states.get_mut(*selected_tab)
+                            && let Some((index, _)) =
+                                current_stats.daily_stats.iter().enumerate().find(
+                                    |(_, (day, _))| date_matches_buffer(day, &date_jump_buffer),
+                                )
+                        {
+                            table_state.select(Some(index));
+                        }
+                        needs_redraw = true;
+                    }
+                    KeyCode::Enter | KeyCode::Esc => {
+                        date_jump_active = false;
+                        date_jump_buffer.clear();
+                        needs_redraw = true;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') => {
+                    if *selected_tab > 0 {
+                        *selected_tab -= 1;
+
+                        if let StatsViewMode::Session = *stats_view_mode
+                            && let Some(table_state) = table_states.get_mut(*selected_tab)
+                            && let Some(cache) = session_table_cache.get(*selected_tab)
+                        {
+                            let target_len = match session_day_filters
+                                .get(*selected_tab)
+                                .and_then(|f| f.as_ref())
+                            {
+                                Some(day) => {
+                                    cache.sessions.iter().filter(|s| &s.day_key == day).count()
+                                }
+                                None => cache.sessions.len(),
+                            };
+                            if target_len > 0 {
+                                table_state.select(Some(target_len.saturating_sub(1)));
+                            }
+                        }
+
+                        needs_redraw = true;
+                    }
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    if *selected_tab < filtered_stats.len().saturating_sub(1) {
+                        *selected_tab += 1;
+
+                        if let StatsViewMode::Session = *stats_view_mode
+                            && let Some(table_state) = table_states.get_mut(*selected_tab)
+                            && let Some(cache) = session_table_cache.get(*selected_tab)
+                        {
+                            let target_len = match session_day_filters
+                                .get(*selected_tab)
+                                .and_then(|f| f.as_ref())
+                            {
+                                Some(day) => {
+                                    cache.sessions.iter().filter(|s| &s.day_key == day).count()
+                                }
+                                None => cache.sessions.len(),
+                            };
+                            if target_len > 0 {
+                                table_state.select(Some(target_len.saturating_sub(1)));
+                            }
+                        }
+
+                        needs_redraw = true;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected) = table_state.selected()
+                    {
+                        match *stats_view_mode {
+                            StatsViewMode::Daily => {
+                                if let Some(current_stats) = filtered_stats.get(*selected_tab) {
+                                    let total_rows = current_stats.daily_stats.len();
+                                    if selected < total_rows.saturating_add(1) {
+                                        table_state.select(Some(
+                                            if selected == total_rows.saturating_sub(1) {
+                                                selected + 2
+                                            } else {
+                                                selected + 1
+                                            },
+                                        ));
+                                        needs_redraw = true;
+                                    }
+                                }
+                            }
+                            StatsViewMode::Session => {
+                                let filtered_len = session_table_cache
+                                    .get(*selected_tab)
+                                    .map(|cache| {
+                                        session_day_filters
+                                            .get(*selected_tab)
+                                            .and_then(|f| f.as_ref())
+                                            .map(|day| {
+                                                cache
+                                                    .sessions
+                                                    .iter()
+                                                    .filter(|s| &s.day_key == day)
+                                                    .count()
+                                            })
+                                            .unwrap_or_else(|| cache.sessions.len())
+                                    })
+                                    .unwrap_or(0);
+
+                                if filtered_len > 0 && selected < filtered_len.saturating_add(1) {
+                                    // sessions: 0..len-1, separator: len, totals: len+1
+                                    table_state.select(Some(
+                                        if selected == filtered_len.saturating_sub(1) {
+                                            selected + 2
+                                        } else {
+                                            selected + 1
+                                        },
+                                    ));
+                                    needs_redraw = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected) = table_state.selected()
+                    {
+                        match *stats_view_mode {
+                            StatsViewMode::Daily => {
+                                if selected > 0
+                                    && let Some(current_stats) = filtered_stats.get(*selected_tab)
+                                {
+                                    let total_rows = current_stats.daily_stats.len();
+                                    table_state.select(Some(if selected == total_rows + 1 {
+                                        selected.saturating_sub(2)
+                                    } else {
+                                        selected.saturating_sub(1)
+                                    }));
+                                    needs_redraw = true;
+                                }
+                            }
+                            StatsViewMode::Session => {
+                                if selected > 0
+                                    && let Some(cache) = session_table_cache.get(*selected_tab)
+                                {
+                                    let filtered_len = session_day_filters
+                                        .get(*selected_tab)
+                                        .and_then(|f| f.as_ref())
+                                        .map(|day| {
+                                            cache
+                                                .sessions
+                                                .iter()
+                                                .filter(|s| &s.day_key == day)
+                                                .count()
+                                        })
+                                        .unwrap_or_else(|| cache.sessions.len());
+
+                                    if filtered_len > 0 {
+                                        table_state.select(Some(if selected == filtered_len + 1 {
+                                            selected.saturating_sub(2)
+                                        } else {
+                                            selected.saturating_sub(1)
+                                        }));
+                                        needs_redraw = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                KeyCode::PageDown => {
+                    if let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected) = table_state.selected()
+                    {
+                        match *stats_view_mode {
+                            StatsViewMode::Daily => {
+                                if let Some(current_stats) = filtered_stats.get(*selected_tab) {
+                                    let total_rows = current_stats.daily_stats.len() + 2;
+                                    let new_selected =
+                                        (selected + 10).min(total_rows.saturating_sub(1));
+                                    table_state.select(Some(new_selected));
+                                    needs_redraw = true;
+                                }
+                            }
+                            StatsViewMode::Session => {
+                                let filtered_len = session_table_cache
+                                    .get(*selected_tab)
+                                    .map(|cache| {
+                                        session_day_filters
+                                            .get(*selected_tab)
+                                            .and_then(|f| f.as_ref())
+                                            .map(|day| {
+                                                cache
+                                                    .sessions
+                                                    .iter()
+                                                    .filter(|s| &s.day_key == day)
+                                                    .count()
+                                            })
+                                            .unwrap_or_else(|| cache.sessions.len())
+                                    })
+                                    .unwrap_or(0);
+
+                                if filtered_len > 0 {
+                                    let total_rows = filtered_len + 2;
+                                    let new_selected =
+                                        (selected + 10).min(total_rows.saturating_sub(1));
+                                    table_state.select(Some(new_selected));
+                                    needs_redraw = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                KeyCode::PageUp => {
+                    if let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected) = table_state.selected()
+                    {
+                        let new_selected = selected.saturating_sub(10);
+                        table_state.select(Some(new_selected));
+                        needs_redraw = true;
+                    }
+                }
+                KeyCode::Char('/') => {
+                    if let StatsViewMode::Daily = *stats_view_mode {
+                        date_jump_active = true;
+                        date_jump_buffer.clear();
+                        needs_redraw = true;
+                    }
+                }
+                KeyCode::Char('t') => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        *stats_view_mode = match *stats_view_mode {
+                            StatsViewMode::Daily => {
+                                session_day_filters[*selected_tab] = None;
+                                StatsViewMode::Session
+                            }
+                            StatsViewMode::Session => StatsViewMode::Daily,
+                        };
+
+                        date_jump_active = false;
+                        date_jump_buffer.clear();
+
+                        if let StatsViewMode::Session = *stats_view_mode
+                            && let Some(table_state) = table_states.get_mut(*selected_tab)
+                            && let Some(cache) = session_table_cache.get(*selected_tab)
+                            && !cache.sessions.is_empty()
+                        {
+                            let target_len = session_day_filters
+                                .get(*selected_tab)
+                                .and_then(|f| f.as_ref())
+                                .map(|day| {
+                                    cache.sessions.iter().filter(|s| &s.day_key == day).count()
+                                })
+                                .unwrap_or_else(|| cache.sessions.len());
+                            if target_len > 0 {
+                                table_state.select(Some(target_len.saturating_sub(1)));
+                            }
+                        }
+
+                        needs_redraw = true;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let StatsViewMode::Daily = *stats_view_mode
+                        && let Some(current_stats) = filtered_stats.get(*selected_tab)
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(selected_idx) = table_state.selected()
+                        && selected_idx < current_stats.daily_stats.len()
+                        && let Some((day_key, _)) =
+                            current_stats.daily_stats.iter().nth(selected_idx)
+                    {
+                        session_day_filters[*selected_tab] = Some(day_key.to_string());
+                        *stats_view_mode = StatsViewMode::Session;
+                        session_window_offsets[*selected_tab] = 0;
+                        table_state.select(Some(0));
+                        needs_redraw = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2259,58 +2555,4 @@ pub fn show_upload_error(error: &str) {
         Print(format!("✕ {error}\n")),
         ResetColor
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{
-        AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
-    };
-    use chrono::{TimeZone, Utc};
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn test_aggregate_sessions_timezone_consistency() {
-        let date_utc = Utc.with_ymd_and_hms(2025, 11, 20, 2, 0, 0).unwrap();
-
-        let msg = ConversationMessage {
-            application: Application::GeminiCli,
-            date: date_utc,
-            project_hash: "hash".to_string(),
-            conversation_hash: "conv_hash".to_string(),
-            local_hash: None,
-            global_hash: "global_hash".to_string(),
-            model: Some("model".to_string()),
-            stats: Stats::default(),
-            role: MessageRole::Assistant,
-            uuid: None,
-            session_name: None,
-        };
-
-        let stats = AgenticCodingToolStats {
-            daily_stats: BTreeMap::new(),
-            num_conversations: 1,
-            messages: vec![msg.clone()],
-            analyzer_name: "Test".to_string(),
-        };
-
-        let sessions = aggregate_sessions_for_tool(&stats);
-        assert_eq!(sessions.len(), 1);
-
-        let session_day_key = &sessions[0].day_key;
-
-        let daily_stats_map = crate::utils::aggregate_by_date(&[msg]);
-
-        let local_date_str = date_utc
-            .with_timezone(&chrono::Local)
-            .format("%Y-%m-%d")
-            .to_string();
-
-        assert!(daily_stats_map.contains_key(&local_date_str));
-        assert_eq!(
-            session_day_key, &local_date_str,
-            "Session day key should match Local date string"
-        );
-    }
 }

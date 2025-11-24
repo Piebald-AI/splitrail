@@ -9,6 +9,9 @@ use std::time::Duration;
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+#[cfg(test)]
+mod tests;
+
 pub async fn upload_message_stats<F>(
     messages: &[ConversationMessage],
     config: &mut Config,
