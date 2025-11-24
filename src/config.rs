@@ -205,3 +205,85 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
     config.save(false)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use tempfile::TempDir;
+
+    use std::sync::OnceLock;
+
+    static TEST_HOME_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+    fn set_test_home() -> std::path::PathBuf {
+        let path = TEST_HOME_DIR
+            .get_or_init(|| {
+                let dir = TempDir::new().expect("tempdir");
+                dir.into_path()
+            })
+            .clone();
+        // Setting environment variables is unsafe in Rust 2024.
+        unsafe {
+            env::set_var("HOME", &path);
+        }
+        path
+    }
+
+    #[test]
+    fn default_config_round_trip() {
+        set_test_home();
+        // Ensure there is a default config on disk using the CLI helper.
+        create_default_config(true).expect("create_default_config");
+
+        let loaded = Config::load()
+            .expect("load config")
+            .expect("config should exist");
+
+        assert_eq!(loaded.server.url, "https://splitrail.dev");
+        assert_eq!(loaded.server.api_token, "");
+        assert!(!loaded.upload.auto_upload);
+        assert_eq!(loaded.formatting.locale, "en");
+    }
+
+    #[test]
+    fn set_config_value_behaviour() {
+        let _home = set_test_home();
+
+        // Ensure base config exists.
+        create_default_config(true).expect("create_default_config");
+
+        set_config_value("api-token", "TEST_TOKEN").expect("set api-token");
+        set_config_value("auto-upload", "true").expect("set auto-upload");
+        set_config_value("upload-today-only", "true").expect("set upload-today-only");
+        set_config_value("number-comma", "true").expect("set number-comma");
+        set_config_value("number-human", "true").expect("set number-human");
+        set_config_value("locale", "de").expect("set locale");
+        set_config_value("decimal-places", "3").expect("set decimal-places");
+
+        let cfg = Config::load()
+            .expect("load config")
+            .expect("config should exist");
+
+        assert_eq!(cfg.server.api_token, "TEST_TOKEN");
+        assert!(cfg.upload.auto_upload);
+        assert!(cfg.upload.upload_today_only);
+        assert!(cfg.formatting.number_comma);
+        assert!(cfg.formatting.number_human);
+        assert_eq!(cfg.formatting.locale, "de");
+        assert_eq!(cfg.formatting.decimal_places, 3);
+
+        let err = set_config_value("unknown-key", "value").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Unknown config key"),
+            "unexpected error message: {msg}"
+        );
+        let err = set_config_value("auto-upload", "not-a-bool").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Invalid boolean value"),
+            "unexpected error message: {msg}"
+        );
+    }
+}

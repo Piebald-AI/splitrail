@@ -161,3 +161,45 @@ pub struct UploadResponse {
 pub struct ErrorResponse {
     pub error: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_category_classifies_extensions() {
+        assert!(matches!(
+            FileCategory::from_extension("rs"),
+            FileCategory::SourceCode
+        ));
+        assert!(matches!(
+            FileCategory::from_extension("JSON"),
+            FileCategory::Data
+        ));
+        assert!(matches!(
+            FileCategory::from_extension("md"),
+            FileCategory::Documentation
+        ));
+        assert!(matches!(
+            FileCategory::from_extension("png"),
+            FileCategory::Media
+        ));
+        assert!(matches!(
+            FileCategory::from_extension("config"),
+            FileCategory::Config
+        ));
+        assert!(matches!(
+            FileCategory::from_extension("unknown-ext"),
+            FileCategory::Other
+        ));
+    }
+
+    #[test]
+    fn stats_default_is_zeroed() {
+        let stats = Stats::default();
+        assert_eq!(stats.input_tokens, 0);
+        assert_eq!(stats.output_tokens, 0);
+        assert_eq!(stats.tool_calls, 0);
+        assert_eq!(stats.code_lines, 0);
+    }
+}

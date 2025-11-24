@@ -274,3 +274,6 @@ where
         .map(|dt| dt.into())
         .map_err(serde::de::Error::custom)
 }
+
+#[cfg(test)]
+mod tests;
