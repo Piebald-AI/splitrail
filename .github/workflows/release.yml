@@ -1,27 +1,15 @@
-# Originally derived from https://github.com/sharkdp/bat/blob/872d0baafbc575a80618ec847dee6d63dad3e6e3/.github/workflows/CICD.yml.
-name: release
+name: Release & Publish
+
+on:
+  push:
+    tags:
+      - "v*"
 
 env:
   CICD_INTERMEDIATES_DIR: "_cicd-intermediates"
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
 
-on:
-  workflow_dispatch:
-  push:
-    tags:
-      - "*"
-
 jobs:
-  all-jobs:
-    # If we don't do this, the job will be skipped if the matrix job fails.
-    if: always()
-    name: all-jobs
-    runs-on: ubuntu-latest
-    needs:
-      - crate_metadata
-      - build
-    steps:
-      - run: jq --exit-status 'all(.result == "success")' <<< '${{ toJson(needs) }}'
 
   crate_metadata:
     name: Extract crate metadata
@@ -78,9 +66,9 @@ jobs:
           # dpkg_arch: musl-linux-i686
           # use-cross: true
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-2025
           - target: x86_64-unknown-linux-gnu
@@ -95,9 +83,26 @@ jobs:
       BUILD_CMD: cargo
     permissions:
       contents: write
+      id-token: write
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+
+      - name: Fetch secrets from Infisical
+        if: startsWith(matrix.job.os, 'windows-') || startsWith(matrix.job.os, 'macos-')
+        uses: Infisical/secrets-action@v1.0.15
+        with:
+          method: oidc
+          identity-id: ${{ vars.INFISICAL_IDENTITY_ID }}
+          env-slug: prod
+          project-slug: ${{ vars.INFISICAL_PROJECT_SLUG }}
+
+      - name: Authenticate with GCP
+        if: startsWith(matrix.job.os, 'windows-')
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
 
       - name: Install prerequisites
         shell: bash
@@ -136,6 +141,32 @@ jobs:
           cargo -V
           rustc -V
 
+      - name: Import macOS code signing certificate
+        if: startsWith(matrix.job.os, 'macos-')
+        shell: bash
+        run: |
+          # Create variables
+          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          echo -n "${{ env.APPLE_CODE_SIGNING_CERT }}" | base64 --decode -o $CERTIFICATE_PATH
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          security import $CERTIFICATE_PATH -P '${{ env.APPLE_CODE_SIGNING_CERT_PASSWORD }}' -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          echo "APPLE_SIGNING_IDENTITY=$(security find-identity -v -p codesigning | grep "Piebald LLC" | awk -F '"' '{print $2}')" >> $GITHUB_ENV
+
+          # Write API key and set path in environment
+          API_KEY_PATH=$RUNNER_TEMP/apple-api-key
+          echo -n "${{ env.APP_STORE_CONNECT_API_KEY }}" | base64 --decode -o $API_KEY_PATH
+          echo "APPLE_API_KEY_PATH=$API_KEY_PATH" >> $GITHUB_ENV
+
       - name: Build
         shell: bash
         run: $BUILD_CMD build --locked --release --target=${{ matrix.job.target }}
@@ -157,6 +188,98 @@ jobs:
           # Let subsequent steps know where to find the binary
           echo "BIN_PATH=${BIN_PATH}" >> $GITHUB_OUTPUT
           echo "BIN_NAME=${BIN_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Codesign executable (macOS)
+        if: startsWith(matrix.job.os, 'macos-')
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ env.APP_STORE_CONNECT_API_KEY_ISSUER }}
+          APPLE_API_KEY: ${{ env.APP_STORE_CONNECT_API_KEY_ID }}
+        run: |
+          codesign --force --options runtime \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --timestamp \
+            --identifier ai.piebald.splitrail \
+            "${{ steps.bin.outputs.BIN_PATH }}"
+
+      - name: Create notarization archive (macOS)
+        if: startsWith(matrix.job.os, 'macos-')
+        shell: bash
+        run: |
+          BIN_DIR=$(dirname "${{ steps.bin.outputs.BIN_PATH }}")
+          BIN_NAME="${{ steps.bin.outputs.BIN_NAME }}"
+          case "${{ matrix.job.os }}" in
+            macos-15-intel) PLATFORM="macos-x64";;
+            macos-15) PLATFORM="macos-arm64";;
+            *) echo "Unsupported macOS: ${{ matrix.job.os }}"; exit 1;;
+          esac
+          pushd "$BIN_DIR" >/dev/null
+          zip "${{ needs.crate_metadata.outputs.name }}-${PLATFORM}.zip" "$BIN_NAME"
+          popd >/dev/null
+
+      - name: Notarize archive (macOS)
+        if: startsWith(matrix.job.os, 'macos-')
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ env.APP_STORE_CONNECT_API_KEY_ISSUER }}
+          APPLE_API_KEY: ${{ env.APP_STORE_CONNECT_API_KEY_ID }}
+        run: |
+          BIN_DIR=$(dirname "${{ steps.bin.outputs.BIN_PATH }}")
+          case "${{ matrix.job.os }}" in
+            macos-15-intel) PLATFORM="macos-x64";;
+            macos-15) PLATFORM="macos-arm64";;
+            *) echo "Unsupported macOS: ${{ matrix.job.os }}"; exit 1;;
+          esac
+          ARCHIVE_PATH="$BIN_DIR/${{ needs.crate_metadata.outputs.name }}-${PLATFORM}.zip"
+          xcrun notarytool submit "$ARCHIVE_PATH" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+
+      - name: Cleanup notarization archive and certificate (macOS)
+        if: always() && startsWith(matrix.job.os, 'macos-')
+        shell: bash
+        run: |
+          BIN_DIR=$(dirname "${{ steps.bin.outputs.BIN_PATH }}")
+          case "${{ matrix.job.os }}" in
+            macos-15-intel) PLATFORM="macos-x64";;
+            macos-15) PLATFORM="macos-arm64";;
+            *) echo "Unsupported macOS: ${{ matrix.job.os }}"; exit 1;;
+          esac
+          rm -f "$BIN_DIR/${{ needs.crate_metadata.outputs.name }}-${PLATFORM}.zip"
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
+          rm -f $RUNNER_TEMP/apple-api-key || true
+
+      - name: Decode Windows code signing certificate
+        if: startsWith(matrix.job.os, 'windows-')
+        run: |
+          $certBytes = [System.Convert]::FromBase64String("${{ env.WINDOWS_CODE_SIGNING_CERT }}")
+          [System.IO.File]::WriteAllBytes("piebald_llc.crt", $certBytes)
+
+      - name: Add SignTool to PATH
+        if: startsWith(matrix.job.os, 'windows-')
+        uses: kamaranl/add-signtool-action@v1
+
+      - name: Install Google Cloud KMS CNG provider
+        if: startsWith(matrix.job.os, 'windows-')
+        run: |
+          Invoke-WebRequest -Uri https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/cng-v1.3/kmscng-1.3-windows-amd64.zip -OutFile kmscng.zip
+          Expand-Archive -Path kmscng.zip -DestinationPath .
+          $proc = Start-Process "msiexec" "/i kmscng-1.3-windows-amd64\kmscng.msi /qn" -NoNewWindow -PassThru -Wait
+          Remove-Item -Path kmscng.zip,kmscng-1.3-windows-amd64 -Recurse -Force
+          exit $proc.ExitCode
+
+      - name: Sign Windows executable
+        if: startsWith(matrix.job.os, 'windows-')
+        run: |
+          signtool sign `
+            /v /debug /fd sha256 `
+            /t http://timestamp.digicert.com `
+            /f piebald_llc.crt `
+            /csp "Google Cloud KMS Provider" `
+            /kc ${{ vars.GCP_KMS_KEY }} `
+            "${{ steps.bin.outputs.BIN_PATH }}"
 
       - name: Create tarball
         id: package
@@ -271,34 +394,38 @@ jobs:
           fakeroot dpkg-deb --build "${DPKG_DIR}" "${DPKG_PATH}"
 
       - name: "Artifact upload: tarball"
-        uses: actions/upload-artifact@master
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.PKG_NAME }}
           path: ${{ steps.package.outputs.PKG_PATH }}
 
       - name: "Artifact upload: Debian package"
-        uses: actions/upload-artifact@master
+        uses: actions/upload-artifact@v4
         if: steps.debian-package.outputs.DPKG_NAME
         with:
           name: ${{ steps.debian-package.outputs.DPKG_NAME }}
           path: ${{ steps.debian-package.outputs.DPKG_PATH }}
 
-      - name: Check for release
-        id: is-release
-        shell: bash
-        run: |
-          unset IS_RELEASE ; if [[ $GITHUB_REF =~ ^refs/tags/v[0-9].* ]]; then IS_RELEASE='true' ; fi
-          echo "IS_RELEASE=${IS_RELEASE}" >> $GITHUB_OUTPUT
+  publish_release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs:
+      - build
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Publish archives and packages
         uses: softprops/action-gh-release@v2
-        if: steps.is-release.outputs.IS_RELEASE
         with:
           generate_release_notes: true
           make_latest: "true"
           files: |
-            ${{ steps.package.outputs.PKG_PATH }}
-            ${{ steps.debian-package.outputs.DPKG_PATH }}
+            artifacts/**
 
   # TODO: Enable after initial release.
   # winget:
