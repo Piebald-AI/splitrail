@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.2.3] - 2025-11-23
 - Add code-signing for Windows and macOS builds (#47) - @signadou
+- Fix: Timezone issue in TUI & Add: Gemini CLI reasoning tokens (#45) - @mike1858
+- Feat: Add --full and --force-analyzer flag to upload command (#46) - @mike1858
 
 ## [2.2.2] - 2025-11-21
 - Correct extraneous upload requests (#43) - @mike1858
