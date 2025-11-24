@@ -80,5 +80,6 @@ jobs:
         with:
           toolchain: nightly
           components: rustc-codegen-cranelift-preview
-      - run: cargo install cargo-audit --locked
+      - name: Install `cargo-audit`
+        uses: taiki-e/install-action@cargo-audit
       - run: cargo audit
