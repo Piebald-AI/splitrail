@@ -258,6 +258,15 @@ pub async fn get_messages_later_than(
     Ok(messages_later_than_date)
 }
 
+/// Filters messages to only include those with zero (or near-zero) cost
+pub fn filter_zero_cost_messages(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    const EPSILON: f64 = 1e-10;
+    messages
+        .into_iter()
+        .filter(|msg| msg.stats.cost.abs() < EPSILON)
+        .collect()
+}
+
 pub fn hash_text(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text);

@@ -61,6 +61,10 @@ struct UploadArgs {
     /// Force re-upload for a specific analyzer (e.g., "Claude Code").
     #[arg(long)]
     force_analyzer: Option<String>,
+
+    /// Re-upload only messages with zero cost (useful for fixing pricing errors).
+    #[arg(long, default_value_t = false)]
+    zero_cost: bool,
 }
 
 #[derive(Args)]
@@ -267,6 +271,13 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
                 utils::get_messages_later_than(config.upload.last_date_uploaded, all_messages)
                     .await
                     .context("Failed to get messages later than last saved date")?
+            };
+
+            // Apply zero-cost filter if requested
+            let messages_to_upload = if args.zero_cost {
+                utils::filter_zero_cost_messages(messages_to_upload)
+            } else {
+                messages_to_upload
             };
 
             let progress_callback = tui::create_upload_progress_callback(&format_options);
