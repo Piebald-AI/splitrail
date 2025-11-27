@@ -1,8 +1,6 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
-use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
-};
+use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -10,8 +8,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use glob::glob;
 use rayon::prelude::*;
 use serde::Deserialize;
-use simd_json::prelude::*;
 use simd_json::OwnedValue;
+use simd_json::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -202,9 +200,7 @@ fn load_projects(project_root: &Path) -> HashMap<String, OpenCodeProject> {
             match fs::read_to_string(&path) {
                 Ok(content) => {
                     let mut bytes = content.into_bytes();
-                    if let Ok(project) =
-                        simd_json::from_slice::<OpenCodeProject>(&mut bytes)
-                    {
+                    if let Ok(project) = simd_json::from_slice::<OpenCodeProject>(&mut bytes) {
                         projects.insert(project.id.clone(), project);
                     }
                 }
@@ -243,9 +239,7 @@ fn load_sessions(session_root: &Path) -> HashMap<String, OpenCodeSession> {
                 match fs::read_to_string(&session_path) {
                     Ok(content) => {
                         let mut bytes = content.into_bytes();
-                        if let Ok(session) =
-                            simd_json::from_slice::<OpenCodeSession>(&mut bytes)
-                        {
+                        if let Ok(session) = simd_json::from_slice::<OpenCodeSession>(&mut bytes) {
                             sessions.insert(session.id.clone(), session);
                         }
                     }
@@ -287,10 +281,7 @@ fn extract_tool_stats_from_parts(part_root: &Path, message_id: &str) -> Stats {
             continue;
         };
 
-        let Some(part_type) = value
-            .get("type")
-            .and_then(|v| v.as_str())
-        else {
+        let Some(part_type) = value.get("type").and_then(|v| v.as_str()) else {
             continue;
         };
 
@@ -298,10 +289,7 @@ fn extract_tool_stats_from_parts(part_root: &Path, message_id: &str) -> Stats {
             continue;
         }
 
-        let Some(tool_name) = value
-            .get("tool")
-            .and_then(|v| v.as_str())
-        else {
+        let Some(tool_name) = value.get("tool").and_then(|v| v.as_str()) else {
             continue;
         };
 
@@ -336,8 +324,7 @@ fn to_conversation_message(
     part_root: &Path,
 ) -> ConversationMessage {
     let session = sessions.get(&msg.session_id);
-    let project = session
-        .and_then(|s| projects.get(&s.project_id));
+    let project = session.and_then(|s| projects.get(&s.project_id));
 
     let project_hash = if let Some(project) = project {
         hash_text(&project.worktree)
@@ -350,8 +337,7 @@ fn to_conversation_message(
     let conversation_hash = hash_text(&msg.session_id);
 
     let local_hash = Some(msg.id.clone());
-    let global_hash =
-        hash_text(&format!("opencode_{}_{}", msg.session_id, msg.id));
+    let global_hash = hash_text(&format!("opencode_{}_{}", msg.session_id, msg.id));
 
     let date = ms_to_datetime(msg.time.created);
 
@@ -457,8 +443,7 @@ impl Analyzer for OpenCodeAnalyzer {
         &self,
         sources: Vec<DataSource>,
     ) -> Result<Vec<ConversationMessage>> {
-        let home_dir =
-            std::env::home_dir().context("Could not find home directory")?;
+        let home_dir = std::env::home_dir().context("Could not find home directory")?;
         let storage_root = home_dir.join(".local/share/opencode/storage");
         let project_root = storage_root.join("project");
         let session_root = storage_root.join("session");
@@ -474,32 +459,22 @@ impl Analyzer for OpenCodeAnalyzer {
                 let content = match fs::read_to_string(&path) {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!(
-                            "Failed to read OpenCode message {}: {e}",
-                            path.display()
-                        );
+                        eprintln!("Failed to read OpenCode message {}: {e}", path.display());
                         return None;
                     }
                 };
 
                 let mut bytes = content.into_bytes();
-                let msg = match simd_json::from_slice::<OpenCodeMessage>(&mut bytes)
-                {
+                let msg = match simd_json::from_slice::<OpenCodeMessage>(&mut bytes) {
                     Ok(m) => m,
                     Err(e) => {
-                        eprintln!(
-                            "Failed to parse OpenCode message {}: {e}",
-                            path.display()
-                        );
+                        eprintln!("Failed to parse OpenCode message {}: {e}", path.display());
                         return None;
                     }
                 };
 
                 Some(to_conversation_message(
-                    msg,
-                    &sessions,
-                    &projects,
-                    &part_root,
+                    msg, &sessions, &projects, &part_root,
                 ))
             })
             .collect();
