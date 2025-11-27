@@ -1,0 +1,90 @@
+{
+  "name": "splitrail-vscode",
+  "displayName": "Splitrail",
+  "description": "Integrate Splitrail into VS Code.",
+  "version": "0.1.0",
+  "publisher": "Piebald, LLC",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:splitrail.openDashboard",
+    "onCommand:splitrail.refresh",
+    "onCommand:splitrail.openCloud",
+    "onCommand:splitrail.showPopup",
+    "onView:splitrailDashboard"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "splitrail.openDashboard",
+        "title": "Splitrail: Open Dashboard"
+      },
+      {
+        "command": "splitrail.refresh",
+        "title": "Splitrail: Refresh Usage"
+      },
+      {
+        "command": "splitrail.openCloud",
+        "title": "Splitrail: Open Cloud Dashboard"
+      },
+      {
+        "command": "splitrail.upload",
+        "title": "Splitrail: Upload to Cloud"
+      },
+      {
+        "command": "splitrail.showPopup",
+        "title": "Splitrail: Show Usage Popup"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "splitrail",
+          "title": "Splitrail",
+          "icon": "resources/splitrail.svg"
+        }
+      ]
+    },
+    "views": {
+      "splitrail": [
+        {
+          "id": "splitrailDashboard",
+          "name": "Dashboard",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Splitrail",
+      "properties": {
+        "splitrail.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the splitrail CLI binary. Leave empty to auto-detect (tries ../target/debug/splitrail, then PATH). Example: ../target/debug/splitrail"
+        },
+        "splitrail.liveUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable live updates - automatically refresh stats when AI tool data files change."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "echo \"No lint configured\"",
+    "test": "echo \"No tests configured\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.0"
+  }
+}
