@@ -66,6 +66,12 @@ enum GeminiCliMessage {
         timestamp: DateTime<Utc>,
         content: String,
     },
+    Info {
+        id: String,
+        #[serde(deserialize_with = "deserialize_utc_timestamp")]
+        timestamp: DateTime<Utc>,
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
