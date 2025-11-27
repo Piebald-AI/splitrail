@@ -4,6 +4,7 @@ pub mod codex_cli;
 pub mod copilot;
 pub mod gemini_cli;
 pub mod kilo_code;
+pub mod opencode;
 pub mod qwen_code;
 pub mod roo_code;
 
@@ -13,6 +14,7 @@ pub use codex_cli::CodexCliAnalyzer;
 pub use copilot::CopilotAnalyzer;
 pub use gemini_cli::GeminiCliAnalyzer;
 pub use kilo_code::KiloCodeAnalyzer;
+pub use opencode::OpenCodeAnalyzer;
 pub use qwen_code::QwenCodeAnalyzer;
 pub use roo_code::RooCodeAnalyzer;
 

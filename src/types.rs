@@ -14,6 +14,7 @@ pub enum Application {
     RooCode,
     KiloCode,
     Copilot,
+    OpenCode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
