@@ -27,6 +27,10 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
+    /// Output stats as JSON instead of running the TUI
+    #[arg(long)]
+    json: bool,
+
     /// Use comma-separated number formatting
     #[arg(long)]
     number_comma: bool,
@@ -50,6 +54,8 @@ enum Commands {
     Upload(UploadArgs),
     /// Manage configuration
     Config(ConfigArgs),
+    /// Output usage statistics as JSON
+    Stats(StatsArgs),
 }
 
 #[derive(Args)]
@@ -67,6 +73,17 @@ struct UploadArgs {
 struct ConfigArgs {
     #[command(subcommand)]
     subcommand: ConfigSubcommands,
+}
+
+#[derive(Args)]
+struct StatsArgs {
+    /// Include raw per-message data in the JSON output
+    #[arg(long, default_value_t = false)]
+    include_messages: bool,
+
+    /// Pretty-print JSON instead of a single line
+    #[arg(long, default_value_t = false)]
+    pretty: bool,
 }
 
 #[derive(Subcommand)]
@@ -106,8 +123,20 @@ async fn main() {
 
     match cli.command {
         None => {
-            // No subcommand - run default behavior
-            run_default(format_options).await;
+            if cli.json {
+                if let Err(e) = run_stats(StatsArgs {
+                    include_messages: false,
+                    pretty: true,
+                })
+                .await
+                {
+                    eprintln!("Error generating JSON stats: {e:#}");
+                    std::process::exit(1);
+                }
+            } else {
+                // No subcommand - run default behavior
+                run_default(format_options).await;
+            }
         }
         Some(Commands::Upload(args)) => {
             match run_upload(args).await.context("Failed to run upload") {
@@ -120,6 +149,12 @@ async fn main() {
         }
         Some(Commands::Config(config_args)) => {
             handle_config_subcommand(config_args).await;
+        }
+        Some(Commands::Stats(stats_args)) => {
+            if let Err(e) = run_stats(stats_args).await {
+                eprintln!("Error generating JSON stats: {e:#}");
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -290,6 +325,27 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+async fn run_stats(args: StatsArgs) -> Result<()> {
+    let registry = create_analyzer_registry();
+    let mut stats = registry.load_all_stats().await?;
+
+    if !args.include_messages {
+        for analyzer_stats in &mut stats.analyzer_stats {
+            analyzer_stats.messages.clear();
+        }
+    }
+
+    if args.pretty {
+        let json = serde_json::to_string_pretty(&stats)?;
+        println!("{json}");
+    } else {
+        let json = serde_json::to_string(&stats)?;
+        println!("{json}");
+    }
+
+    Ok(())
 }
 
 async fn handle_config_subcommand(config_args: ConfigArgs) {
