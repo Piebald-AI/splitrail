@@ -1,20 +1,20 @@
 use std::collections::HashMap;
 
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{
+    AnnotateAble, Implementation, ListResourcesResult, PaginatedRequestParam, ProtocolVersion,
+    RawResource, ReadResourceRequestParam, ReadResourceResult, ResourceContents,
+    ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{
-        AnnotateAble, Implementation, ListResourcesResult, PaginatedRequestParam, ProtocolVersion,
-        RawResource, ReadResourceRequestParam, ReadResourceResult, ResourceContents,
-        ServerCapabilities, ServerInfo,
-    },
-    service::RequestContext,
-    tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
-    ServiceExt,
+    ErrorData as McpError, Json, RoleServer, ServerHandler, ServiceExt, tool, tool_handler,
+    tool_router,
 };
 
-use crate::create_analyzer_registry;
 use crate::types::{MultiAnalyzerStats, Stats};
-use crate::utils;
+use crate::{create_analyzer_registry, utils};
 
 use super::types::*;
 
@@ -40,9 +40,10 @@ impl SplitrailMcpServer {
     /// Load stats from all analyzers (reuses existing infrastructure)
     async fn load_stats(&self) -> Result<MultiAnalyzerStats, McpError> {
         let registry = create_analyzer_registry();
-        registry.load_all_stats().await.map_err(|e| {
-            McpError::internal_error(format!("Failed to load stats: {}", e), None)
-        })
+        registry
+            .load_all_stats()
+            .await
+            .map_err(|e| McpError::internal_error(format!("Failed to load stats: {}", e), None))
     }
 
     /// Get daily stats for a specific analyzer or combined across all
@@ -285,8 +286,10 @@ impl SplitrailMcpServer {
                     .iter()
                     .map(|(_, ds)| ds.stats.input_tokens + ds.stats.output_tokens)
                     .sum();
-                let total_tool_calls: u32 =
-                    filtered_stats.iter().map(|(_, ds)| ds.stats.tool_calls).sum();
+                let total_tool_calls: u32 = filtered_stats
+                    .iter()
+                    .map(|(_, ds)| ds.stats.tool_calls)
+                    .sum();
 
                 ToolSummary {
                     name: analyzer_stats.analyzer_name.clone(),
@@ -354,8 +357,11 @@ impl ServerHandler for SplitrailMcpServer {
             resources: vec![
                 RawResource::new(resource_uris::DAILY_SUMMARY, "Daily Summary".to_string())
                     .no_annotation(),
-                RawResource::new(resource_uris::MODEL_BREAKDOWN, "Model Breakdown".to_string())
-                    .no_annotation(),
+                RawResource::new(
+                    resource_uris::MODEL_BREAKDOWN,
+                    "Model Breakdown".to_string(),
+                )
+                .no_annotation(),
             ],
             next_cursor: None,
         })
@@ -380,8 +386,13 @@ impl ServerHandler for SplitrailMcpServer {
                 let summary = if let Some((date, ds)) = daily_stats.iter().next_back() {
                     format!(
                         "Date: {}\nMessages: {} user, {} AI\nConversations: {}\nCost: ${:.2}\nTokens: {} in, {} out",
-                        date, ds.user_messages, ds.ai_messages, ds.conversations,
-                        ds.stats.cost, ds.stats.input_tokens, ds.stats.output_tokens
+                        date,
+                        ds.user_messages,
+                        ds.ai_messages,
+                        ds.conversations,
+                        ds.stats.cost,
+                        ds.stats.input_tokens,
+                        ds.stats.output_tokens
                     )
                 } else {
                     "No data available".to_string()

@@ -515,7 +515,10 @@ fn test_parse_agent_session_fallback_name_from_assistant() {
     assert_eq!(messages[0].role, MessageRole::Assistant);
 
     // Fallback name should be extracted from the first assistant message's text content
-    assert!(fallback_name.is_some(), "Fallback name should be extracted from first assistant message");
+    assert!(
+        fallback_name.is_some(),
+        "Fallback name should be extracted from first assistant message"
+    );
     let name = fallback_name.unwrap();
     assert!(
         name.starts_with("I'll start by exploring the codebase"),

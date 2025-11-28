@@ -524,7 +524,9 @@ pub fn parse_jsonl_file<R: BufRead>(
 
                     // Capture fallback session name from the first user message
                     // or first assistant message (for agent sub-sessions that start with assistant)
-                    if fallback_session_name.is_none() && let Some(content_val) = &content {
+                    if fallback_session_name.is_none()
+                        && let Some(content_val) = &content
+                    {
                         // Extract user-visible text from either blocks or string content
                         let text_opt: Option<String> = match content_val {
                             Content::Blocks(blocks) => {
