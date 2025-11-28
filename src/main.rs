@@ -11,6 +11,7 @@ use analyzers::{
 mod analyzer;
 mod analyzers;
 mod config;
+mod mcp;
 mod models;
 mod reqwest_simd_json;
 mod tui;
@@ -56,6 +57,8 @@ enum Commands {
     Config(ConfigArgs),
     /// Output usage statistics as JSON
     Stats(StatsArgs),
+    /// Run as an MCP (Model Context Protocol) server
+    Mcp,
 }
 
 #[derive(Args)]
@@ -160,10 +163,16 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Commands::Mcp) => {
+            if let Err(e) = mcp::run_mcp_server().await {
+                eprintln!("MCP server error: {e:#}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
-fn create_analyzer_registry() -> AnalyzerRegistry {
+pub fn create_analyzer_registry() -> AnalyzerRegistry {
     let mut registry = AnalyzerRegistry::new();
 
     // Register available analyzers

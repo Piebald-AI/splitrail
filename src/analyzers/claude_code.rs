@@ -126,7 +126,7 @@ impl Analyzer for ClaudeCodeAnalyzer {
                 }
             }
 
-            // Fallback: If no summary found, use the fallback name (first user message)
+            // Fallback: If no summary found, use the fallback name (first message)
             if !found_summary && let Some(name) = conversation_fallbacks.get(&conversation_hash) {
                 conversation_summaries.insert(conversation_hash, name.clone());
             }
@@ -523,10 +523,8 @@ pub fn parse_jsonl_file<R: BufRead>(
                     }
 
                     // Capture fallback session name from the first user message
-                    if matches!(msg.role, MessageRole::User)
-                        && fallback_session_name.is_none()
-                        && let Some(content_val) = &content
-                    {
+                    // or first assistant message (for agent sub-sessions that start with assistant)
+                    if fallback_session_name.is_none() && let Some(content_val) = &content {
                         // Extract user-visible text from either blocks or string content
                         let text_opt: Option<String> = match content_val {
                             Content::Blocks(blocks) => {
