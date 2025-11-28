@@ -27,7 +27,7 @@ simd-json = { version = "0.15.1", features = ["serde"] }
 tiktoken-rs = "0.6"
 
 # MCP server support
-rmcp = { path = "../rust-sdk/crates/rmcp", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "0.9.1", features = ["server", "macros", "transport-io"] }
 schemars = "1.0"
 
 [dependencies.clap]
