@@ -488,3 +488,41 @@ fn test_extract_tool_stats_unknown_tools() {
     assert_eq!(stats.todo_writes, 0);
     assert_eq!(stats.todo_reads, 0);
 }
+
+// Test data for agent sub-session that starts with assistant message (no user message)
+static AGENT_SESSION_DATA: LazyLock<String> = LazyLock::new(|| {
+    r#"{"parentUuid":null,"isSidechain":true,"userType":"external","cwd":"/code/test","sessionId":"agent-test-session","version":"2.0.51","agentId":"test-agent","message":{"model":"claude-sonnet-4-5-20250929","id":"msg_agent_001","type":"message","role":"assistant","content":[{"type":"text","text":"I'll start by exploring the codebase to understand its structure."}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":4263,"output_tokens":8,"service_tier":"standard"}},"requestId":"req_agent_test","type":"assistant","uuid":"agent-uuid-001","timestamp":"2025-11-25T00:19:15.622Z"}
+{"parentUuid":"agent-uuid-001","isSidechain":true,"userType":"external","cwd":"/code/test","sessionId":"agent-test-session","version":"2.0.51","agentId":"test-agent","message":{"model":"claude-sonnet-4-5-20250929","id":"msg_agent_002","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_glob_001","name":"Glob","input":{"pattern":"**/*.rs"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":500,"output_tokens":15,"service_tier":"standard"}},"requestId":"req_agent_test2","type":"assistant","uuid":"agent-uuid-002","timestamp":"2025-11-25T00:19:20.000Z"}"#.to_string()
+});
+
+#[test]
+fn test_parse_agent_session_fallback_name_from_assistant() {
+    // Agent sub-sessions start with assistant messages, not user messages.
+    // The fallback session name should be extracted from the first message with text content.
+    let cursor = Cursor::new(AGENT_SESSION_DATA.clone());
+    let mut buf_reader = BufReader::new(cursor);
+    let (messages, _, _, fallback_name) = parse_jsonl_file(
+        Path::new("agent-test.jsonl"),
+        &mut buf_reader,
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
+
+    assert_eq!(messages.len(), 2);
+
+    // First message should be assistant
+    assert_eq!(messages[0].role, MessageRole::Assistant);
+
+    // Fallback name should be extracted from the first assistant message's text content
+    assert!(
+        fallback_name.is_some(),
+        "Fallback name should be extracted from first assistant message"
+    );
+    let name = fallback_name.unwrap();
+    assert!(
+        name.starts_with("I'll start by exploring the codebase"),
+        "Fallback name should start with the first message text, got: {}",
+        name
+    );
+}
