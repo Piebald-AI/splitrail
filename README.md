@@ -1,6 +1,6 @@
 # Splitrail
 
-Splitrail is a **fast, cross-platform, real-time Gemini CLI / Claude Code / Codex / Kilo Code / Cline / Roo Code / Qwen Code token usage tracker and cost monitor.**  Run one command to instantly review all of your CLI coding agent usage.  Upload your usage data to your private account on the [Splitrail Cloud](https://splitrail.dev) for safe-keeping and cross-machine usage aggregation.
+Splitrail is a **fast, cross-platform, real-time Claude Code / Codex CLI / Gemini CLI / Qwen Code / Cline / Roo Code / Kilo Code / GitHub Copilot / OpenCode token usage tracker and cost monitor.**  Run one command to instantly review all of your CLI coding agent usage.  Upload your usage data to your private account on the [Splitrail Cloud](https://splitrail.dev) for safe-keeping and cross-machine usage aggregation.
 
 **Download the binary for your platform on the [Releases](https://github.com/Piebald-AI/splitrail/releases) page.**
 
