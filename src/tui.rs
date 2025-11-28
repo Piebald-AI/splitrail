@@ -1347,7 +1347,7 @@ fn draw_ui(
     } else {
         // No data message
         let no_data_message = Paragraph::new(Text::styled(
-            "You don't have any agentic development tool data.  Once you start using Claude Code, Gemini CLI, or Codex CLI, you'll see some data here.",
+            "You don't have any agentic development tool data.  Once you start using Claude Code / Codex CLI /Gemini CLI / Qwen Code / Cline / Roo Code / Kilo Code / GitHub Copilot / OpenCode, you'll see some data here.",
             Style::default().add_modifier(Modifier::DIM),
         ));
         frame.render_widget(no_data_message, chunks[1]);
