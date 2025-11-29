@@ -1,15 +1,19 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use jwalk::WalkDir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
+use crate::cache::FileCacheEntry;
 use crate::models::calculate_total_cost;
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{
+    AgenticCodingToolStats, Application, ConversationMessage, FileMetadata, MessageRole, Stats,
+};
 use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
 
 const DEFAULT_FALLBACK_MODEL: &str = "gpt-5";
@@ -31,7 +35,7 @@ impl Analyzer for CodexCliAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        if let Some(home_dir) = std::env::home_dir() {
+        if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
             patterns.push(format!("{home_str}/.codex/sessions/**/*.jsonl"));
         }
@@ -40,14 +44,22 @@ impl Analyzer for CodexCliAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let patterns = self.get_data_glob_patterns();
         let mut sources = Vec::new();
 
-        for pattern in patterns {
-            for entry in glob::glob(&pattern)? {
-                let path = entry?;
-                if path.is_file() {
-                    sources.push(DataSource { path });
+        if let Some(home_dir) = dirs::home_dir() {
+            let sessions_dir = home_dir.join(".codex").join("sessions");
+
+            if sessions_dir.is_dir() {
+                // jwalk walks directories in parallel, recursively
+                for entry in WalkDir::new(&sessions_dir)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_type().is_file()
+                            && e.path().extension().is_some_and(|ext| ext == "jsonl")
+                    })
+                {
+                    sources.push(DataSource { path: entry.path() });
                 }
             }
         }
@@ -69,7 +81,10 @@ impl Analyzer for CodexCliAnalyzer {
 
         let aggregated: Result<Vec<ConversationMessage>> = sources
             .into_par_iter()
-            .map(|source| parse_codex_cli_jsonl_file(&source.path))
+            .map(|source| {
+                // parse_codex_cli_jsonl_file returns (messages, model), we only need messages here
+                parse_codex_cli_jsonl_file(&source.path).map(|(msgs, _model)| msgs)
+            })
             // Start the reduction with an empty vector and extend it with the
             // entries coming from each successfully-parsed file.
             .try_reduce(Vec::new, |mut acc, mut entries| {
@@ -103,6 +118,90 @@ impl Analyzer for CodexCliAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    fn supports_caching(&self) -> bool {
+        true
+    }
+
+    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
+        let mut metadata = FileMetadata::from_path(&source.path)?;
+        let (messages, detected_model) = parse_codex_cli_jsonl_file(&source.path)?;
+
+        // Set last_parsed_offset to file size (we've parsed everything)
+        metadata.last_parsed_offset = metadata.size;
+
+        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
+
+        Ok(FileCacheEntry {
+            metadata,
+            messages,
+            daily_contributions,
+            cached_model: detected_model, // Store detected model for delta parsing
+        })
+    }
+
+    fn supports_delta_parsing(&self) -> bool {
+        true
+    }
+
+    fn parse_single_file_incremental(
+        &self,
+        source: &DataSource,
+        cached: Option<&FileCacheEntry>,
+    ) -> Result<FileCacheEntry> {
+        let current_meta = FileMetadata::from_path(&source.path)?;
+
+        // Check if we can do delta parsing
+        if let Some(cached_entry) = cached {
+            // Check for truncation - requires full reparse
+            if cached_entry.metadata.needs_full_reparse(&current_meta) {
+                return self.parse_single_file(source);
+            }
+
+            // Check for append - can do delta parsing
+            if cached_entry.metadata.is_append_only(&current_meta) {
+                // Delta parse only new bytes (pass expected_size to detect races)
+                let delta_result = parse_codex_cli_jsonl_file_delta(
+                    &source.path,
+                    cached_entry.metadata.last_parsed_offset,
+                    current_meta.size,
+                    cached_entry.cached_model.as_deref(),
+                );
+
+                // If delta parse fails (e.g., file truncated), fall back to full reparse
+                let (new_messages, new_offset) = match delta_result {
+                    Ok(result) => result,
+                    Err(_) => return self.parse_single_file(source),
+                };
+
+                // Merge with cached messages
+                let mut all_messages = cached_entry.messages.clone();
+                all_messages.extend(new_messages);
+
+                // Re-aggregate daily contributions
+                let daily_contributions = crate::utils::aggregate_by_date_simple(&all_messages);
+
+                return Ok(FileCacheEntry {
+                    metadata: FileMetadata {
+                        size: current_meta.size,
+                        modified: current_meta.modified,
+                        last_parsed_offset: new_offset,
+                    },
+                    messages: all_messages,
+                    daily_contributions,
+                    cached_model: cached_entry.cached_model.clone(), // Preserve cached model
+                });
+            }
+
+            // File unchanged - use cached entry directly
+            if cached_entry.metadata.is_unchanged(&current_meta) {
+                return Ok(cached_entry.clone());
+            }
+        }
+
+        // No cache or mtime changed without size change - full reparse
+        self.parse_single_file(source)
     }
 }
 
@@ -210,33 +309,37 @@ fn is_noise_title_candidate(text: &str) -> bool {
         || trimmed.starts_with("# AGENTS.md instructions for")
 }
 
-pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
-    let mut entries = Vec::new();
+/// Returns (messages, detected_session_model_name)
+pub(crate) fn parse_codex_cli_jsonl_file(
+    file_path: &Path,
+) -> Result<(Vec<ConversationMessage>, Option<String>)> {
+    // Pre-allocate for typical session sizes
+    let mut entries = Vec::with_capacity(100);
     let file_path_str = file_path.to_string_lossy().into_owned();
 
-    let file = File::open(file_path)?;
-    let reader = BufReader::with_capacity(64 * 1024, file);
+    let mut file = File::open(file_path)?;
+
+    // Read entire file at once to avoid per-line allocations
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
 
     let mut session_model: Option<SessionModel> = None;
     let mut previous_total_usage: Option<CodexCliTokenUsage> = None;
     let mut saw_token_usage = false;
     let mut _turn_context: Option<CodexCliTurnContext> = None;
-    let mut current_tool_call_ids: HashSet<String> = HashSet::new();
+    let mut current_tool_call_ids: HashSet<String> = HashSet::with_capacity(20);
     let mut session_name: Option<String> = None;
     let mut fallback_session_name: Option<String> = None;
 
-    for line_result in reader.lines() {
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        if line.trim().is_empty() {
+    for line in buffer.split(|&b| b == b'\n') {
+        // Skip empty lines
+        if line.is_empty() || line.iter().all(|&b| b.is_ascii_whitespace()) {
             continue;
         }
 
-        let wrapper = match simd_json::from_slice::<CodexCliWrapper>(&mut line.clone().into_bytes())
-        {
+        // simd_json needs mutable slice - copy this line only
+        let mut line_buf = line.to_vec();
+        let wrapper = match simd_json::from_slice::<CodexCliWrapper>(&mut line_buf) {
             Ok(wrapper) => wrapper,
             Err(_) => continue,
         };
@@ -493,7 +596,178 @@ pub(crate) fn parse_codex_cli_jsonl_file(file_path: &Path) -> Result<Vec<Convers
         }
     }
 
-    Ok(entries)
+    // Return both messages and the detected session model name
+    let detected_model = session_model.map(|m| m.name);
+    Ok((entries, detected_model))
+}
+
+/// Parse Codex CLI JSONL file starting from a byte offset (delta parsing).
+/// Returns (new_messages, new_end_offset).
+///
+/// Uses the provided cached_model for accurate cost calculations.
+pub(crate) fn parse_codex_cli_jsonl_file_delta(
+    file_path: &Path,
+    start_offset: u64,
+    expected_size: u64,
+    cached_model: Option<&str>,
+) -> Result<(Vec<ConversationMessage>, u64)> {
+    let file = File::open(file_path)?;
+    let file_size = file.metadata()?.len();
+
+    // Race condition protection: if file was truncated between the caller's
+    // metadata check and now, bail out so caller can do a full reparse
+    if file_size < expected_size {
+        anyhow::bail!("file was truncated during delta parse");
+    }
+
+    // Nothing new to parse
+    if start_offset >= file_size {
+        return Ok((Vec::new(), start_offset));
+    }
+
+    let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(start_offset))?;
+
+    // If starting mid-file, skip to first complete line
+    let mut current_offset = start_offset;
+    if start_offset > 0 {
+        let mut skip_buf = Vec::new();
+        let bytes_skipped = reader.read_until(b'\n', &mut skip_buf)?;
+        if bytes_skipped == 0 {
+            return Ok((Vec::new(), start_offset));
+        }
+        current_offset += bytes_skipped as u64;
+    }
+
+    let file_path_str = file_path.to_string_lossy().into_owned();
+    let mut entries = Vec::new();
+    let mut last_successful_offset = current_offset;
+
+    // Use cached model from initial parse, or fallback if not available
+    let model_name = cached_model.unwrap_or(DEFAULT_FALLBACK_MODEL);
+    let session_model = SessionModel::explicit(model_name.to_string());
+
+    loop {
+        let mut line_buf = String::new();
+        let bytes_read = reader.read_line(&mut line_buf)?;
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        let line = line_buf.trim();
+        if line.is_empty() {
+            current_offset += bytes_read as u64;
+            last_successful_offset = current_offset;
+            continue;
+        }
+
+        let is_complete_line = line_buf.ends_with('\n');
+
+        // Parse the wrapper
+        let mut line_bytes = line.as_bytes().to_vec();
+        match simd_json::from_slice::<CodexCliWrapper>(&mut line_bytes) {
+            Ok(wrapper) => {
+                // Handle event_msg entries (which contain token_count events)
+                if wrapper.entry_type == "event_msg" {
+                    let mut payload_bytes = match simd_json::to_vec(&wrapper.payload) {
+                        Ok(b) => b,
+                        Err(_) => {
+                            current_offset += bytes_read as u64;
+                            last_successful_offset = current_offset;
+                            continue;
+                        }
+                    };
+
+                    // Parse as event message and check if it's a token_count event
+                    if let Ok(event) = simd_json::from_slice::<CodexCliEventMsg>(&mut payload_bytes)
+                        && event.event_type == "token_count"
+                        && let Some(info) = event.info
+                    {
+                        // Prefer last_token_usage, fall back to total_token_usage
+                        let usage = info.last_token_usage.or(info.total_token_usage);
+                        if let Some(token_usage) = usage {
+                            let stats = stats_from_usage(&token_usage, &session_model.name);
+
+                            entries.push(ConversationMessage {
+                                application: Application::CodexCli,
+                                model: Some(session_model.name.clone()),
+                                global_hash: hash_text(&format!(
+                                    "{}_{}_delta",
+                                    file_path_str,
+                                    wrapper.timestamp.to_rfc3339()
+                                )),
+                                local_hash: None,
+                                conversation_hash: hash_text(&file_path_str),
+                                date: wrapper.timestamp,
+                                project_hash: "".to_string(),
+                                stats,
+                                role: MessageRole::Assistant,
+                                uuid: None,
+                                session_name: None,
+                            });
+                        }
+                    }
+                }
+                // Also handle response_item messages for user messages
+                else if wrapper.entry_type == "response_item" {
+                    let mut payload_bytes = match simd_json::to_vec(&wrapper.payload) {
+                        Ok(b) => b,
+                        Err(_) => {
+                            current_offset += bytes_read as u64;
+                            last_successful_offset = current_offset;
+                            continue;
+                        }
+                    };
+
+                    if let Ok(message) =
+                        simd_json::from_slice::<CodexCliMessage>(&mut payload_bytes)
+                        && message.message_type == "message"
+                        && let Some(role) = &message.role
+                        && role == "user"
+                    {
+                        entries.push(ConversationMessage {
+                            date: wrapper.timestamp,
+                            global_hash: hash_text(&format!(
+                                "{}_{}_delta",
+                                file_path_str,
+                                wrapper.timestamp.to_rfc3339()
+                            )),
+                            local_hash: None,
+                            conversation_hash: hash_text(&file_path_str),
+                            application: Application::CodexCli,
+                            project_hash: "".to_string(),
+                            model: None,
+                            stats: Stats::default(),
+                            role: MessageRole::User,
+                            uuid: None,
+                            session_name: None,
+                        });
+                    }
+                }
+
+                current_offset += bytes_read as u64;
+                last_successful_offset = current_offset;
+            }
+            Err(e) => {
+                if !is_complete_line {
+                    // Incomplete line at EOF
+                    break;
+                } else {
+                    warn_once(format!(
+                        "Skipping invalid entry in {} at offset {}: {}",
+                        file_path.display(),
+                        current_offset,
+                        e
+                    ));
+                    current_offset += bytes_read as u64;
+                    last_successful_offset = current_offset;
+                }
+            }
+        }
+    }
+
+    Ok((entries, last_successful_offset))
 }
 
 fn calculate_cost_from_tokens(usage: &CodexCliTokenUsage, model_name: &str) -> f64 {

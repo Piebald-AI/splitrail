@@ -1,17 +1,23 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::analyzer::{Analyzer, DataSource};
+use crate::cache::FileCacheEntry;
 use crate::models::calculate_total_cost;
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
-use crate::utils::hash_text;
-use std::collections::{HashMap, HashSet};
+use crate::types::{
+    AgenticCodingToolStats, Application, ConversationMessage, FileMetadata, MessageRole, Stats,
+};
+use crate::utils::{fast_hash, hash_text};
+use jwalk::WalkDir;
 
 // Type alias for parse_jsonl_file return type
 type ParseResult = (
@@ -38,7 +44,7 @@ impl Analyzer for ClaudeCodeAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        if let Some(home_dir) = std::env::home_dir() {
+        if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
             patterns.push(format!("{home_str}/.claude/projects/*/*.jsonl"));
         }
@@ -47,14 +53,21 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let patterns = self.get_data_glob_patterns();
         let mut sources = Vec::new();
 
-        for pattern in patterns {
-            for entry in glob::glob(&pattern)? {
-                let path = entry?;
-                if path.is_file() {
-                    sources.push(DataSource { path });
+        if let Some(home_dir) = dirs::home_dir() {
+            let projects_dir = home_dir.join(".claude").join("projects");
+
+            if projects_dir.is_dir() {
+                // jwalk walks directories in parallel
+                for entry in WalkDir::new(&projects_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+                {
+                    sources.push(DataSource { path: entry.path() });
                 }
             }
         }
@@ -68,77 +81,124 @@ impl Analyzer for ClaudeCodeAnalyzer {
     ) -> Result<Vec<ConversationMessage>> {
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-        // Parse all the files in parallel
-        let results: Vec<_> = sources
-            .into_par_iter()
-            .filter_map(|source| {
-                let project_hash = extract_and_hash_project_id(&source.path);
-                let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
-                match File::open(&source.path) {
-                    Ok(file) => {
-                        let reader = BufReader::new(file);
-                        match parse_jsonl_file(
-                            &source.path,
-                            reader,
-                            &project_hash,
-                            &conversation_hash,
-                        ) {
-                            Ok((msgs, summaries, uuids, fallback)) => {
-                                Some((msgs, summaries, conversation_hash, uuids, fallback))
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to parse {}: {}", source.path.display(), e);
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to open {}: {}", source.path.display(), e);
-                        None
+        // Type for concurrent deduplication entry: (insertion_order, message, seen_fingerprints)
+        type TokenFingerprint = (u64, u64, u64, u64, u64);
+        type DedupEntry = (usize, ConversationMessage, HashSet<TokenFingerprint>);
+
+        // Concurrent deduplication map and session tracking
+        let dedup_map: DashMap<String, DedupEntry> = DashMap::with_capacity(sources.len() * 50);
+        let insertion_counter = AtomicUsize::new(0);
+        let no_hash_counter = AtomicUsize::new(0);
+
+        // Concurrent session name mappings
+        let session_names: DashMap<String, String> = DashMap::new();
+        let conversation_summaries: DashMap<String, String> = DashMap::new();
+        let conversation_fallbacks: DashMap<String, String> = DashMap::new();
+        let conversation_uuids: DashMap<String, Vec<String>> = DashMap::new();
+
+        // Parse all files in parallel, deduplicating as we go
+        sources.into_par_iter().for_each(|source| {
+            let project_hash = extract_and_hash_project_id(&source.path);
+            let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
+
+            if let Ok(file) = File::open(&source.path)
+                && let Ok((msgs, summaries, uuids, fallback)) =
+                    parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)
+            {
+                // Store summaries
+                for (uuid, name) in summaries {
+                    session_names.insert(uuid, name);
+                }
+
+                // Store UUIDs for this conversation
+                conversation_uuids.insert(conversation_hash.clone(), uuids);
+
+                // Store fallback
+                if let Some(fb) = fallback {
+                    conversation_fallbacks.insert(conversation_hash.clone(), fb);
+                }
+
+                // Deduplicate messages as we insert
+                for msg in msgs {
+                    if let Some(local_hash) = &msg.local_hash {
+                        let order = insertion_counter.fetch_add(1, Ordering::Relaxed);
+                        let fp = (
+                            msg.stats.input_tokens,
+                            msg.stats.output_tokens,
+                            msg.stats.cache_creation_tokens,
+                            msg.stats.cache_read_tokens,
+                            msg.stats.cached_tokens,
+                        );
+
+                        dedup_map
+                            .entry(local_hash.clone())
+                            .and_modify(|(_, existing, seen_fps)| {
+                                merge_message_into(existing, &msg, seen_fps, fp);
+                            })
+                            .or_insert_with(|| {
+                                let mut fps = HashSet::new();
+                                fps.insert(fp);
+                                (order, msg, fps)
+                            });
+                    } else {
+                        // No local hash, always keep with unique key
+                        let order = insertion_counter.fetch_add(1, Ordering::Relaxed);
+                        let unique_key = format!(
+                            "__no_hash_{}",
+                            no_hash_counter.fetch_add(1, Ordering::Relaxed)
+                        );
+                        let fp = (
+                            msg.stats.input_tokens,
+                            msg.stats.output_tokens,
+                            msg.stats.cache_creation_tokens,
+                            msg.stats.cache_read_tokens,
+                            msg.stats.cached_tokens,
+                        );
+                        let mut fps = HashSet::new();
+                        fps.insert(fp);
+                        dedup_map.insert(unique_key, (order, msg, fps));
                     }
                 }
+            }
+        });
+
+        // Link session names to conversations (after all parsing complete)
+        for entry in conversation_uuids.iter() {
+            let conversation_hash = entry.key();
+            let uuids = entry.value();
+
+            let mut found_summary = false;
+            for uuid in uuids {
+                if let Some(name) = session_names.get(uuid) {
+                    conversation_summaries.insert(conversation_hash.clone(), name.clone());
+                    found_summary = true;
+                    break;
+                }
+            }
+
+            if !found_summary && let Some(fb) = conversation_fallbacks.get(conversation_hash) {
+                conversation_summaries.insert(conversation_hash.clone(), fb.clone());
+            }
+        }
+
+        // Apply session names to messages and collect results
+        let mut result: Vec<_> = dedup_map
+            .into_iter()
+            .map(|(_, (order, mut msg, _))| {
+                // Apply session name if available
+                if msg.session_name.is_none()
+                    && let Some(name) = conversation_summaries.get(&msg.conversation_hash)
+                {
+                    msg.session_name = Some(name.clone());
+                }
+                (order, msg)
             })
             .collect();
 
-        let mut all_entries = Vec::new();
-        let mut session_names: HashMap<String, String> = HashMap::new();
-        let mut conversation_summaries: HashMap<String, String> = HashMap::new();
-        let mut conversation_fallbacks: HashMap<String, String> = HashMap::new();
-        let mut conversation_uuids: HashMap<String, Vec<String>> = HashMap::new();
+        // Sort by insertion order for deterministic output
+        result.sort_by_key(|(order, _)| *order);
 
-        for (msgs, summaries, conversation_hash, uuids, fallback) in results {
-            all_entries.extend(msgs);
-            session_names.extend(summaries);
-            conversation_uuids.insert(conversation_hash.clone(), uuids);
-            if let Some(fb) = fallback {
-                conversation_fallbacks.insert(conversation_hash, fb);
-            }
-        }
-
-        // First pass: Link via all_uuids (includes skipped messages)
-        for (conversation_hash, uuids) in conversation_uuids {
-            let mut found_summary = false;
-            for uuid in uuids {
-                if let Some(name) = session_names.get(&uuid) {
-                    conversation_summaries.insert(conversation_hash.clone(), name.clone());
-                    found_summary = true;
-                    break; // Found a name for this conversation
-                }
-            }
-
-            // Fallback: If no summary found, use the fallback name (first message)
-            if !found_summary && let Some(name) = conversation_fallbacks.get(&conversation_hash) {
-                conversation_summaries.insert(conversation_hash, name.clone());
-            }
-        }
-
-        // Second pass: Apply session names to messages
-        for message in &mut all_entries {
-            if let Some(name) = conversation_summaries.get(&message.conversation_hash) {
-                message.session_name = Some(name.clone());
-            }
-        }
-        Ok(deduplicate_messages_by_local_hash(all_entries))
+        Ok(result.into_iter().map(|(_, msg)| msg).collect())
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
@@ -165,6 +225,100 @@ impl Analyzer for ClaudeCodeAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    fn supports_caching(&self) -> bool {
+        true
+    }
+
+    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
+        let mut metadata = FileMetadata::from_path(&source.path)?;
+        let project_hash = extract_and_hash_project_id(&source.path);
+        let conversation_hash = hash_text(&source.path.to_string_lossy());
+
+        let file = File::open(&source.path)?;
+        let (messages, _summaries, _uuids, _fallback) =
+            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
+
+        // Set last_parsed_offset to file size (we've parsed everything)
+        metadata.last_parsed_offset = metadata.size;
+
+        // Pre-aggregate daily contributions for this file
+        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
+
+        Ok(FileCacheEntry {
+            metadata,
+            messages,
+            daily_contributions,
+            cached_model: None, // Claude Code has model per-message, no session-level caching needed
+        })
+    }
+
+    fn supports_delta_parsing(&self) -> bool {
+        true
+    }
+
+    fn parse_single_file_incremental(
+        &self,
+        source: &DataSource,
+        cached: Option<&FileCacheEntry>,
+    ) -> Result<FileCacheEntry> {
+        let current_meta = FileMetadata::from_path(&source.path)?;
+
+        // Check if we can do delta parsing
+        if let Some(cached_entry) = cached {
+            // Check for truncation - requires full reparse
+            if cached_entry.metadata.needs_full_reparse(&current_meta) {
+                return self.parse_single_file(source);
+            }
+
+            // Check for append - can do delta parsing
+            if cached_entry.metadata.is_append_only(&current_meta) {
+                let project_hash = extract_and_hash_project_id(&source.path);
+                let conversation_hash = hash_text(&source.path.to_string_lossy());
+
+                // Delta parse only new bytes (pass expected_size to detect races)
+                let delta_result = parse_jsonl_file_delta(
+                    &source.path,
+                    cached_entry.metadata.last_parsed_offset,
+                    current_meta.size,
+                    &project_hash,
+                    &conversation_hash,
+                );
+
+                // If delta parse fails (e.g., file truncated), fall back to full reparse
+                let (new_messages, new_offset) = match delta_result {
+                    Ok(result) => result,
+                    Err(_) => return self.parse_single_file(source),
+                };
+
+                // Merge with cached messages
+                let mut all_messages = cached_entry.messages.clone();
+                all_messages.extend(new_messages);
+
+                // Re-aggregate daily contributions
+                let daily_contributions = crate::utils::aggregate_by_date_simple(&all_messages);
+
+                return Ok(FileCacheEntry {
+                    metadata: FileMetadata {
+                        size: current_meta.size,
+                        modified: current_meta.modified,
+                        last_parsed_offset: new_offset,
+                    },
+                    messages: all_messages,
+                    daily_contributions,
+                    cached_model: None, // Claude Code has model per-message
+                });
+            }
+
+            // File unchanged - use cached entry directly
+            if cached_entry.metadata.is_unchanged(&current_meta) {
+                return Ok(cached_entry.clone());
+            }
+        }
+
+        // No cache or mtime changed without size change - full reparse
+        self.parse_single_file(source)
     }
 }
 
@@ -418,27 +572,34 @@ pub fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
     )
 }
 
-pub fn parse_jsonl_file<R: BufRead>(
+pub fn parse_jsonl_file<R: Read>(
     path: &Path,
-    reader: R,
+    mut reader: R,
     project_hash: &str,
     conversation_hash: &str,
 ) -> Result<ParseResult> {
-    let mut messages = Vec::new();
-    let mut summaries = HashMap::new();
-    let mut all_uuids = Vec::new();
+    // Pre-allocate collections based on typical file sizes
+    let estimated_messages = 50;
+    let mut messages = Vec::with_capacity(estimated_messages);
+    let mut summaries = HashMap::with_capacity(10);
+    let mut all_uuids = Vec::with_capacity(estimated_messages);
     let mut fallback_session_name = None;
 
     let mut current_model = None;
 
-    for (i, line_result) in reader.lines().enumerate() {
-        let line = match line_result {
-            Ok(l) if !l.trim().is_empty() => l,
-            _ => continue,
-        };
+    // Read entire file at once to avoid per-line allocations
+    let mut buffer = Vec::new();
+    reader.read_to_end(&mut buffer)?;
 
-        // Parse the line, filtering various invalid scenarios.
-        let parsed_line = simd_json::from_slice::<ClaudeCodeEntry>(&mut line.clone().into_bytes());
+    for (i, line) in buffer.split(|&b| b == b'\n').enumerate() {
+        // Skip empty lines
+        if line.is_empty() || line.iter().all(|&b| b.is_ascii_whitespace()) {
+            continue;
+        }
+
+        // simd_json needs mutable slice - copy this line only
+        let mut line_buf = line.to_vec();
+        let parsed_line = simd_json::from_slice::<ClaudeCodeEntry>(&mut line_buf);
         match parsed_line {
             Ok(ClaudeCodeEntry::Summary(summary)) => {
                 summaries.insert(summary.leaf_uuid, summary.summary);
@@ -515,7 +676,7 @@ pub fn parse_jsonl_file<R: BufRead>(
                         if let Some(request_id) = request_id
                             && let Some(message_id) = message_id
                         {
-                            msg.local_hash = Some(hash_text(&format!("{request_id}_{message_id}")));
+                            msg.local_hash = Some(fast_hash(&format!("{request_id}_{message_id}")));
                         }
                     } else {
                         // If no usage, it's likely a user message
@@ -576,154 +737,290 @@ pub fn parse_jsonl_file<R: BufRead>(
     Ok((messages, summaries, all_uuids, fallback_session_name))
 }
 
-// Type alias for token fingerprint tracking to avoid type complexity
-type TokenFingerprint = (u64, u64, u64, u64, u64);
-type TokenFingerprintMap = HashMap<String, HashSet<TokenFingerprint>>;
+/// Parse JSONL file starting from a byte offset (delta parsing).
+/// Returns (new_messages, new_end_offset).
+///
+/// Key behaviors:
+/// - If start_offset > 0, skips to first newline to handle partial lines
+/// - Handles incomplete line at EOF gracefully (doesn't advance offset past it)
+/// - Returns only newly parsed messages, not the entire file
+pub fn parse_jsonl_file_delta(
+    path: &Path,
+    start_offset: u64,
+    expected_size: u64,
+    project_hash: &str,
+    conversation_hash: &str,
+) -> Result<(Vec<ConversationMessage>, u64)> {
+    let file = File::open(path)?;
+    let file_size = file.metadata()?.len();
 
-pub fn deduplicate_messages_by_local_hash(
-    messages: Vec<ConversationMessage>,
-) -> Vec<ConversationMessage> {
-    let mut seen_hashes = HashMap::<String, usize>::new(); // hash -> index in result
-    // Track distinct token tuples seen per local_hash to avoid double-counting
-    let mut seen_token_fingerprints: TokenFingerprintMap = HashMap::new();
-    let mut deduplicated_entries: Vec<ConversationMessage> = Vec::new();
+    // Race condition protection: if file was truncated between the caller's
+    // metadata check and now, bail out so caller can do a full reparse
+    if file_size < expected_size {
+        anyhow::bail!("file was truncated during delta parse");
+    }
+
+    // Nothing new to parse
+    if start_offset >= file_size {
+        return Ok((Vec::new(), start_offset));
+    }
+
+    let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(start_offset))?;
+
+    // If starting mid-file, skip to first complete line
+    // (the previous parse may have ended mid-line)
+    let mut current_offset = start_offset;
+    if start_offset > 0 {
+        let mut skip_buf = Vec::new();
+        let bytes_skipped = reader.read_until(b'\n', &mut skip_buf)?;
+        if bytes_skipped == 0 {
+            // EOF reached while looking for newline
+            return Ok((Vec::new(), start_offset));
+        }
+        current_offset += bytes_skipped as u64;
+    }
+
+    let mut messages = Vec::new();
+    let mut current_model: Option<String> = None;
+    let mut last_successful_offset = current_offset;
+
+    loop {
+        let mut line_buf = String::new();
+        let bytes_read = reader.read_line(&mut line_buf)?;
+
+        if bytes_read == 0 {
+            // EOF
+            break;
+        }
+
+        let line = line_buf.trim();
+
+        // Skip empty lines
+        if line.is_empty() {
+            current_offset += bytes_read as u64;
+            last_successful_offset = current_offset;
+            continue;
+        }
+
+        // Check if line is complete (ends with newline)
+        let is_complete_line = line_buf.ends_with('\n');
+
+        // Try to parse
+        let mut line_bytes = line.as_bytes().to_vec();
+        match simd_json::from_slice::<ClaudeCodeEntry>(&mut line_bytes) {
+            Ok(ClaudeCodeEntry::Message(entry)) => {
+                let model = entry.message.as_ref().and_then(|m| m.model.clone());
+                if let Some(m) = &model {
+                    current_model = Some(m.clone());
+                }
+
+                // Skip synthetic messages
+                if !matches!(model.as_deref(), Some("<synthetic>")) {
+                    let content = entry.message.as_ref().and_then(|m| m.content.clone());
+                    let usage = entry.message.as_ref().and_then(|m| m.usage.clone());
+                    let role = entry.message.as_ref().and_then(|m| m.role.clone());
+                    let message_id = entry.message.as_ref().and_then(|m| m.id.clone());
+                    let request_id = entry.request_id;
+                    let tool_use_result = entry.tool_use_result;
+                    let uuid = Some(entry.uuid.clone());
+
+                    let mut msg = ConversationMessage {
+                        global_hash: hash_text(&format!("{}_{}", conversation_hash, entry.uuid)),
+                        local_hash: None,
+                        application: Application::ClaudeCode,
+                        model: model.clone(),
+                        date: entry.timestamp,
+                        project_hash: project_hash.to_string(),
+                        conversation_hash: conversation_hash.to_string(),
+                        stats: Stats::default(),
+                        role: match role.as_deref() {
+                            Some("user") => MessageRole::User,
+                            _ => MessageRole::Assistant,
+                        },
+                        uuid,
+                        session_name: None,
+                    };
+
+                    // Extract tool stats from content
+                    if let Some(content_val) = &content {
+                        msg.stats = extract_tool_stats(content_val, &tool_use_result);
+                        msg.stats.tool_calls = match content_val {
+                            Content::Blocks(blocks) => blocks
+                                .iter()
+                                .filter(|c| matches!(c, ContentBlock::ToolUse { .. }))
+                                .count()
+                                as u32,
+                            _ => 0,
+                        };
+                    }
+
+                    if let Some(usage_val) = usage {
+                        let model_name = model
+                            .as_ref()
+                            .unwrap_or(&current_model.clone().unwrap_or_default())
+                            .to_owned();
+
+                        msg.stats.input_tokens = usage_val.input_tokens;
+                        msg.stats.output_tokens = usage_val.output_tokens;
+                        msg.stats.cache_creation_tokens = usage_val.cache_creation_input_tokens;
+                        msg.stats.cache_read_tokens = usage_val.cache_read_input_tokens;
+                        msg.stats.cached_tokens = usage_val.cache_creation_input_tokens
+                            + usage_val.cache_read_input_tokens;
+                        msg.stats.cost = calculate_cost_from_tokens(&usage_val, &model_name);
+
+                        if let Some(request_id) = request_id
+                            && let Some(message_id) = message_id
+                        {
+                            msg.local_hash = Some(fast_hash(&format!("{request_id}_{message_id}")));
+                        }
+                    } else {
+                        msg.role = MessageRole::User;
+                    }
+
+                    messages.push(msg);
+                }
+
+                current_offset += bytes_read as u64;
+                last_successful_offset = current_offset;
+            }
+            Ok(ClaudeCodeEntry::Summary(_)) | Ok(_) => {
+                // Skip summaries and other entry types in delta parsing
+                current_offset += bytes_read as u64;
+                last_successful_offset = current_offset;
+            }
+            Err(e) => {
+                if !is_complete_line {
+                    // Incomplete line at EOF - don't advance offset past it
+                    // This will be re-read on next delta parse when more data is available
+                    break;
+                } else {
+                    // Complete line but parse error - log and skip
+                    crate::utils::warn_once(format!(
+                        "Skipping invalid entry in {} at offset {}: {}",
+                        path.display(),
+                        current_offset,
+                        e
+                    ));
+                    current_offset += bytes_read as u64;
+                    last_successful_offset = current_offset;
+                }
+            }
+        }
+    }
+
+    Ok((messages, last_successful_offset))
+}
+
+// Type alias for token fingerprint
+pub type TokenFingerprint = (u64, u64, u64, u64, u64);
+
+/// Merge stats from `src` into `dst` based on fingerprint comparison.
+/// If the fingerprint was already seen, uses max() for non-token stats (redundant duplicate).
+/// If it's a new fingerprint, uses sum() for all stats (split message).
+pub fn merge_message_into(
+    dst: &mut ConversationMessage,
+    src: &ConversationMessage,
+    seen_fps: &mut HashSet<TokenFingerprint>,
+    src_fp: TokenFingerprint,
+) {
+    // Preserve session name
+    if dst.session_name.is_none() && src.session_name.is_some() {
+        dst.session_name = src.session_name.clone();
+    }
+
+    if seen_fps.contains(&src_fp) {
+        // Redundant duplicate: merge non-token stats with max()
+        dst.stats.tool_calls = dst.stats.tool_calls.max(src.stats.tool_calls);
+        dst.stats.files_read = dst.stats.files_read.max(src.stats.files_read);
+        dst.stats.files_edited = dst.stats.files_edited.max(src.stats.files_edited);
+        dst.stats.files_added = dst.stats.files_added.max(src.stats.files_added);
+        dst.stats.terminal_commands = dst.stats.terminal_commands.max(src.stats.terminal_commands);
+        dst.stats.file_searches = dst.stats.file_searches.max(src.stats.file_searches);
+        dst.stats.file_content_searches = dst
+            .stats
+            .file_content_searches
+            .max(src.stats.file_content_searches);
+        dst.stats.todo_writes = dst.stats.todo_writes.max(src.stats.todo_writes);
+        dst.stats.todo_reads = dst.stats.todo_reads.max(src.stats.todo_reads);
+        dst.stats.todos_created = dst.stats.todos_created.max(src.stats.todos_created);
+        dst.stats.todos_completed = dst.stats.todos_completed.max(src.stats.todos_completed);
+        dst.stats.todos_in_progress = dst.stats.todos_in_progress.max(src.stats.todos_in_progress);
+    } else {
+        // New fingerprint: aggregate all stats with sum()
+        seen_fps.insert(src_fp);
+
+        dst.stats.input_tokens += src.stats.input_tokens;
+        dst.stats.output_tokens += src.stats.output_tokens;
+        dst.stats.cache_creation_tokens += src.stats.cache_creation_tokens;
+        dst.stats.cache_read_tokens += src.stats.cache_read_tokens;
+        dst.stats.cached_tokens += src.stats.cached_tokens;
+
+        dst.stats.tool_calls += src.stats.tool_calls;
+        dst.stats.files_read += src.stats.files_read;
+        dst.stats.files_edited += src.stats.files_edited;
+        dst.stats.files_added += src.stats.files_added;
+        dst.stats.terminal_commands += src.stats.terminal_commands;
+        dst.stats.file_searches += src.stats.file_searches;
+        dst.stats.file_content_searches += src.stats.file_content_searches;
+        dst.stats.todo_writes += src.stats.todo_writes;
+        dst.stats.todo_reads += src.stats.todo_reads;
+        dst.stats.todos_created += src.stats.todos_created;
+        dst.stats.todos_completed += src.stats.todos_completed;
+        dst.stats.todos_in_progress += src.stats.todos_in_progress;
+
+        // Recalculate cost
+        if let Some(model) = &dst.model {
+            dst.stats.cost = calculate_total_cost(
+                model,
+                dst.stats.input_tokens,
+                dst.stats.output_tokens,
+                dst.stats.cache_creation_tokens,
+                dst.stats.cache_read_tokens,
+            );
+        }
+    }
+}
+
+/// Deduplicate messages by local_hash, merging stats for duplicates.
+/// This is used for incremental cache loading where messages from multiple
+/// files need to be deduplicated after loading.
+pub fn deduplicate_messages(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    let estimated_unique = messages.len() / 2 + 1;
+    let mut seen_hashes = HashMap::<String, usize>::with_capacity(estimated_unique);
+    let mut seen_token_fingerprints: HashMap<String, HashSet<TokenFingerprint>> =
+        HashMap::with_capacity(estimated_unique);
+    let mut deduplicated_entries: Vec<ConversationMessage> = Vec::with_capacity(estimated_unique);
 
     for message in messages {
         if let Some(local_hash) = &message.local_hash {
-            if let Some(&existing_index) = seen_hashes.get(local_hash) {
-                // Compute the token tuple fingerprint for this message
-                let fp = (
-                    message.stats.input_tokens,
-                    message.stats.output_tokens,
-                    message.stats.cache_creation_tokens,
-                    message.stats.cache_read_tokens,
-                    message.stats.cached_tokens,
-                );
+            let fp = (
+                message.stats.input_tokens,
+                message.stats.output_tokens,
+                message.stats.cache_creation_tokens,
+                message.stats.cache_read_tokens,
+                message.stats.cached_tokens,
+            );
 
-                // Initialize set for this hash if missing
-                let set = seen_token_fingerprints
+            if let Some(&existing_index) = seen_hashes.get(local_hash) {
+                let seen_fps = seen_token_fingerprints
                     .entry(local_hash.clone())
                     .or_default();
-
-                // If we've already seen this exact token tuple for this local_hash,
-                // it's a redundant duplicate (old format or repeated identical row).
-                if set.contains(&fp) {
-                    // Merge non-token stats so we don't lose tool/activity counts
-                    let existing_mut = &mut deduplicated_entries[existing_index];
-
-                    // Preserve session name if the new message has one and the existing one doesn't
-                    if existing_mut.session_name.is_none() && message.session_name.is_some() {
-                        existing_mut.session_name = message.session_name;
-                    }
-
-                    existing_mut.stats.tool_calls =
-                        existing_mut.stats.tool_calls.max(message.stats.tool_calls);
-                    existing_mut.stats.files_read =
-                        existing_mut.stats.files_read.max(message.stats.files_read);
-                    existing_mut.stats.files_edited = existing_mut
-                        .stats
-                        .files_edited
-                        .max(message.stats.files_edited);
-                    existing_mut.stats.files_added = existing_mut
-                        .stats
-                        .files_added
-                        .max(message.stats.files_added);
-                    existing_mut.stats.terminal_commands = existing_mut
-                        .stats
-                        .terminal_commands
-                        .max(message.stats.terminal_commands);
-                    existing_mut.stats.file_searches = existing_mut
-                        .stats
-                        .file_searches
-                        .max(message.stats.file_searches);
-                    existing_mut.stats.file_content_searches = existing_mut
-                        .stats
-                        .file_content_searches
-                        .max(message.stats.file_content_searches);
-                    existing_mut.stats.todo_writes = existing_mut
-                        .stats
-                        .todo_writes
-                        .max(message.stats.todo_writes);
-                    existing_mut.stats.todo_reads =
-                        existing_mut.stats.todo_reads.max(message.stats.todo_reads);
-                    existing_mut.stats.todos_created = existing_mut
-                        .stats
-                        .todos_created
-                        .max(message.stats.todos_created);
-                    existing_mut.stats.todos_completed = existing_mut
-                        .stats
-                        .todos_completed
-                        .max(message.stats.todos_completed);
-                    existing_mut.stats.todos_in_progress = existing_mut
-                        .stats
-                        .todos_in_progress
-                        .max(message.stats.todos_in_progress);
-                    continue;
-                }
-
-                // Mark this distinct tuple as seen and aggregate its values
-                set.insert(fp);
-
-                // This is a split message with different/partial token counts.
-                // Aggregate all stats together.
-                let existing = &mut deduplicated_entries[existing_index];
-
-                // Preserve session name
-                if existing.session_name.is_none() && message.session_name.is_some() {
-                    existing.session_name = message.session_name;
-                }
-
-                // Aggregate token counts
-                existing.stats.input_tokens += message.stats.input_tokens;
-                existing.stats.output_tokens += message.stats.output_tokens;
-                existing.stats.cache_creation_tokens += message.stats.cache_creation_tokens;
-                existing.stats.cache_read_tokens += message.stats.cache_read_tokens;
-                existing.stats.cached_tokens += message.stats.cached_tokens;
-
-                // Aggregate tool stats
-                existing.stats.tool_calls += message.stats.tool_calls;
-                existing.stats.files_read += message.stats.files_read;
-                existing.stats.files_edited += message.stats.files_edited;
-                existing.stats.files_added += message.stats.files_added;
-                existing.stats.terminal_commands += message.stats.terminal_commands;
-                existing.stats.file_searches += message.stats.file_searches;
-                existing.stats.file_content_searches += message.stats.file_content_searches;
-                existing.stats.todo_writes += message.stats.todo_writes;
-                existing.stats.todo_reads += message.stats.todo_reads;
-                existing.stats.todos_created += message.stats.todos_created;
-                existing.stats.todos_completed += message.stats.todos_completed;
-                existing.stats.todos_in_progress += message.stats.todos_in_progress;
-
-                // Recalculate cost with the aggregated tokens
-                if let Some(model) = &existing.model {
-                    existing.stats.cost = calculate_total_cost(
-                        model,
-                        existing.stats.input_tokens,
-                        existing.stats.output_tokens,
-                        existing.stats.cache_creation_tokens,
-                        existing.stats.cache_read_tokens,
-                    );
-                }
-            } else {
-                // First time seeing this hash, add it
-                seen_hashes.insert(local_hash.clone(), deduplicated_entries.len());
-                // Seed the seen tuple set for this local_hash with this message's tokens
-                let fp = (
-                    message.stats.input_tokens,
-                    message.stats.output_tokens,
-                    message.stats.cache_creation_tokens,
-                    message.stats.cache_read_tokens,
-                    message.stats.cached_tokens,
+                merge_message_into(
+                    &mut deduplicated_entries[existing_index],
+                    &message,
+                    seen_fps,
+                    fp,
                 );
+            } else {
+                seen_hashes.insert(local_hash.clone(), deduplicated_entries.len());
                 seen_token_fingerprints
                     .entry(local_hash.clone())
                     .or_default()
                     .insert(fp);
-
                 deduplicated_entries.push(message);
             }
         } else {
-            // No local hash, always keep
             deduplicated_entries.push(message);
         }
     }
@@ -798,7 +1095,7 @@ mod tests {
             },
         ];
 
-        let deduplicated = deduplicate_messages_by_local_hash(messages);
+        let deduplicated = deduplicate_messages(messages);
 
         // Should have exactly 1 message (all 3 merged)
         assert_eq!(deduplicated.len(), 1);
@@ -857,7 +1154,7 @@ mod tests {
             },
         ];
 
-        let deduplicated = deduplicate_messages_by_local_hash(messages);
+        let deduplicated = deduplicate_messages(messages);
 
         // Should have exactly 1 message (duplicate skipped)
         assert_eq!(deduplicated.len(), 1);
@@ -919,7 +1216,7 @@ mod tests {
             session_name: None,
         };
 
-        let dedup = deduplicate_messages_by_local_hash(vec![msg1, msg2]);
+        let dedup = deduplicate_messages(vec![msg1, msg2]);
         assert_eq!(dedup.len(), 1);
         // Tokens unchanged
         assert_eq!(dedup[0].stats.input_tokens, 100);
@@ -988,7 +1285,7 @@ mod tests {
         };
 
         let messages = vec![a1, a2, b1, b2, a3];
-        let deduplicated = deduplicate_messages_by_local_hash(messages);
+        let deduplicated = deduplicate_messages(messages);
 
         assert_eq!(deduplicated.len(), 1);
         // Should include A once and B once

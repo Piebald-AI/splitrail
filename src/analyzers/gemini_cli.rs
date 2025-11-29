@@ -1,17 +1,18 @@
 use crate::analyzer::{Analyzer, DataSource};
+use crate::cache::FileCacheEntry;
 use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output_cost};
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
+    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, FileMetadata,
+    MessageRole, Stats,
 };
 use crate::utils::{deserialize_utc_timestamp, hash_text};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use glob::glob;
+use jwalk::WalkDir;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
-use std::collections::HashSet;
 use std::path::Path;
 
 pub struct GeminiCliAnalyzer;
@@ -298,7 +299,7 @@ impl Analyzer for GeminiCliAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        if let Some(home_dir) = std::env::home_dir() {
+        if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
             patterns.push(format!("{home_str}/.gemini/tmp/*/chats/*.json"));
         }
@@ -307,14 +308,29 @@ impl Analyzer for GeminiCliAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let patterns = self.get_data_glob_patterns();
         let mut sources = Vec::new();
 
-        for pattern in patterns {
-            for entry in glob(&pattern)? {
-                let path = entry?;
-                if path.is_file() {
-                    sources.push(DataSource { path });
+        if let Some(home_dir) = dirs::home_dir() {
+            let tmp_dir = home_dir.join(".gemini").join("tmp");
+
+            if tmp_dir.is_dir() {
+                // Pattern: ~/.gemini/tmp/*/chats/*.json
+                // jwalk walks directories in parallel
+                for entry in WalkDir::new(&tmp_dir)
+                    .min_depth(3) // */chats/*.json
+                    .max_depth(3)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_type().is_file()
+                            && e.path().extension().is_some_and(|ext| ext == "json")
+                            && e.path()
+                                .parent()
+                                .and_then(|p| p.file_name())
+                                .is_some_and(|name| name == "chats")
+                    })
+                {
+                    sources.push(DataSource { path: entry.path() });
                 }
             }
         }
@@ -342,22 +358,10 @@ impl Analyzer for GeminiCliAnalyzer {
             .flat_map(|messages| messages)
             .collect();
 
-        // Deduplicate based on hash
-        let mut seen_hashes = HashSet::new();
-        let deduplicated_entries: Vec<ConversationMessage> = all_entries
-            .into_iter()
-            .filter(|entry| {
-                if let Some(local_hash) = &entry.local_hash {
-                    if seen_hashes.contains(local_hash) {
-                        return false;
-                    }
-                    seen_hashes.insert(local_hash.clone());
-                }
-                true
-            })
-            .collect();
-
-        Ok(deduplicated_entries)
+        // Parallel deduplicate by local hash
+        Ok(crate::utils::deduplicate_by_local_hash_parallel(
+            all_entries,
+        ))
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
@@ -381,5 +385,22 @@ impl Analyzer for GeminiCliAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    fn supports_caching(&self) -> bool {
+        true
+    }
+
+    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
+        let metadata = FileMetadata::from_path(&source.path)?;
+        let messages = parse_json_session_file(&source.path)?;
+        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
+
+        Ok(FileCacheEntry {
+            metadata,
+            messages,
+            daily_contributions,
+            cached_model: None,
+        })
     }
 }

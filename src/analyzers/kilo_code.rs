@@ -1,15 +1,18 @@
-use crate::analyzer::{Analyzer, DataSource};
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::analyzer::{Analyzer, DataSource, discover_vscode_extension_sources};
+use crate::cache::FileCacheEntry;
+use crate::types::{
+    AgenticCodingToolStats, Application, ConversationMessage, FileMetadata, MessageRole, Stats,
+};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use glob::glob;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
-use std::collections::HashSet;
 use std::path::Path;
+
+const KILO_CODE_EXTENSION_ID: &str = "kilocode.kilo-code";
 
 pub struct KiloCodeAnalyzer;
 
@@ -266,7 +269,7 @@ impl Analyzer for KiloCodeAnalyzer {
         ];
         let vscode_cli_forks = ["vscode-server-insiders", "vscode-server"];
 
-        if let Some(home_dir) = std::env::home_dir() {
+        if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
 
             // Linux paths for all VSCode GUI forks
@@ -294,26 +297,7 @@ impl Analyzer for KiloCodeAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let patterns = self.get_data_glob_patterns();
-        let mut sources = Vec::new();
-
-        for pattern in patterns {
-            for path in glob(&pattern)
-                .unwrap_or_else(|_| glob("").unwrap())
-                .flatten()
-            {
-                if path.is_file() {
-                    // Store the parent directory (task directory) as the source
-                    if let Some(parent) = path.parent() {
-                        sources.push(DataSource {
-                            path: parent.to_path_buf(),
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok(sources)
+        discover_vscode_extension_sources(KILO_CODE_EXTENSION_ID, "ui_messages.json", true)
     }
 
     async fn parse_conversations(
@@ -337,14 +321,10 @@ impl Analyzer for KiloCodeAnalyzer {
             )
             .collect();
 
-        // Deduplicate by global hash
-        let mut seen_hashes = HashSet::new();
-        let deduplicated: Vec<ConversationMessage> = all_entries
-            .into_iter()
-            .filter(|msg| seen_hashes.insert(msg.global_hash.clone()))
-            .collect();
-
-        Ok(deduplicated)
+        // Parallel deduplicate by global hash
+        Ok(crate::utils::deduplicate_by_global_hash_parallel(
+            all_entries,
+        ))
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
@@ -371,6 +351,24 @@ impl Analyzer for KiloCodeAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    fn supports_caching(&self) -> bool {
+        true
+    }
+
+    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
+        // Kilo Code sources are directories - use directory metadata for caching
+        let metadata = FileMetadata::from_path(&source.path)?;
+        let messages = parse_kilo_code_task_directory(&source.path)?;
+        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
+
+        Ok(FileCacheEntry {
+            metadata,
+            messages,
+            daily_contributions,
+            cached_model: None,
+        })
     }
 }
 

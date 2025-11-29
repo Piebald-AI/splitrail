@@ -95,6 +95,8 @@ pub fn run_tui(
                 eprintln!("Error handling watcher event: {e}");
             }
         }
+        // Persist cache when TUI exits
+        stats_manager.persist_cache();
     });
 
     let result = tokio::task::block_in_place(|| {

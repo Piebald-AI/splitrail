@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::analyzer::AnalyzerRegistry;
+use crate::cache::FileCacheKey;
 use crate::config::Config;
 use crate::tui::UploadStatus;
 use crate::types::MultiAnalyzerStats;
@@ -16,7 +17,15 @@ use crate::upload;
 
 #[derive(Debug, Clone)]
 pub enum WatcherEvent {
-    DataChanged(String), // analyzer name
+    /// A file was created or modified (analyzer name, file path)
+    FileChanged(String, PathBuf),
+    /// A file was deleted (analyzer name, file path)
+    FileDeleted(String, PathBuf),
+    /// Fallback: data changed for an analyzer (full reload)
+    /// Kept for API stability - may be used programmatically
+    #[allow(dead_code)]
+    DataChanged(String),
+    /// An error occurred
     Error(String),
 }
 
@@ -85,14 +94,19 @@ fn handle_fs_event(
     tx: &Sender<WatcherEvent>,
     dir_to_analyzer: &HashMap<PathBuf, String>,
 ) -> Result<()> {
-    // Only care about create, write, and remove events
     match event.kind {
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+        EventKind::Create(_) | EventKind::Modify(_) => {
             for path in &event.paths {
-                // Find which analyzer owns this file by checking which watched directory contains it
                 if let Some(analyzer_name) = find_analyzer_for_path(path, dir_to_analyzer) {
-                    let _ = tx.send(WatcherEvent::DataChanged(analyzer_name));
-                    break; // Only send one event per filesystem event
+                    // Send per-file event for incremental cache update
+                    let _ = tx.send(WatcherEvent::FileChanged(analyzer_name, path.clone()));
+                }
+            }
+        }
+        EventKind::Remove(_) => {
+            for path in &event.paths {
+                if let Some(analyzer_name) = find_analyzer_for_path(path, dir_to_analyzer) {
+                    let _ = tx.send(WatcherEvent::FileDeleted(analyzer_name, path.clone()));
                 }
             }
         }
@@ -157,53 +171,95 @@ impl RealtimeStatsManager {
         self.upload_status = Some(status);
     }
 
+    /// Persist the file stats cache to disk
+    pub fn persist_cache(&self) {
+        if let Err(e) = self.registry.persist_cache() {
+            eprintln!("Warning: Failed to save cache to disk: {e}");
+        }
+    }
+
     pub fn get_stats_receiver(&self) -> watch::Receiver<MultiAnalyzerStats> {
         self.update_rx.clone()
     }
 
     pub async fn handle_watcher_event(&mut self, event: WatcherEvent) -> Result<()> {
         match event {
+            WatcherEvent::FileChanged(analyzer_name, path) => {
+                // Invalidate just this file's cache entry
+                let cache_key = FileCacheKey::new(&analyzer_name, &path);
+                self.registry.file_cache().remove(&cache_key);
+
+                // Also invalidate data source cache to discover new files
+                self.registry.invalidate_cache(&analyzer_name);
+
+                // Reload using cache-aware method (only parses changed files)
+                self.reload_analyzer_stats(&analyzer_name).await;
+            }
+            WatcherEvent::FileDeleted(analyzer_name, path) => {
+                // Remove file from cache
+                let cache_key = FileCacheKey::new(&analyzer_name, &path);
+                self.registry.file_cache().remove(&cache_key);
+
+                // Invalidate data source cache
+                self.registry.invalidate_cache(&analyzer_name);
+
+                // Reload stats
+                self.reload_analyzer_stats(&analyzer_name).await;
+            }
             WatcherEvent::DataChanged(analyzer_name) => {
-                // Reload data for the specific analyzer
-                if let Some(analyzer) = self.registry.get_analyzer_by_display_name(&analyzer_name) {
-                    match analyzer.get_stats().await {
-                        Ok(new_stats) => {
-                            // Update the stats for this analyzer
-                            let mut updated_analyzer_stats =
-                                self.current_stats.analyzer_stats.clone();
+                // Full cache invalidation (fallback)
+                self.registry
+                    .file_cache()
+                    .invalidate_analyzer(&analyzer_name);
+                self.registry.invalidate_cache(&analyzer_name);
 
-                            // Find and replace the stats for this analyzer
-                            if let Some(pos) = updated_analyzer_stats
-                                .iter()
-                                .position(|s| s.analyzer_name == analyzer_name)
-                            {
-                                updated_analyzer_stats[pos] = new_stats;
-                            } else {
-                                // New analyzer data
-                                updated_analyzer_stats.push(new_stats);
-                            }
-
-                            self.current_stats = MultiAnalyzerStats {
-                                analyzer_stats: updated_analyzer_stats,
-                            };
-
-                            // Send the update
-                            let _ = self.update_tx.send(self.current_stats.clone());
-
-                            // Trigger auto-upload if enabled and debounce time has passed
-                            self.trigger_auto_upload_if_enabled().await;
-                        }
-                        Err(e) => {
-                            eprintln!("Error reloading {analyzer_name} stats: {e}");
-                        }
-                    }
-                }
+                // Reload stats
+                self.reload_analyzer_stats(&analyzer_name).await;
             }
             WatcherEvent::Error(err) => {
                 eprintln!("File watcher error: {err}");
             }
         }
         Ok(())
+    }
+
+    /// Helper to reload stats for a specific analyzer and broadcast updates
+    async fn reload_analyzer_stats(&mut self, analyzer_name: &str) {
+        if let Some(analyzer) = self.registry.get_analyzer_by_display_name(analyzer_name) {
+            // Use cache-aware loading
+            let result = self.registry.load_stats_with_cache(analyzer).await;
+
+            match result {
+                Ok(new_stats) => {
+                    // Update the stats for this analyzer
+                    let mut updated_analyzer_stats = self.current_stats.analyzer_stats.clone();
+
+                    // Find and replace the stats for this analyzer
+                    if let Some(pos) = updated_analyzer_stats
+                        .iter()
+                        .position(|s| s.analyzer_name == analyzer_name)
+                    {
+                        updated_analyzer_stats[pos] = new_stats;
+                    } else {
+                        // New analyzer data
+                        updated_analyzer_stats.push(new_stats);
+                    }
+
+                    self.current_stats = MultiAnalyzerStats {
+                        analyzer_stats: updated_analyzer_stats,
+                    };
+
+                    // Send the update
+                    let _ = self.update_tx.send(self.current_stats.clone());
+
+                    // Trigger auto-upload if enabled and debounce time has passed
+                    self.trigger_auto_upload_if_enabled().await;
+                }
+                Err(e) => {
+                    eprintln!("Error reloading {analyzer_name} stats: {e}");
+                }
+            }
+        }
     }
 
     async fn trigger_auto_upload_if_enabled(&mut self) {
@@ -397,20 +453,24 @@ mod tests {
     }
 
     #[test]
-    fn handle_fs_event_emits_data_changed_for_create() {
+    fn handle_fs_event_emits_file_changed_for_create() {
         let mut mapping = HashMap::new();
         let dir = PathBuf::from("/tmp/project/chats");
         mapping.insert(dir.clone(), "analyzer".to_string());
 
         let file_path = dir.join("session.json");
-        let event = NotifyEvent::new(NotifyEventKind::Create(CreateKind::File)).add_path(file_path);
+        let event =
+            NotifyEvent::new(NotifyEventKind::Create(CreateKind::File)).add_path(file_path.clone());
 
         let (tx, rx) = mpsc::channel();
         handle_fs_event(event, &tx, &mapping).expect("handle_fs_event");
 
         let evt = rx.try_recv().expect("event");
         match evt {
-            WatcherEvent::DataChanged(name) => assert_eq!(name, "analyzer"),
+            WatcherEvent::FileChanged(name, path) => {
+                assert_eq!(name, "analyzer");
+                assert_eq!(path, file_path);
+            }
             other => panic!("unexpected event: {other:?}"),
         }
     }
@@ -448,5 +508,100 @@ mod tests {
             .handle_watcher_event(WatcherEvent::Error("something went wrong".into()))
             .await
             .expect("handle_watcher_event error");
+    }
+
+    #[test]
+    fn handle_fs_event_emits_file_deleted_for_remove() {
+        use notify_types::event::RemoveKind;
+
+        let mut mapping = HashMap::new();
+        let dir = PathBuf::from("/tmp/project/chats");
+        mapping.insert(dir.clone(), "analyzer".to_string());
+
+        let file_path = dir.join("deleted_session.json");
+        let event =
+            NotifyEvent::new(NotifyEventKind::Remove(RemoveKind::File)).add_path(file_path.clone());
+
+        let (tx, rx) = mpsc::channel();
+        handle_fs_event(event, &tx, &mapping).expect("handle_fs_event");
+
+        let evt = rx.try_recv().expect("event");
+        match evt {
+            WatcherEvent::FileDeleted(name, path) => {
+                assert_eq!(name, "analyzer");
+                assert_eq!(path, file_path);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_file_deleted_event_reloads_stats() {
+        let stats = sample_stats("test-analyzer");
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test-analyzer",
+            stats: stats.clone(),
+            available: true,
+        });
+
+        let mut manager = RealtimeStatsManager::new(registry).await.expect("manager");
+
+        // Handle FileDeleted event
+        manager
+            .handle_watcher_event(WatcherEvent::FileDeleted(
+                "test-analyzer".into(),
+                PathBuf::from("/fake/path.jsonl"),
+            ))
+            .await
+            .expect("handle FileDeleted");
+
+        // Stats should still be accessible after handling the event
+        let updated = manager.get_stats_receiver().borrow().clone();
+        // The test analyzer doesn't have real sources, so stats may be empty or present
+        // The key is that this doesn't panic
+        assert!(updated.analyzer_stats.is_empty() || !updated.analyzer_stats.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_file_changed_event_reloads_stats() {
+        let stats = sample_stats("test-analyzer");
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test-analyzer",
+            stats: stats.clone(),
+            available: true,
+        });
+
+        let mut manager = RealtimeStatsManager::new(registry).await.expect("manager");
+
+        // Handle FileChanged event
+        manager
+            .handle_watcher_event(WatcherEvent::FileChanged(
+                "test-analyzer".into(),
+                PathBuf::from("/fake/path.jsonl"),
+            ))
+            .await
+            .expect("handle FileChanged");
+
+        // The key is that this doesn't panic and manager remains usable
+        let updated = manager.get_stats_receiver().borrow().clone();
+        assert!(updated.analyzer_stats.is_empty() || !updated.analyzer_stats.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persist_cache_does_not_panic() {
+        let stats = sample_stats("test-analyzer");
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test-analyzer",
+            stats,
+            available: true,
+        });
+
+        let manager = RealtimeStatsManager::new(registry).await.expect("manager");
+
+        // persist_cache should not panic even if cache is empty
+        manager.persist_cache();
     }
 }

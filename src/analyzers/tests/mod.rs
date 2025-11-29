@@ -1,4 +1,9 @@
 mod claude_code;
+mod cline;
 mod codex_cli;
 mod copilot;
 mod gemini_cli;
+mod kilo_code;
+mod opencode;
+mod qwen_code;
+mod roo_code;
