@@ -1,14 +1,36 @@
 {
   "name": "splitrail-vscode",
   "displayName": "Splitrail",
-  "description": "Integrate Splitrail into VS Code.",
+  "description": "Track AI coding tool usage, costs, and tokens across Claude Code, Codex CLI, Gemini CLI, GitHub Copilot, and more.",
   "version": "0.1.0",
-  "publisher": "Piebald, LLC",
+  "publisher": "piebald",
+  "icon": "resources/splitrail.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/piebald-ai/splitrail"
+  },
+  "homepage": "https://splitrail.dev",
+  "bugs": {
+    "url": "https://github.com/piebald-ai/splitrail/issues"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "ai",
+    "claude",
+    "copilot",
+    "gemini",
+    "codex",
+    "tokens",
+    "cost",
+    "analytics",
+    "usage"
   ],
   "activationEvents": [
     "onCommand:splitrail.openDashboard",

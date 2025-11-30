@@ -11,6 +11,9 @@ Also check out our developer-first agentic AI experience, [Piebald](https://pieb
 ### [Splitrail CLI](https://splitrail.dev)
 <img width="750" alt="Screenshot of the Splitrail CLI" src="https://raw.githubusercontent.com/Piebald-AI/splitrail/main/screenshots/cli.gif" />
 
+### [Splitrail VS Code Extension](https://splitrail.dev)
+<img width="750" alt="Screenshot of the Splitrail VS Code Extension" src="https://raw.githubusercontent.com/Piebald-AI/splitrail/main/screenshots/extension.png" />
+
 ### [Splitrail Cloud](https://splitrail.dev)
 <img width="750" alt="Screenshot of Splitrail Cloud" src="https://raw.githubusercontent.com/Piebald-AI/splitrail/main/screenshots/cloud.png" />
 
