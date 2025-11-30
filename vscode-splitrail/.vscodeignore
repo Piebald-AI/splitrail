@@ -1,8 +1,9 @@
+.vscode/**
 out/test/**
 src/**
 tsconfig.json
 **/*.map
 **/*.ts
-node_modules/@types/**
-README.md
-
+node_modules/**
+.gitignore
+package-lock.json

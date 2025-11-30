@@ -955,6 +955,12 @@ impl MmapCacheRepository {
         let _ = fs::remove_file(self.index_path());
         let _ = fs::remove_dir_all(self.messages_dir());
 
+        // Also delete snapshots (hot/cold caches)
+        let snapshots_dir = self.cache_dir.join("snapshots");
+        if snapshots_dir.exists() {
+            let _ = fs::remove_dir_all(&snapshots_dir);
+        }
+
         Ok(())
     }
 }
