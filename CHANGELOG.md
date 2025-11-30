@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2025-11-30
+- Introducing the VS Code extension: now you can view track token counts, costs and more straight from VS Code - @mike1858
+- Introducing the MCP server: let Claude access your usage history with the Splitrail MCP server - @mike1858
+- Introducing JSON output mode: `--json` lets you build apps on top of Splitrail - @mike1858
+- 10x the performance: Splitrail startup time has been reduced from ~2s to ~200ms - @mike1858
+- We now fully support OpenCode!  Track your historical OpenCode usage - @mike1858
+- Claude Opus 4.5: Anthropic's most powerful frontier model is now in Splitrail - @mike1858
+- Cache manipulation: you can now manipulate Splitrail's cache: view, clear and rebuild.
+- Faster hashing: we've significantly improved hashing speed by moving from SHA256 to `xxhash`.
+- Fixed an issue where Gemini CLI info messages were incorrectly being parsed as conversation entries - @mike1858
+- Added support for re-uploading zero-cost messages in case we didn't add a model but you used it anyway - @mike1858
+- Added over 3.5 thousand lines of new tests, covering the TUI, upload system, analyzers, utilities, and file watcher - @mike1858
+
 ## [2.2.3] - 2025-11-23
 - Add code-signing for Windows and macOS builds (#47) - @signadou
 - Fix: Timezone issue in TUI & Add: Gemini CLI reasoning tokens (#45) - @mike1858

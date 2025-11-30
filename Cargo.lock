@@ -2259,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "splitrail"
-version = "2.2.3"
+version = "3.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
