@@ -1,14 +1,16 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::cache::FileCacheEntry;
+use crate::types::{
+    AgenticCodingToolStats, Application, ConversationMessage, FileMetadata, MessageRole, Stats,
+};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use glob::glob;
+use jwalk::WalkDir;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
-use std::collections::HashSet;
 use std::path::Path;
 use tiktoken_rs::get_bpe_from_model;
 
@@ -409,7 +411,7 @@ impl Analyzer for CopilotAnalyzer {
             "Antigravity",
         ];
 
-        if let Some(home_dir) = std::env::home_dir() {
+        if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
 
             // macOS paths for all VSCode forks
@@ -422,16 +424,45 @@ impl Analyzer for CopilotAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let patterns = self.get_data_glob_patterns();
         let mut sources = Vec::new();
 
-        for pattern in patterns {
-            for path in glob(&pattern)
-                .unwrap_or_else(|_| glob("").unwrap())
-                .flatten()
-            {
-                if path.is_file() {
-                    sources.push(DataSource { path });
+        // VSCode forks that might have Copilot installed
+        let vscode_forks = [
+            "Code",
+            "Cursor",
+            "Windsurf",
+            "VSCodium",
+            "Positron",
+            "Code - Insiders",
+            "Antigravity",
+        ];
+
+        if let Some(home_dir) = dirs::home_dir() {
+            // macOS paths
+            let app_support = home_dir.join("Library/Application Support");
+
+            for fork in &vscode_forks {
+                let workspace_storage = app_support.join(fork).join("User/workspaceStorage");
+
+                if workspace_storage.is_dir() {
+                    // Pattern: */chatSessions/*.json
+                    // jwalk walks directories in parallel
+                    for entry in WalkDir::new(&workspace_storage)
+                        .min_depth(3) // */chatSessions/*.json
+                        .max_depth(3)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                        .filter(|e| {
+                            e.file_type().is_file()
+                                && e.path().extension().is_some_and(|ext| ext == "json")
+                                && e.path()
+                                    .parent()
+                                    .and_then(|p| p.file_name())
+                                    .is_some_and(|name| name == "chatSessions")
+                        })
+                    {
+                        sources.push(DataSource { path: entry.path() });
+                    }
                 }
             }
         }
@@ -458,14 +489,10 @@ impl Analyzer for CopilotAnalyzer {
             })
             .collect();
 
-        // Deduplicate by global hash
-        let mut seen_hashes = HashSet::new();
-        let deduplicated: Vec<ConversationMessage> = all_entries
-            .into_iter()
-            .filter(|msg| seen_hashes.insert(msg.global_hash.clone()))
-            .collect();
-
-        Ok(deduplicated)
+        // Parallel deduplicate by global hash
+        Ok(crate::utils::deduplicate_by_global_hash_parallel(
+            all_entries,
+        ))
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
@@ -492,6 +519,23 @@ impl Analyzer for CopilotAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    fn supports_caching(&self) -> bool {
+        true
+    }
+
+    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
+        let metadata = FileMetadata::from_path(&source.path)?;
+        let messages = parse_copilot_session_file(&source.path)?;
+        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
+
+        Ok(FileCacheEntry {
+            metadata,
+            messages,
+            daily_contributions,
+            cached_model: None,
+        })
     }
 }
 

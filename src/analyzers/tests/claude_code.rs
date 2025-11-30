@@ -1,13 +1,60 @@
 use crate::analyzers::claude_code::{
-    calculate_cost_from_tokens, deduplicate_messages_by_local_hash, extract_and_hash_project_id,
+    TokenFingerprint, calculate_cost_from_tokens, extract_and_hash_project_id, merge_message_into,
     parse_jsonl_file,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use chrono::{TimeZone, Utc};
 use simd_json::json;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Cursor};
 use std::path::Path;
 use std::sync::LazyLock;
+
+/// Test helper: Sequential deduplication using merge_message_into
+fn deduplicate_messages_by_local_hash(
+    messages: Vec<ConversationMessage>,
+) -> Vec<ConversationMessage> {
+    let estimated_unique = messages.len() / 2 + 1;
+    let mut seen_hashes = HashMap::<String, usize>::with_capacity(estimated_unique);
+    let mut seen_token_fingerprints: HashMap<String, HashSet<TokenFingerprint>> =
+        HashMap::with_capacity(estimated_unique);
+    let mut deduplicated_entries: Vec<ConversationMessage> = Vec::with_capacity(estimated_unique);
+
+    for message in messages {
+        if let Some(local_hash) = &message.local_hash {
+            let fp = (
+                message.stats.input_tokens,
+                message.stats.output_tokens,
+                message.stats.cache_creation_tokens,
+                message.stats.cache_read_tokens,
+                message.stats.cached_tokens,
+            );
+
+            if let Some(&existing_index) = seen_hashes.get(local_hash) {
+                let seen_fps = seen_token_fingerprints
+                    .entry(local_hash.clone())
+                    .or_default();
+                merge_message_into(
+                    &mut deduplicated_entries[existing_index],
+                    &message,
+                    seen_fps,
+                    fp,
+                );
+            } else {
+                seen_hashes.insert(local_hash.clone(), deduplicated_entries.len());
+                seen_token_fingerprints
+                    .entry(local_hash.clone())
+                    .or_default()
+                    .insert(fp);
+                deduplicated_entries.push(message);
+            }
+        } else {
+            deduplicated_entries.push(message);
+        }
+    }
+
+    deduplicated_entries
+}
 
 // Test data for full conversation parsing
 static JSONL_DATA: LazyLock<String> = LazyLock::new(|| {

@@ -74,7 +74,7 @@ impl Config {
             }
         }
 
-        Ok(std::env::home_dir()
+        Ok(dirs::home_dir()
             .context("Could not find home directory")?
             .join(".splitrail.toml"))
     }

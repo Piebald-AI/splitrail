@@ -414,3 +414,242 @@ fn test_filter_zero_cost_messages_negative_cost() {
     assert_eq!(result.len(), 1);
     assert!(result.iter().any(|m| m.conversation_hash == "c_neg_small"));
 }
+
+// =============================================================================
+// AGGREGATE_BY_DATE_SIMPLE TESTS
+// =============================================================================
+
+#[test]
+fn test_aggregate_by_date_simple_no_gap_fill() {
+    // Create messages 3 days apart - aggregate_by_date_simple should NOT fill gaps
+    let date1 = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+    let date3 = Utc.with_ymd_and_hms(2025, 1, 3, 12, 0, 0).unwrap();
+
+    let msg1 = ConversationMessage {
+        date: date1,
+        application: crate::types::Application::ClaudeCode,
+        project_hash: "p".to_string(),
+        conversation_hash: "c1".to_string(),
+        local_hash: None,
+        global_hash: "g1".to_string(),
+        model: Some("model".to_string()),
+        stats: Stats::default(),
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: None,
+    };
+
+    let msg3 = ConversationMessage {
+        date: date3,
+        conversation_hash: "c2".to_string(),
+        global_hash: "g2".to_string(),
+        ..msg1.clone()
+    };
+
+    let result = aggregate_by_date_simple(&[msg1, msg3]);
+
+    // Should have exactly 2 entries (no gap filling)
+    assert_eq!(result.len(), 2);
+
+    let date1_str = date1
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let date3_str = date3
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+
+    assert!(result.contains_key(&date1_str));
+    assert!(result.contains_key(&date3_str));
+}
+
+#[test]
+fn test_aggregate_by_date_simple_conversation_counting() {
+    // Two messages from same conversation, same day - should count as 1 conversation
+    let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
+
+    let msg1 = ConversationMessage {
+        date,
+        application: crate::types::Application::ClaudeCode,
+        project_hash: "p".to_string(),
+        conversation_hash: "same_conv".to_string(),
+        local_hash: None,
+        global_hash: "g1".to_string(),
+        model: Some("model".to_string()),
+        stats: Stats {
+            input_tokens: 100,
+            ..Stats::default()
+        },
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: None,
+    };
+
+    let msg2 = ConversationMessage {
+        global_hash: "g2".to_string(),
+        stats: Stats {
+            input_tokens: 200,
+            ..Stats::default()
+        },
+        ..msg1.clone()
+    };
+
+    let result = aggregate_by_date_simple(&[msg1, msg2]);
+
+    let date_str = date
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+
+    let daily = result.get(&date_str).expect("should have date entry");
+    assert_eq!(daily.conversations, 1); // Only 1 conversation
+    assert_eq!(daily.ai_messages, 2); // But 2 AI messages
+    assert_eq!(daily.stats.input_tokens, 300); // Tokens summed
+}
+
+// =============================================================================
+// PARALLEL DEDUPLICATION TESTS
+// =============================================================================
+
+#[test]
+fn test_deduplicate_by_global_hash_parallel() {
+    let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
+
+    let msg1 = ConversationMessage {
+        date,
+        application: crate::types::Application::ClaudeCode,
+        project_hash: "p".to_string(),
+        conversation_hash: "c1".to_string(),
+        local_hash: None,
+        global_hash: "same_hash".to_string(), // Same hash
+        model: Some("model".to_string()),
+        stats: Stats::default(),
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: None,
+    };
+
+    let msg2 = ConversationMessage {
+        conversation_hash: "c2".to_string(),
+        global_hash: "same_hash".to_string(), // Same hash - should be deduplicated
+        ..msg1.clone()
+    };
+
+    let msg3 = ConversationMessage {
+        conversation_hash: "c3".to_string(),
+        global_hash: "different_hash".to_string(), // Different hash
+        ..msg1.clone()
+    };
+
+    let messages = vec![msg1, msg2, msg3];
+    let result = deduplicate_by_global_hash_parallel(messages);
+
+    // Should have 2 unique entries (same_hash and different_hash)
+    assert_eq!(result.len(), 2);
+
+    let hashes: std::collections::HashSet<_> =
+        result.iter().map(|m| m.global_hash.as_str()).collect();
+    assert!(hashes.contains("same_hash"));
+    assert!(hashes.contains("different_hash"));
+}
+
+#[test]
+fn test_deduplicate_by_local_hash_parallel() {
+    let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
+
+    let msg1 = ConversationMessage {
+        date,
+        application: crate::types::Application::ClaudeCode,
+        project_hash: "p".to_string(),
+        conversation_hash: "c1".to_string(),
+        local_hash: Some("local_same".to_string()), // Same local hash
+        global_hash: "g1".to_string(),
+        model: Some("model".to_string()),
+        stats: Stats::default(),
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: None,
+    };
+
+    let msg2 = ConversationMessage {
+        local_hash: Some("local_same".to_string()), // Same local hash - deduplicated
+        global_hash: "g2".to_string(),
+        ..msg1.clone()
+    };
+
+    let msg3 = ConversationMessage {
+        local_hash: Some("local_different".to_string()), // Different local hash
+        global_hash: "g3".to_string(),
+        ..msg1.clone()
+    };
+
+    let messages = vec![msg1, msg2, msg3];
+    let result = deduplicate_by_local_hash_parallel(messages);
+
+    // Should have 2 unique entries
+    assert_eq!(result.len(), 2);
+}
+
+#[test]
+fn test_deduplicate_keeps_messages_without_local_hash() {
+    let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
+
+    let msg_with_hash = ConversationMessage {
+        date,
+        application: crate::types::Application::ClaudeCode,
+        project_hash: "p".to_string(),
+        conversation_hash: "c1".to_string(),
+        local_hash: Some("local_hash".to_string()),
+        global_hash: "g1".to_string(),
+        model: Some("model".to_string()),
+        stats: Stats::default(),
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: None,
+    };
+
+    let msg_no_hash1 = ConversationMessage {
+        local_hash: None, // No local hash - always keep
+        global_hash: "g2".to_string(),
+        ..msg_with_hash.clone()
+    };
+
+    let msg_no_hash2 = ConversationMessage {
+        local_hash: None, // No local hash - always keep
+        global_hash: "g3".to_string(),
+        ..msg_with_hash.clone()
+    };
+
+    let messages = vec![msg_with_hash, msg_no_hash1, msg_no_hash2];
+    let result = deduplicate_by_local_hash_parallel(messages);
+
+    // All 3 should be kept (1 with hash, 2 without hash)
+    assert_eq!(result.len(), 3);
+}
+
+// =============================================================================
+// FAST_HASH TESTS
+// =============================================================================
+
+#[test]
+fn test_fast_hash_deterministic() {
+    let text = "hello world test string";
+    let hash1 = fast_hash(text);
+    let hash2 = fast_hash(text);
+
+    assert_eq!(hash1, hash2);
+    // Should be 16 hex chars (64-bit hash)
+    assert_eq!(hash1.len(), 16);
+}
+
+#[test]
+fn test_fast_hash_different_inputs() {
+    let hash1 = fast_hash("input1");
+    let hash2 = fast_hash("input2");
+    let hash3 = fast_hash("completely different text");
+
+    assert_ne!(hash1, hash2);
+    assert_ne!(hash1, hash3);
+    assert_ne!(hash2, hash3);
+}

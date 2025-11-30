@@ -40,19 +40,19 @@ fn test_parse_codex_cli_new_wrapper_format() {
         r#"{{"timestamp":"2025-09-18T00:16:38.852Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"Hey! How can I help today?"}}]}}}}"#
     ).unwrap();
 
-    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
 
     // Should have parsed user and assistant messages
-    assert!(result.len() >= 2);
+    assert!(messages.len() >= 2);
 
     // Session name should prefer the first user message over generic summaries like "auto"
     assert!(
-        result
+        messages
             .iter()
             .any(|msg| msg.session_name.as_deref() == Some("Hey"))
     );
     // Find the assistant message
-    let assistant_msg = result
+    let assistant_msg = messages
         .iter()
         .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
         .unwrap();
@@ -81,12 +81,12 @@ fn test_parse_codex_cli_wrapper_format_no_tokens() {
         r#"{{"timestamp":"2025-09-18T00:16:38.852Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"Hello!"}}]}}}}"#
     ).unwrap();
 
-    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
 
     // Should have parsed the assistant message
-    assert!(!result.is_empty());
+    assert!(!messages.is_empty());
 
-    let assistant_msg = result
+    let assistant_msg = messages
         .iter()
         .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
         .unwrap();
@@ -115,10 +115,10 @@ fn test_codex_cli_fallback_session_name_from_first_user_message() {
     )
     .unwrap();
 
-    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
 
     // Fallback session name should be derived from the first user message
-    let names: Vec<String> = result
+    let names: Vec<String> = messages
         .iter()
         .filter_map(|msg| msg.session_name.clone())
         .collect();
@@ -178,9 +178,9 @@ fn test_parse_codex_cli_counts_tool_calls() {
     )
     .unwrap();
 
-    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
 
-    let assistant_msg = result
+    let assistant_msg = messages
         .iter()
         .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
         .unwrap();
@@ -214,9 +214,9 @@ fn test_parse_codex_cli_missing_model() {
     )
     .unwrap();
 
-    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
 
-    let assistant_msg = result
+    let assistant_msg = messages
         .iter()
         .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
         .unwrap();
@@ -252,9 +252,9 @@ fn test_parse_codex_cli_turn_context_metadata_model() {
     )
     .unwrap();
 
-    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
 
-    let assistant_msg = result
+    let assistant_msg = messages
         .iter()
         .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
         .unwrap();
@@ -284,9 +284,9 @@ fn test_parse_codex_cli_event_model_backfill() {
     )
     .unwrap();
 
-    let result = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
 
-    let assistant_msg = result
+    let assistant_msg = messages
         .iter()
         .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
         .unwrap();
@@ -316,7 +316,7 @@ fn test_codex_availability() {
     println!("Is available: {}", is_available);
 
     // For debugging - let's check if the home directory exists
-    if let Some(home_dir) = std::env::home_dir() {
+    if let Some(home_dir) = dirs::home_dir() {
         let codex_path = home_dir.join(".codex/sessions");
         println!("Codex path exists: {}", codex_path.exists());
         if codex_path.exists() {
