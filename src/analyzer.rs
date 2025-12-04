@@ -378,7 +378,7 @@ impl AnalyzerRegistry {
         analyzer: &dyn Analyzer,
     ) -> Result<AgenticCodingToolStats> {
         use crate::analyzers::deduplicate_messages;
-        use crate::cache::{compute_sources_fingerprint, load_snapshot_hot_only, save_snapshot};
+        use crate::cache::{compute_sources_fingerprint, load_snapshot_full, save_snapshot};
         use rayon::prelude::*;
 
         // If analyzer doesn't support caching, fall back to the regular method
@@ -392,8 +392,8 @@ impl AnalyzerRegistry {
         // Compute fingerprint of all source files
         let fingerprint = compute_sources_fingerprint(&sources);
 
-        // Try to load cached snapshot (WARM START) - hot only for speed
-        if let Some(stats) = load_snapshot_hot_only(analyzer_name, fingerprint) {
+        // Try to load cached snapshot (WARM START) - includes messages from cold snapshot
+        if let Some(stats) = load_snapshot_full(analyzer_name, fingerprint) {
             return Ok(stats);
         }
 

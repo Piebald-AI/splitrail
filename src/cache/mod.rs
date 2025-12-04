@@ -258,7 +258,11 @@ fn snapshot_paths(analyzer_name: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
     ))
 }
 
-/// Load ONLY hot snapshot for ultra-fast startup (messages loaded lazily later)
+/// Load ONLY hot snapshot for ultra-fast startup (messages NOT included)
+/// Note: Currently unused - we use load_snapshot_full() instead to ensure messages
+/// are always available. Kept for potential future optimization where messages
+/// aren't needed (e.g., TUI display only).
+#[allow(dead_code)]
 pub fn load_snapshot_hot_only(
     analyzer_name: &str,
     expected_fingerprint: u64,
@@ -279,6 +283,46 @@ pub fn load_snapshot_hot_only(
         daily_stats: hot.daily_stats,
         num_conversations: hot.num_conversations,
         messages: Vec::new(), // Lazy load later if needed
+        analyzer_name: hot.analyzer_name,
+    })
+}
+
+/// Load complete snapshot with messages (hot + cold)
+/// Use this when messages are needed (e.g., for upload, aggregation)
+pub fn load_snapshot_full(
+    analyzer_name: &str,
+    expected_fingerprint: u64,
+) -> Option<AgenticCodingToolStats> {
+    let (hot_path, cold_path) = snapshot_paths(analyzer_name).ok()?;
+
+    // Load hot snapshot first (required)
+    if !hot_path.exists() {
+        return None;
+    }
+    let hot_data = fs::read(&hot_path).ok()?;
+    let hot: HotSnapshot = bincode::deserialize(&hot_data).ok()?;
+
+    if hot.fingerprint != expected_fingerprint {
+        return None;
+    }
+
+    // Load cold snapshot for messages
+    let messages = if cold_path.exists() {
+        let cold_data = fs::read(&cold_path).ok()?;
+        let cold: ColdSnapshot = bincode::deserialize(&cold_data).ok()?;
+        // Verify fingerprint matches
+        if cold.fingerprint != expected_fingerprint {
+            return None;
+        }
+        cold.messages
+    } else {
+        Vec::new()
+    };
+
+    Some(AgenticCodingToolStats {
+        daily_stats: hot.daily_stats,
+        num_conversations: hot.num_conversations,
+        messages,
         analyzer_name: hot.analyzer_name,
     })
 }
