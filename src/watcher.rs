@@ -184,15 +184,26 @@ impl RealtimeStatsManager {
 
     pub async fn handle_watcher_event(&mut self, event: WatcherEvent) -> Result<()> {
         match event {
-            WatcherEvent::FileChanged(analyzer_name, path) => {
-                // Invalidate just this file's cache entry
-                let cache_key = FileCacheKey::new(&analyzer_name, &path);
-                self.registry.file_cache().remove(&cache_key);
+            WatcherEvent::FileChanged(analyzer_name, _path) => {
+                // NOTE: We intentionally do NOT remove the file's cache entry here.
+                // Keeping the cache enables delta parsing, which:
+                // 1. Preserves all previously-parsed messages
+                // 2. Only parses new complete lines from the appended data
+                // 3. Safely handles incomplete lines at EOF (doesn't advance offset past them)
+                //
+                // If we removed the cache, we'd fall back to full-file reparsing which can
+                // read incomplete data during active writes, causing stats to temporarily DROP
+                // before recovering - a frightening "10 → 7 → 15 → 12" pattern.
+                //
+                // The staleness detection in load_stats_with_cache handles all cases:
+                // - is_unchanged() → use cached messages directly
+                // - is_append_only() → delta parse (adds to cached messages)
+                // - needs_full_reparse() → full reparse (handles truncation)
 
-                // Also invalidate data source cache to discover new files
+                // Invalidate data source cache to discover new files
                 self.registry.invalidate_cache(&analyzer_name);
 
-                // Reload using cache-aware method (only parses changed files)
+                // Reload using cache-aware method (uses delta parsing when possible)
                 self.reload_analyzer_stats(&analyzer_name).await;
             }
             WatcherEvent::FileDeleted(analyzer_name, path) => {
@@ -603,5 +614,138 @@ mod tests {
 
         // persist_cache should not panic even if cache is empty
         manager.persist_cache();
+    }
+
+    // =========================================================================
+    // DELTA PARSING PRESERVATION TESTS
+    // These tests verify that FileChanged events don't remove the cache,
+    // which is critical for delta parsing to work correctly during rapid writes.
+    // =========================================================================
+
+    #[tokio::test]
+    async fn file_changed_event_preserves_cache_for_delta_parsing() {
+        // This test verifies the fix for the "frightening fluctuation" bug:
+        // When tokens come in fast, stats should only go UP, never DOWN.
+        //
+        // The bug occurred because FileChanged events removed the cache entry,
+        // preventing delta parsing from preserving previously-parsed messages.
+        // During rapid writes, this caused stats to temporarily drop when
+        // incomplete lines were encountered during full-file reparsing.
+        //
+        // The fix: FileChanged events no longer remove the cache, allowing
+        // delta parsing to work correctly.
+
+        use crate::cache::{FileCacheEntry, FileCacheKey};
+        use crate::types::FileMetadata;
+
+        let stats = sample_stats("test-analyzer");
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test-analyzer",
+            stats: stats.clone(),
+            available: true,
+        });
+
+        // Pre-populate the cache with an entry
+        let test_path = PathBuf::from("/fake/conversation.jsonl");
+        let cache_key = FileCacheKey::new("test-analyzer", &test_path);
+        let cache_entry = FileCacheEntry {
+            metadata: FileMetadata {
+                size: 1000,
+                modified: 1700000000,
+                last_parsed_offset: 1000,
+            },
+            messages: stats.messages.clone(),
+            daily_contributions: std::collections::HashMap::new(),
+            cached_model: None,
+        };
+
+        // Insert the cache entry
+        registry.file_cache().insert(cache_key.clone(), cache_entry);
+
+        // Verify it's there
+        assert!(
+            registry.file_cache().get_unchecked(&cache_key).is_some(),
+            "Cache entry should exist before FileChanged event"
+        );
+
+        let mut manager = RealtimeStatsManager::new(registry).await.expect("manager");
+
+        // Handle FileChanged event - this should NOT remove the cache entry
+        manager
+            .handle_watcher_event(WatcherEvent::FileChanged(
+                "test-analyzer".into(),
+                test_path.clone(),
+            ))
+            .await
+            .expect("handle FileChanged");
+
+        // CRITICAL: The cache entry should STILL exist after FileChanged
+        // This enables delta parsing to preserve existing messages
+        let cache_entry_after = manager.registry.file_cache().get_unchecked(&cache_key);
+        assert!(
+            cache_entry_after.is_some(),
+            "Cache entry should be PRESERVED after FileChanged event to enable delta parsing! \
+             Without this, rapid writes cause the 'frightening fluctuation' bug where stats \
+             temporarily drop (10 → 7 → 15 → 12) instead of only increasing."
+        );
+    }
+
+    #[tokio::test]
+    async fn file_deleted_event_removes_cache_entry() {
+        // In contrast to FileChanged, FileDeleted SHOULD remove the cache entry
+        // because the file no longer exists and we don't want stale data.
+
+        use crate::cache::{FileCacheEntry, FileCacheKey};
+        use crate::types::FileMetadata;
+
+        let stats = sample_stats("test-analyzer");
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test-analyzer",
+            stats: stats.clone(),
+            available: true,
+        });
+
+        // Pre-populate the cache with an entry
+        let test_path = PathBuf::from("/fake/deleted_conversation.jsonl");
+        let cache_key = FileCacheKey::new("test-analyzer", &test_path);
+        let cache_entry = FileCacheEntry {
+            metadata: FileMetadata {
+                size: 1000,
+                modified: 1700000000,
+                last_parsed_offset: 1000,
+            },
+            messages: stats.messages.clone(),
+            daily_contributions: std::collections::HashMap::new(),
+            cached_model: None,
+        };
+
+        // Insert the cache entry
+        registry.file_cache().insert(cache_key.clone(), cache_entry);
+
+        // Verify it's there
+        assert!(
+            registry.file_cache().get_unchecked(&cache_key).is_some(),
+            "Cache entry should exist before FileDeleted event"
+        );
+
+        let mut manager = RealtimeStatsManager::new(registry).await.expect("manager");
+
+        // Handle FileDeleted event - this SHOULD remove the cache entry
+        manager
+            .handle_watcher_event(WatcherEvent::FileDeleted(
+                "test-analyzer".into(),
+                test_path.clone(),
+            ))
+            .await
+            .expect("handle FileDeleted");
+
+        // The cache entry should be removed after FileDeleted
+        let cache_entry_after = manager.registry.file_cache().get_unchecked(&cache_key);
+        assert!(
+            cache_entry_after.is_none(),
+            "Cache entry should be REMOVED after FileDeleted event"
+        );
     }
 }
