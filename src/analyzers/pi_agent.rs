@@ -194,16 +194,16 @@ fn extract_first_text(content: &PiContent) -> Option<String> {
         }
         PiContent::Blocks(blocks) => {
             for block in blocks {
-                if let PiContentBlock::Text { text } = block {
-                    if !text.is_empty() {
-                        let truncated = if text.chars().count() > 50 {
-                            let chars: String = text.chars().take(50).collect();
-                            format!("{}...", chars)
-                        } else {
-                            text.clone()
-                        };
-                        return Some(truncated);
-                    }
+                if let PiContentBlock::Text { text } = block
+                    && !text.is_empty()
+                {
+                    let truncated = if text.chars().count() > 50 {
+                        let chars: String = text.chars().take(50).collect();
+                        format!("{}...", chars)
+                    } else {
+                        text.clone()
+                    };
+                    return Some(truncated);
                 }
             }
             None
@@ -217,10 +217,10 @@ fn extract_and_hash_project_id(file_path: &Path) -> String {
     // Pi Agent path format: ~/.pi/agent/sessions/--<path>--/<timestamp>_<uuid>.jsonl
     // The parent directory name (--<path>--) represents the project
 
-    if let Some(parent) = file_path.parent() {
-        if let Some(project_dir) = parent.file_name().and_then(|name| name.to_str()) {
-            return hash_text(project_dir);
-        }
+    if let Some(parent) = file_path.parent()
+        && let Some(project_dir) = parent.file_name().and_then(|name| name.to_str())
+    {
+        return hash_text(project_dir);
     }
 
     // Fallback: hash the full file path
@@ -342,10 +342,10 @@ fn parse_jsonl_file<R: Read>(
                     });
                 } else if msg.role == "user" {
                     // Capture fallback session name from first user message
-                    if fallback_session_name.is_none() {
-                        if let Some(content) = &msg.content {
-                            fallback_session_name = extract_first_text(content);
-                        }
+                    if fallback_session_name.is_none()
+                        && let Some(content) = &msg.content
+                    {
+                        fallback_session_name = extract_first_text(content);
                     }
 
                     let global_hash = hash_text(&format!(
@@ -635,8 +635,12 @@ impl Analyzer for PiAgentAnalyzer {
 
                 match File::open(&source.path) {
                     Ok(file) => {
-                        match parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)
-                        {
+                        match parse_jsonl_file(
+                            &source.path,
+                            file,
+                            &project_hash,
+                            &conversation_hash,
+                        ) {
                             Ok((messages, _)) => Some(messages),
                             Err(e) => {
                                 eprintln!(
@@ -660,7 +664,9 @@ impl Analyzer for PiAgentAnalyzer {
             .collect();
 
         // Deduplicate by local hash
-        Ok(crate::utils::deduplicate_by_local_hash_parallel(all_entries))
+        Ok(crate::utils::deduplicate_by_local_hash_parallel(
+            all_entries,
+        ))
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
@@ -696,7 +702,8 @@ impl Analyzer for PiAgentAnalyzer {
         let conversation_hash = hash_text(&source.path.to_string_lossy());
 
         let file = File::open(&source.path)?;
-        let (messages, _) = parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
+        let (messages, _) =
+            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
 
         metadata.last_parsed_offset = metadata.size;
 
