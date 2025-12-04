@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.1.0] - 2025-12-05
 - We now fully support the [Pi coding agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)!  Track your historical (and current) Pi usage - @mike1858
+- Splitrail Cloud: Update Next.js version in response to [critical security vulnerability](https://github.com/facebook/react/security/advisories/GHSA-fv66-9v8q-g76r) - @mike1858
+- Splitrail Cloud: support Pi agent - @mike1858
 
 ## [3.0.0] - 2025-11-30
 - Introducing the VS Code extension: now you can view track token counts, costs and more straight from VS Code - @mike1858
