@@ -715,9 +715,14 @@ fn test_delta_parsing_from_middle_of_file() {
     // Parse starting AFTER line 1. Delta parsing will:
     // 1. Skip to the next newline (skipping line 2, since we might have started mid-line)
     // 2. Parse line 3
-    let (messages, _final_offset) =
-        parse_jsonl_file_delta(file_path, offset_after_line_1, file_size, "proj_hash", "conv_hash")
-            .expect("delta parse");
+    let (messages, _final_offset) = parse_jsonl_file_delta(
+        file_path,
+        offset_after_line_1,
+        file_size,
+        "proj_hash",
+        "conv_hash",
+    )
+    .expect("delta parse");
 
     // Should get line 3 (line 2 is skipped as a safety measure in case we started mid-line)
     // This conservative behavior ensures we never parse corrupted data.
