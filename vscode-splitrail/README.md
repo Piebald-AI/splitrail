@@ -1,6 +1,6 @@
 # Splitrail VS Code Extension
 
-Splitrail is a **fast, cross-platform, real-time Claude Code / Codex CLI / Gemini CLI / Qwen Code / Cline / Roo Code / Kilo Code / GitHub Copilot / OpenCode token usage tracker and cost monitor.**  
+Splitrail is a **fast, cross-platform, real-time Claude Code / Codex CLI / Gemini CLI / Qwen Code / Cline / Roo Code / Kilo Code / GitHub Copilot / OpenCode / Pi Agent token usage tracker and cost monitor.**  
 
 **This is the companion VS Code extension for it.**  Upload your usage data to your private account on the [Splitrail Cloud](https://splitrail.dev) for safe-keeping and cross-machine usage aggregation.
 

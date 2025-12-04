@@ -382,7 +382,7 @@ jobs:
           Architecture: ${DPKG_ARCH}
           Provides: ${{ needs.crate_metadata.outputs.name }}
           Conflicts: ${DPKG_CONFLICTS}
-          Description: Blazing fast, single-executable, cross-platform, agentic development monitor.  Supports Claude Code / Codex CLI / Gemini CLI / Qwen Code / Cline / Roo Code / Kilo Code / GitHub Copilot / OpenCode, and integrates with Splitrail Cloud.
+          Description: Blazing fast, single-executable, cross-platform, agentic development monitor.  Supports Claude Code / Codex CLI / Gemini CLI / Qwen Code / Cline / Roo Code / Kilo Code / GitHub Copilot / OpenCode / Pi Agent, and integrates with Splitrail Cloud.
           EOF
 
           DPKG_PATH="${DPKG_STAGING}/${DPKG_NAME}"

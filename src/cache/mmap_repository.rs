@@ -268,6 +268,7 @@ pub(crate) fn application_to_u8(app: &Application) -> u8 {
         Application::KiloCode => 6,
         Application::Copilot => 7,
         Application::OpenCode => 8,
+        Application::PiAgent => 9,
     }
 }
 
@@ -283,6 +284,7 @@ pub(crate) fn u8_to_application(v: u8) -> Application {
         6 => Application::KiloCode,
         7 => Application::Copilot,
         8 => Application::OpenCode,
+        9 => Application::PiAgent,
         _ => Application::ClaudeCode, // Fallback for unknown values
     }
 }

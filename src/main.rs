@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use analyzer::AnalyzerRegistry;
 use analyzers::{
     ClaudeCodeAnalyzer, ClineAnalyzer, CodexCliAnalyzer, CopilotAnalyzer, GeminiCliAnalyzer,
-    KiloCodeAnalyzer, OpenCodeAnalyzer, QwenCodeAnalyzer, RooCodeAnalyzer,
+    KiloCodeAnalyzer, OpenCodeAnalyzer, PiAgentAnalyzer, QwenCodeAnalyzer, RooCodeAnalyzer,
 };
 
 mod analyzer;
@@ -216,6 +216,7 @@ pub fn create_analyzer_registry() -> AnalyzerRegistry {
     registry.register(CodexCliAnalyzer::new());
     registry.register(CopilotAnalyzer::new());
     registry.register(OpenCodeAnalyzer::new());
+    registry.register(PiAgentAnalyzer::new());
 
     registry
 }

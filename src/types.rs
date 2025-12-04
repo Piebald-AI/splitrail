@@ -62,6 +62,7 @@ pub enum Application {
     KiloCode,
     Copilot,
     OpenCode,
+    PiAgent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
