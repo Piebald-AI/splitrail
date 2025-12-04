@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Splitrail is a high-performance, cross-platform usage tracker for AI coding assistants (Claude Code, Copilot, Cline, etc.). It analyzes local data files from these tools, aggregates usage statistics, and provides real-time TUI monitoring with optional cloud upload capabilities.
+Splitrail is a high-performance, cross-platform usage tracker for AI coding assistants (Claude Code, Copilot, Cline, Pi Agent, etc.). It analyzes local data files from these tools, aggregates usage statistics, and provides real-time TUI monitoring with optional cloud upload capabilities.
 
 **Key Technologies:**
 - Rust (edition 2024) with async/await (Tokio)
@@ -57,7 +57,7 @@ The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trai
    - `claude_code.rs` - Claude Code analyzer (largest, most complex)
    - `copilot.rs` - GitHub Copilot
    - `cline.rs`, `roo_code.rs`, `kilo_code.rs` - VSCode extensions
-   - `codex_cli.rs`, `gemini_cli.rs`, `qwen_code.rs`, `opencode.rs` - CLI tools
+   - `codex_cli.rs`, `gemini_cli.rs`, `qwen_code.rs`, `opencode.rs`, `pi_agent.rs` - CLI tools
 
    Each analyzer:
    - Discovers data sources via glob patterns or VSCode extension paths

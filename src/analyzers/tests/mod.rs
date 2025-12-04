@@ -5,5 +5,6 @@ mod copilot;
 mod gemini_cli;
 mod kilo_code;
 mod opencode;
+mod pi_agent;
 mod qwen_code;
 mod roo_code;
