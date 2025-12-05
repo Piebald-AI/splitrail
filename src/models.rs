@@ -289,13 +289,13 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
     },
     "gpt-5.1-codex-max" => ModelInfo {
         pricing: PricingStructure::Flat {
-            input_per_1m: 2.5,
-            output_per_1m: 20.0,
+            input_per_1m: 1.25,
+            output_per_1m: 10.0,
         },
         caching: CachingSupport::OpenAI {
-            cached_input_per_1m: 0.25,
+            cached_input_per_1m: 0.125,
         },
-        is_estimated: true,
+        is_estimated: false,
     },
 
     // Anthropic Models
