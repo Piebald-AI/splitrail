@@ -1,7 +1,6 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::cache::FileCacheEntry;
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileMetadata, MessageRole, Stats,
+    AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
 };
 use crate::utils::hash_text;
 use anyhow::Result;
@@ -690,92 +689,5 @@ impl Analyzer for PiAgentAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
-    }
-
-    fn supports_caching(&self) -> bool {
-        true
-    }
-
-    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
-        let mut metadata = FileMetadata::from_path(&source.path)?;
-        let project_hash = extract_and_hash_project_id(&source.path);
-        let conversation_hash = hash_text(&source.path.to_string_lossy());
-
-        let file = File::open(&source.path)?;
-        let (messages, _) =
-            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
-
-        metadata.last_parsed_offset = metadata.size;
-
-        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
-
-        Ok(FileCacheEntry {
-            metadata,
-            messages,
-            daily_contributions,
-            cached_model: None,
-        })
-    }
-
-    fn supports_delta_parsing(&self) -> bool {
-        true
-    }
-
-    fn parse_single_file_incremental(
-        &self,
-        source: &DataSource,
-        cached: Option<&FileCacheEntry>,
-    ) -> Result<FileCacheEntry> {
-        let current_meta = FileMetadata::from_path(&source.path)?;
-
-        if let Some(cached_entry) = cached {
-            // Check for truncation - requires full reparse
-            if cached_entry.metadata.needs_full_reparse(&current_meta) {
-                return self.parse_single_file(source);
-            }
-
-            // Check for append - can do delta parsing
-            if cached_entry.metadata.is_append_only(&current_meta) {
-                let project_hash = extract_and_hash_project_id(&source.path);
-                let conversation_hash = hash_text(&source.path.to_string_lossy());
-
-                let delta_result = parse_jsonl_file_delta(
-                    &source.path,
-                    cached_entry.metadata.last_parsed_offset,
-                    current_meta.size,
-                    &project_hash,
-                    &conversation_hash,
-                );
-
-                let (new_messages, new_offset) = match delta_result {
-                    Ok(result) => result,
-                    Err(_) => return self.parse_single_file(source),
-                };
-
-                let mut all_messages = cached_entry.messages.clone();
-                all_messages.extend(new_messages);
-
-                let daily_contributions = crate::utils::aggregate_by_date_simple(&all_messages);
-
-                return Ok(FileCacheEntry {
-                    metadata: FileMetadata {
-                        size: current_meta.size,
-                        modified: current_meta.modified,
-                        last_parsed_offset: new_offset,
-                    },
-                    messages: all_messages,
-                    daily_contributions,
-                    cached_model: None,
-                });
-            }
-
-            // File unchanged - use cached entry directly
-            if cached_entry.metadata.is_unchanged(&current_meta) {
-                return Ok(cached_entry.clone());
-            }
-        }
-
-        // No cache or file changed - full reparse
-        self.parse_single_file(source)
     }
 }

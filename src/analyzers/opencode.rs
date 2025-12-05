@@ -1,8 +1,7 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::cache::FileCacheEntry;
 use crate::models::calculate_total_cost;
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileMetadata, MessageRole, Stats,
+    AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
 };
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
@@ -518,39 +517,5 @@ impl Analyzer for OpenCodeAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
-    }
-
-    fn supports_caching(&self) -> bool {
-        true
-    }
-
-    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
-        let metadata = FileMetadata::from_path(&source.path)?;
-
-        // Load project and session mappings (needed for message parsing)
-        let home_dir = dirs::home_dir().context("Could not find home directory")?;
-        let storage_root = home_dir.join(".local/share/opencode/storage");
-        let project_root = storage_root.join("project");
-        let session_root = storage_root.join("session");
-        let part_root = storage_root.join("part");
-
-        let projects = load_projects(&project_root);
-        let sessions = load_sessions(&session_root);
-
-        // Parse the single message file
-        let content = fs::read_to_string(&source.path)?;
-        let mut bytes = content.into_bytes();
-        let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes)?;
-        let conv_msg = to_conversation_message(msg, &sessions, &projects, &part_root);
-
-        let messages = vec![conv_msg];
-        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
-
-        Ok(FileCacheEntry {
-            metadata,
-            messages,
-            daily_contributions,
-            cached_model: None,
-        })
     }
 }

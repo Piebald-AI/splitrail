@@ -9,10 +9,9 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
-use crate::cache::FileCacheEntry;
 use crate::models::calculate_total_cost;
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileMetadata, MessageRole, Stats,
+    AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
 };
 use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
 
@@ -118,90 +117,6 @@ impl Analyzer for CodexCliAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
-    }
-
-    fn supports_caching(&self) -> bool {
-        true
-    }
-
-    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
-        let mut metadata = FileMetadata::from_path(&source.path)?;
-        let (messages, detected_model) = parse_codex_cli_jsonl_file(&source.path)?;
-
-        // Set last_parsed_offset to file size (we've parsed everything)
-        metadata.last_parsed_offset = metadata.size;
-
-        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
-
-        Ok(FileCacheEntry {
-            metadata,
-            messages,
-            daily_contributions,
-            cached_model: detected_model, // Store detected model for delta parsing
-        })
-    }
-
-    fn supports_delta_parsing(&self) -> bool {
-        true
-    }
-
-    fn parse_single_file_incremental(
-        &self,
-        source: &DataSource,
-        cached: Option<&FileCacheEntry>,
-    ) -> Result<FileCacheEntry> {
-        let current_meta = FileMetadata::from_path(&source.path)?;
-
-        // Check if we can do delta parsing
-        if let Some(cached_entry) = cached {
-            // Check for truncation - requires full reparse
-            if cached_entry.metadata.needs_full_reparse(&current_meta) {
-                return self.parse_single_file(source);
-            }
-
-            // Check for append - can do delta parsing
-            if cached_entry.metadata.is_append_only(&current_meta) {
-                // Delta parse only new bytes (pass expected_size to detect races)
-                let delta_result = parse_codex_cli_jsonl_file_delta(
-                    &source.path,
-                    cached_entry.metadata.last_parsed_offset,
-                    current_meta.size,
-                    cached_entry.cached_model.as_deref(),
-                );
-
-                // If delta parse fails (e.g., file truncated), fall back to full reparse
-                let (new_messages, new_offset) = match delta_result {
-                    Ok(result) => result,
-                    Err(_) => return self.parse_single_file(source),
-                };
-
-                // Merge with cached messages
-                let mut all_messages = cached_entry.messages.clone();
-                all_messages.extend(new_messages);
-
-                // Re-aggregate daily contributions
-                let daily_contributions = crate::utils::aggregate_by_date_simple(&all_messages);
-
-                return Ok(FileCacheEntry {
-                    metadata: FileMetadata {
-                        size: current_meta.size,
-                        modified: current_meta.modified,
-                        last_parsed_offset: new_offset,
-                    },
-                    messages: all_messages,
-                    daily_contributions,
-                    cached_model: cached_entry.cached_model.clone(), // Preserve cached model
-                });
-            }
-
-            // File unchanged - use cached entry directly
-            if cached_entry.metadata.is_unchanged(&current_meta) {
-                return Ok(cached_entry.clone());
-            }
-        }
-
-        // No cache or mtime changed without size change - full reparse
-        self.parse_single_file(source)
     }
 }
 

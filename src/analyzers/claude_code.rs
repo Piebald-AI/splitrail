@@ -11,10 +11,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::analyzer::{Analyzer, DataSource};
-use crate::cache::FileCacheEntry;
 use crate::models::calculate_total_cost;
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileMetadata, MessageRole, Stats,
+    AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
 };
 use crate::utils::{fast_hash, hash_text};
 use jwalk::WalkDir;
@@ -225,100 +224,6 @@ impl Analyzer for ClaudeCodeAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
-    }
-
-    fn supports_caching(&self) -> bool {
-        true
-    }
-
-    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
-        let mut metadata = FileMetadata::from_path(&source.path)?;
-        let project_hash = extract_and_hash_project_id(&source.path);
-        let conversation_hash = hash_text(&source.path.to_string_lossy());
-
-        let file = File::open(&source.path)?;
-        let (messages, _summaries, _uuids, _fallback) =
-            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
-
-        // Set last_parsed_offset to file size (we've parsed everything)
-        metadata.last_parsed_offset = metadata.size;
-
-        // Pre-aggregate daily contributions for this file
-        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
-
-        Ok(FileCacheEntry {
-            metadata,
-            messages,
-            daily_contributions,
-            cached_model: None, // Claude Code has model per-message, no session-level caching needed
-        })
-    }
-
-    fn supports_delta_parsing(&self) -> bool {
-        true
-    }
-
-    fn parse_single_file_incremental(
-        &self,
-        source: &DataSource,
-        cached: Option<&FileCacheEntry>,
-    ) -> Result<FileCacheEntry> {
-        let current_meta = FileMetadata::from_path(&source.path)?;
-
-        // Check if we can do delta parsing
-        if let Some(cached_entry) = cached {
-            // Check for truncation - requires full reparse
-            if cached_entry.metadata.needs_full_reparse(&current_meta) {
-                return self.parse_single_file(source);
-            }
-
-            // Check for append - can do delta parsing
-            if cached_entry.metadata.is_append_only(&current_meta) {
-                let project_hash = extract_and_hash_project_id(&source.path);
-                let conversation_hash = hash_text(&source.path.to_string_lossy());
-
-                // Delta parse only new bytes (pass expected_size to detect races)
-                let delta_result = parse_jsonl_file_delta(
-                    &source.path,
-                    cached_entry.metadata.last_parsed_offset,
-                    current_meta.size,
-                    &project_hash,
-                    &conversation_hash,
-                );
-
-                // If delta parse fails (e.g., file truncated), fall back to full reparse
-                let (new_messages, new_offset) = match delta_result {
-                    Ok(result) => result,
-                    Err(_) => return self.parse_single_file(source),
-                };
-
-                // Merge with cached messages
-                let mut all_messages = cached_entry.messages.clone();
-                all_messages.extend(new_messages);
-
-                // Re-aggregate daily contributions
-                let daily_contributions = crate::utils::aggregate_by_date_simple(&all_messages);
-
-                return Ok(FileCacheEntry {
-                    metadata: FileMetadata {
-                        size: current_meta.size,
-                        modified: current_meta.modified,
-                        last_parsed_offset: new_offset,
-                    },
-                    messages: all_messages,
-                    daily_contributions,
-                    cached_model: None, // Claude Code has model per-message
-                });
-            }
-
-            // File unchanged - use cached entry directly
-            if cached_entry.metadata.is_unchanged(&current_meta) {
-                return Ok(cached_entry.clone());
-            }
-        }
-
-        // No cache or mtime changed without size change - full reparse
-        self.parse_single_file(source)
     }
 }
 

@@ -1,7 +1,6 @@
 use crate::analyzer::{Analyzer, DataSource, discover_vscode_extension_sources};
-use crate::cache::FileCacheEntry;
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileMetadata, MessageRole, Stats,
+    AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
 };
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
@@ -378,24 +377,6 @@ impl Analyzer for RooCodeAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
-    }
-
-    fn supports_caching(&self) -> bool {
-        true
-    }
-
-    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
-        // Roo Code sources are directories - use directory metadata for caching
-        let metadata = FileMetadata::from_path(&source.path)?;
-        let messages = parse_roo_code_task_directory(&source.path)?;
-        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
-
-        Ok(FileCacheEntry {
-            metadata,
-            messages,
-            daily_contributions,
-            cached_model: None,
-        })
     }
 }
 
