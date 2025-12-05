@@ -385,6 +385,12 @@ function getDataDirectories(): string[] {
     dirs.push(opencodeDir);
   }
 
+  // Pi Agent: ~/.pi/agent/sessions
+  const piAgentDir = path.join(home, ".pi", "agent", "sessions");
+  if (fs.existsSync(piAgentDir)) {
+    dirs.push(piAgentDir);
+  }
+
   return dirs;
 }
 
