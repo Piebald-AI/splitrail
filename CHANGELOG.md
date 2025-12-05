@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2025-12-05
+- Use real GPT-5.1-Codex-Max's pricing (reported pricings should be a bit lower) - @mike1858
+
 ## [3.1.0] - 2025-12-05
 - We now fully support the [Pi coding agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)!  Track your historical (and current) Pi usage - @mike1858
 - Splitrail Cloud: Update Next.js version in response to [critical security vulnerability](https://github.com/facebook/react/security/advisories/GHSA-fv66-9v8q-g76r) - @mike1858
