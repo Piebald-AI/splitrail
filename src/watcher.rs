@@ -181,25 +181,29 @@ impl RealtimeStatsManager {
 
     pub async fn handle_watcher_event(&mut self, event: WatcherEvent) -> Result<()> {
         match event {
-            WatcherEvent::FileChanged(analyzer_name, _path) => {
-                // Invalidate data source cache to discover new files
-                self.registry.invalidate_cache(&analyzer_name);
-
-                // Reload stats (always fresh parse since caching was removed)
-                self.reload_analyzer_stats(&analyzer_name).await;
+            WatcherEvent::FileChanged(analyzer_name, path) => {
+                // Try incremental reload first (much faster - only reparses the changed file)
+                if self.registry.has_cached_messages(&analyzer_name) {
+                    self.reload_single_file(&analyzer_name, &path).await;
+                } else {
+                    // Fallback to full reload if cache not populated
+                    self.registry.invalidate_cache(&analyzer_name);
+                    self.reload_analyzer_stats(&analyzer_name).await;
+                }
             }
-            WatcherEvent::FileDeleted(analyzer_name, _path) => {
-                // Invalidate data source cache
+            WatcherEvent::FileDeleted(analyzer_name, path) => {
+                // Remove file from message cache
+                self.registry.remove_file_from_cache(&path);
+
+                // Invalidate data source cache to reflect deletion
                 self.registry.invalidate_cache(&analyzer_name);
 
-                // Reload stats
+                // Reload stats (will use cached messages for other files)
                 self.reload_analyzer_stats(&analyzer_name).await;
             }
             WatcherEvent::DataChanged(analyzer_name) => {
-                // Invalidate data source cache
+                // Full reload fallback
                 self.registry.invalidate_cache(&analyzer_name);
-
-                // Reload stats
                 self.reload_analyzer_stats(&analyzer_name).await;
             }
             WatcherEvent::Error(err) => {
@@ -212,38 +216,53 @@ impl RealtimeStatsManager {
     /// Helper to reload stats for a specific analyzer and broadcast updates
     async fn reload_analyzer_stats(&mut self, analyzer_name: &str) {
         if let Some(analyzer) = self.registry.get_analyzer_by_display_name(analyzer_name) {
-            // Always do a fresh parse (caching was removed)
+            // Full parse of all files for this analyzer
             let result = analyzer.get_stats().await;
+            self.apply_stats_update(analyzer_name, result).await;
+        }
+    }
 
-            match result {
-                Ok(new_stats) => {
-                    // Update the stats for this analyzer
-                    let mut updated_analyzer_stats = self.current_stats.analyzer_stats.clone();
+    /// Helper to reload stats for a single file change (incremental, much faster)
+    async fn reload_single_file(&mut self, analyzer_name: &str, path: &Path) {
+        // Incremental reload - only reparse the changed file
+        let result = self.registry.reload_file(analyzer_name, path).await;
+        self.apply_stats_update(analyzer_name, result).await;
+    }
 
-                    // Find and replace the stats for this analyzer
-                    if let Some(pos) = updated_analyzer_stats
-                        .iter()
-                        .position(|s| s.analyzer_name == analyzer_name)
-                    {
-                        updated_analyzer_stats[pos] = new_stats;
-                    } else {
-                        // New analyzer data
-                        updated_analyzer_stats.push(new_stats);
-                    }
+    /// Apply a stats update result and broadcast to listeners
+    async fn apply_stats_update(
+        &mut self,
+        analyzer_name: &str,
+        result: anyhow::Result<crate::types::AgenticCodingToolStats>,
+    ) {
+        match result {
+            Ok(new_stats) => {
+                // Update the stats for this analyzer
+                let mut updated_analyzer_stats = self.current_stats.analyzer_stats.clone();
 
-                    self.current_stats = MultiAnalyzerStats {
-                        analyzer_stats: updated_analyzer_stats,
-                    };
-
-                    // Send the update
-                    let _ = self.update_tx.send(self.current_stats.clone());
-
-                    // Trigger auto-upload if enabled and debounce time has passed
-                    self.trigger_auto_upload_if_enabled().await;
+                // Find and replace the stats for this analyzer
+                if let Some(pos) = updated_analyzer_stats
+                    .iter()
+                    .position(|s| s.analyzer_name == analyzer_name)
+                {
+                    updated_analyzer_stats[pos] = new_stats;
+                } else {
+                    // New analyzer data
+                    updated_analyzer_stats.push(new_stats);
                 }
-                Err(e) => {
-                    eprintln!("Error reloading {analyzer_name} stats: {e}");
-                }
+
+                self.current_stats = MultiAnalyzerStats {
+                    analyzer_stats: updated_analyzer_stats,
+                };
+
+                // Send the update
+                let _ = self.update_tx.send(self.current_stats.clone());
+
+                // Trigger auto-upload if enabled and debounce time has passed
+                self.trigger_auto_upload_if_enabled().await;
+            }
+            Err(e) => {
+                eprintln!("Error reloading {analyzer_name} stats: {e}");
             }
         }
     }

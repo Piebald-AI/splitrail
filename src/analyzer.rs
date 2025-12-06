@@ -184,6 +184,10 @@ pub struct AnalyzerRegistry {
     analyzers: Vec<Box<dyn Analyzer>>,
     /// Cached data sources per analyzer (display_name -> sources)
     data_source_cache: DashMap<String, Vec<DataSource>>,
+    /// In-memory message cache for fast incremental updates during file watching.
+    /// Key: file path, Value: parsed messages from that file.
+    /// This allows us to reparse only changed files instead of all files.
+    message_cache: DashMap<PathBuf, Vec<crate::types::ConversationMessage>>,
 }
 
 impl Default for AnalyzerRegistry {
@@ -198,6 +202,7 @@ impl AnalyzerRegistry {
         Self {
             analyzers: Vec::new(),
             data_source_cache: DashMap::new(),
+            message_cache: DashMap::new(),
         }
     }
 
@@ -252,7 +257,8 @@ impl AnalyzerRegistry {
             .map(|a| a.as_ref())
     }
 
-    /// Load stats from all available analyzers in parallel
+    /// Load stats from all available analyzers in parallel.
+    /// Also populates the message cache for fast incremental updates during watching.
     pub async fn load_all_stats(&self) -> Result<crate::types::MultiAnalyzerStats> {
         use futures::future::join_all;
 
@@ -263,8 +269,9 @@ impl AnalyzerRegistry {
             .into_iter()
             .map(|analyzer| async move {
                 let name = analyzer.display_name().to_string();
+                let sources = analyzer.discover_data_sources().ok();
                 let result = analyzer.get_stats().await;
-                (name, result)
+                (name, sources, result)
             })
             .collect();
 
@@ -272,9 +279,15 @@ impl AnalyzerRegistry {
         let results = join_all(futures).await;
 
         let mut all_stats = Vec::new();
-        for (name, result) in results {
+        for (name, sources, result) in results {
             match result {
-                Ok(stats) => all_stats.push(stats),
+                Ok(stats) => {
+                    // Populate message cache: store messages keyed by file path
+                    if let Some(sources) = sources {
+                        self.populate_message_cache(&name, &sources, &stats.messages);
+                    }
+                    all_stats.push(stats);
+                }
                 Err(e) => {
                     eprintln!("⚠️  Error analyzing {} data: {}", name, e);
                 }
@@ -284,6 +297,110 @@ impl AnalyzerRegistry {
         Ok(crate::types::MultiAnalyzerStats {
             analyzer_stats: all_stats,
         })
+    }
+
+    /// Populate the message cache from parsed messages.
+    /// Groups messages by their source file using conversation_hash matching.
+    fn populate_message_cache(
+        &self,
+        _analyzer_name: &str,
+        sources: &[DataSource],
+        messages: &[crate::types::ConversationMessage],
+    ) {
+        use crate::utils::hash_text;
+
+        // Create a map of conversation_hash -> file_path
+        let hash_to_path: std::collections::HashMap<String, PathBuf> = sources
+            .iter()
+            .map(|s| (hash_text(&s.path.to_string_lossy()), s.path.clone()))
+            .collect();
+
+        // Group messages by their source file
+        for msg in messages {
+            if let Some(path) = hash_to_path.get(&msg.conversation_hash) {
+                self.message_cache
+                    .entry(path.clone())
+                    .or_default()
+                    .push(msg.clone());
+            }
+        }
+    }
+
+    /// Reload stats for a single file change (incremental update).
+    /// Much faster than reparsing all files - only reparses the changed file.
+    pub async fn reload_file(
+        &self,
+        analyzer_name: &str,
+        changed_path: &std::path::Path,
+    ) -> Result<crate::types::AgenticCodingToolStats> {
+        let analyzer = self
+            .get_analyzer_by_display_name(analyzer_name)
+            .ok_or_else(|| anyhow::anyhow!("Analyzer not found: {}", analyzer_name))?;
+
+        // Parse just the changed file
+        let source = DataSource {
+            path: changed_path.to_path_buf(),
+        };
+        let new_messages = analyzer.parse_conversations(vec![source]).await?;
+
+        // Update the message cache for this file
+        self.message_cache
+            .insert(changed_path.to_path_buf(), new_messages);
+
+        // Rebuild stats from all cached messages for this analyzer
+        self.rebuild_stats_from_cache(analyzer_name, analyzer).await
+    }
+
+    /// Remove a file from the message cache (for file deletion events).
+    pub fn remove_file_from_cache(&self, path: &std::path::Path) {
+        self.message_cache.remove(path);
+    }
+
+    /// Rebuild stats from the message cache for a specific analyzer.
+    async fn rebuild_stats_from_cache(
+        &self,
+        analyzer_name: &str,
+        analyzer: &dyn Analyzer,
+    ) -> Result<crate::types::AgenticCodingToolStats> {
+        // Get all sources for this analyzer
+        let sources = self.get_cached_data_sources(analyzer)?;
+
+        // Collect all cached messages for files belonging to this analyzer
+        let mut all_messages = Vec::new();
+        for source in &sources {
+            if let Some(messages) = self.message_cache.get(&source.path) {
+                all_messages.extend(messages.clone());
+            }
+        }
+
+        // Deduplicate messages
+        let messages = crate::analyzers::deduplicate_messages(all_messages);
+
+        // Aggregate by date
+        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
+        daily_stats.retain(|date, _| date != "unknown");
+
+        let num_conversations = daily_stats
+            .values()
+            .map(|stats| stats.conversations as u64)
+            .sum();
+
+        Ok(crate::types::AgenticCodingToolStats {
+            daily_stats,
+            num_conversations,
+            messages,
+            analyzer_name: analyzer_name.to_string(),
+        })
+    }
+
+    /// Check if the message cache is populated for an analyzer.
+    pub fn has_cached_messages(&self, analyzer_name: &str) -> bool {
+        if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name) {
+            if let Ok(sources) = self.get_cached_data_sources(analyzer) {
+                return sources.iter().any(|s| self.message_cache.contains_key(&s.path));
+            }
+        }
+        false
     }
 
     /// Get a mapping of data directories to analyzer names for file watching
