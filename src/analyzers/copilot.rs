@@ -1,7 +1,5 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
-};
+use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;

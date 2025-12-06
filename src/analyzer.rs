@@ -395,10 +395,12 @@ impl AnalyzerRegistry {
 
     /// Check if the message cache is populated for an analyzer.
     pub fn has_cached_messages(&self, analyzer_name: &str) -> bool {
-        if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name) {
-            if let Ok(sources) = self.get_cached_data_sources(analyzer) {
-                return sources.iter().any(|s| self.message_cache.contains_key(&s.path));
-            }
+        if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name)
+            && let Ok(sources) = self.get_cached_data_sources(analyzer)
+        {
+            return sources
+                .iter()
+                .any(|s| self.message_cache.contains_key(&s.path));
         }
         false
     }

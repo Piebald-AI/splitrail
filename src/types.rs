@@ -1,54 +1,7 @@
 use std::collections::BTreeMap;
-use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-/// Metadata for cache invalidation - tracks file size, modification time, and parse offset
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct FileMetadata {
-    pub size: u64,
-    pub modified: i64, // Unix timestamp (seconds)
-    /// Byte offset of last successfully parsed position (for delta parsing)
-    #[serde(default)]
-    pub last_parsed_offset: u64,
-}
-
-impl FileMetadata {
-    pub fn from_path(path: &std::path::Path) -> std::io::Result<Self> {
-        let metadata = std::fs::metadata(path)?;
-        let modified = metadata
-            .modified()?
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        Ok(Self {
-            size: metadata.len(),
-            modified,
-            last_parsed_offset: 0, // Will be set after parsing
-        })
-    }
-
-    pub fn is_stale(&self, current: &FileMetadata) -> bool {
-        self.size != current.size || self.modified != current.modified
-    }
-
-    /// Check if the file has been appended to (new data added, no truncation)
-    pub fn is_append_only(&self, current: &FileMetadata) -> bool {
-        current.size > self.last_parsed_offset && current.size >= self.size
-    }
-
-    /// Check if the file was truncated or replaced (requires full reparse)
-    pub fn needs_full_reparse(&self, current: &FileMetadata) -> bool {
-        current.size < self.last_parsed_offset
-    }
-
-    /// Check if file is unchanged (no new data to parse)
-    pub fn is_unchanged(&self, current: &FileMetadata) -> bool {
-        current.size == self.last_parsed_offset && current.size == self.size
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -250,78 +203,5 @@ mod tests {
         assert_eq!(stats.output_tokens, 0);
         assert_eq!(stats.tool_calls, 0);
         assert_eq!(stats.code_lines, 0);
-    }
-
-    // =========================================================================
-    // FILE METADATA TESTS
-    // =========================================================================
-
-    #[test]
-    fn test_file_metadata_from_path() {
-        use tempfile::NamedTempFile;
-
-        let temp_file = NamedTempFile::new().expect("create temp file");
-        std::fs::write(temp_file.path(), "hello world").expect("write to temp file");
-
-        let metadata = FileMetadata::from_path(temp_file.path()).expect("get metadata");
-
-        assert_eq!(metadata.size, 11); // "hello world" is 11 bytes
-        assert!(metadata.modified > 0); // Should have a valid timestamp
-        assert_eq!(metadata.last_parsed_offset, 0); // Default is 0
-    }
-
-    #[test]
-    fn test_file_metadata_from_path_missing_file() {
-        let result = FileMetadata::from_path(std::path::Path::new("/nonexistent/file.txt"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_file_metadata_last_parsed_offset_default() {
-        use tempfile::NamedTempFile;
-
-        let temp_file = NamedTempFile::new().expect("create temp file");
-        std::fs::write(temp_file.path(), "content").expect("write");
-
-        let metadata = FileMetadata::from_path(temp_file.path()).unwrap();
-
-        // from_path always sets last_parsed_offset to 0
-        assert_eq!(metadata.last_parsed_offset, 0);
-    }
-
-    #[test]
-    fn test_file_metadata_is_stale() {
-        let old = FileMetadata {
-            size: 100,
-            modified: 1000,
-            last_parsed_offset: 50,
-        };
-
-        let same = FileMetadata {
-            size: 100,
-            modified: 1000,
-            last_parsed_offset: 100, // Different offset doesn't matter
-        };
-
-        let different_size = FileMetadata {
-            size: 200,
-            modified: 1000,
-            last_parsed_offset: 0,
-        };
-
-        let different_modified = FileMetadata {
-            size: 100,
-            modified: 2000,
-            last_parsed_offset: 0,
-        };
-
-        // Same size and modified time = not stale
-        assert!(!old.is_stale(&same));
-
-        // Different size = stale
-        assert!(old.is_stale(&different_size));
-
-        // Different modified time = stale
-        assert!(old.is_stale(&different_modified));
     }
 }

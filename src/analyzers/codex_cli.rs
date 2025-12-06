@@ -5,14 +5,12 @@ use jwalk::WalkDir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::Path;
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
-use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
-};
+use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
 
 const DEFAULT_FALLBACK_MODEL: &str = "gpt-5";
@@ -514,175 +512,6 @@ pub(crate) fn parse_codex_cli_jsonl_file(
     // Return both messages and the detected session model name
     let detected_model = session_model.map(|m| m.name);
     Ok((entries, detected_model))
-}
-
-/// Parse Codex CLI JSONL file starting from a byte offset (delta parsing).
-/// Returns (new_messages, new_end_offset).
-///
-/// Uses the provided cached_model for accurate cost calculations.
-pub(crate) fn parse_codex_cli_jsonl_file_delta(
-    file_path: &Path,
-    start_offset: u64,
-    expected_size: u64,
-    cached_model: Option<&str>,
-) -> Result<(Vec<ConversationMessage>, u64)> {
-    let file = File::open(file_path)?;
-    let file_size = file.metadata()?.len();
-
-    // Race condition protection: if file was truncated between the caller's
-    // metadata check and now, bail out so caller can do a full reparse
-    if file_size < expected_size {
-        anyhow::bail!("file was truncated during delta parse");
-    }
-
-    // Nothing new to parse
-    if start_offset >= file_size {
-        return Ok((Vec::new(), start_offset));
-    }
-
-    let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::Start(start_offset))?;
-
-    // If starting mid-file, skip to first complete line
-    let mut current_offset = start_offset;
-    if start_offset > 0 {
-        let mut skip_buf = Vec::new();
-        let bytes_skipped = reader.read_until(b'\n', &mut skip_buf)?;
-        if bytes_skipped == 0 {
-            return Ok((Vec::new(), start_offset));
-        }
-        current_offset += bytes_skipped as u64;
-    }
-
-    let file_path_str = file_path.to_string_lossy().into_owned();
-    let mut entries = Vec::new();
-    let mut last_successful_offset = current_offset;
-
-    // Use cached model from initial parse, or fallback if not available
-    let model_name = cached_model.unwrap_or(DEFAULT_FALLBACK_MODEL);
-    let session_model = SessionModel::explicit(model_name.to_string());
-
-    loop {
-        let mut line_buf = String::new();
-        let bytes_read = reader.read_line(&mut line_buf)?;
-
-        if bytes_read == 0 {
-            break;
-        }
-
-        let line = line_buf.trim();
-        if line.is_empty() {
-            current_offset += bytes_read as u64;
-            last_successful_offset = current_offset;
-            continue;
-        }
-
-        let is_complete_line = line_buf.ends_with('\n');
-
-        // Parse the wrapper
-        let mut line_bytes = line.as_bytes().to_vec();
-        match simd_json::from_slice::<CodexCliWrapper>(&mut line_bytes) {
-            Ok(wrapper) => {
-                // Handle event_msg entries (which contain token_count events)
-                if wrapper.entry_type == "event_msg" {
-                    let mut payload_bytes = match simd_json::to_vec(&wrapper.payload) {
-                        Ok(b) => b,
-                        Err(_) => {
-                            current_offset += bytes_read as u64;
-                            last_successful_offset = current_offset;
-                            continue;
-                        }
-                    };
-
-                    // Parse as event message and check if it's a token_count event
-                    if let Ok(event) = simd_json::from_slice::<CodexCliEventMsg>(&mut payload_bytes)
-                        && event.event_type == "token_count"
-                        && let Some(info) = event.info
-                    {
-                        // Prefer last_token_usage, fall back to total_token_usage
-                        let usage = info.last_token_usage.or(info.total_token_usage);
-                        if let Some(token_usage) = usage {
-                            let stats = stats_from_usage(&token_usage, &session_model.name);
-
-                            entries.push(ConversationMessage {
-                                application: Application::CodexCli,
-                                model: Some(session_model.name.clone()),
-                                global_hash: hash_text(&format!(
-                                    "{}_{}_delta",
-                                    file_path_str,
-                                    wrapper.timestamp.to_rfc3339()
-                                )),
-                                local_hash: None,
-                                conversation_hash: hash_text(&file_path_str),
-                                date: wrapper.timestamp,
-                                project_hash: "".to_string(),
-                                stats,
-                                role: MessageRole::Assistant,
-                                uuid: None,
-                                session_name: None,
-                            });
-                        }
-                    }
-                }
-                // Also handle response_item messages for user messages
-                else if wrapper.entry_type == "response_item" {
-                    let mut payload_bytes = match simd_json::to_vec(&wrapper.payload) {
-                        Ok(b) => b,
-                        Err(_) => {
-                            current_offset += bytes_read as u64;
-                            last_successful_offset = current_offset;
-                            continue;
-                        }
-                    };
-
-                    if let Ok(message) =
-                        simd_json::from_slice::<CodexCliMessage>(&mut payload_bytes)
-                        && message.message_type == "message"
-                        && let Some(role) = &message.role
-                        && role == "user"
-                    {
-                        entries.push(ConversationMessage {
-                            date: wrapper.timestamp,
-                            global_hash: hash_text(&format!(
-                                "{}_{}_delta",
-                                file_path_str,
-                                wrapper.timestamp.to_rfc3339()
-                            )),
-                            local_hash: None,
-                            conversation_hash: hash_text(&file_path_str),
-                            application: Application::CodexCli,
-                            project_hash: "".to_string(),
-                            model: None,
-                            stats: Stats::default(),
-                            role: MessageRole::User,
-                            uuid: None,
-                            session_name: None,
-                        });
-                    }
-                }
-
-                current_offset += bytes_read as u64;
-                last_successful_offset = current_offset;
-            }
-            Err(e) => {
-                if !is_complete_line {
-                    // Incomplete line at EOF
-                    break;
-                } else {
-                    warn_once(format!(
-                        "Skipping invalid entry in {} at offset {}: {}",
-                        file_path.display(),
-                        current_offset,
-                        e
-                    ));
-                    current_offset += bytes_read as u64;
-                    last_successful_offset = current_offset;
-                }
-            }
-        }
-    }
-
-    Ok((entries, last_successful_offset))
 }
 
 fn calculate_cost_from_tokens(usage: &CodexCliTokenUsage, model_name: &str) -> f64 {

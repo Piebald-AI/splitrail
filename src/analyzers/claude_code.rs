@@ -6,15 +6,13 @@ use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
-use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
-};
+use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{fast_hash, hash_text};
 use jwalk::WalkDir;
 
@@ -640,181 +638,6 @@ pub fn parse_jsonl_file<R: Read>(
     }
 
     Ok((messages, summaries, all_uuids, fallback_session_name))
-}
-
-/// Parse JSONL file starting from a byte offset (delta parsing).
-/// Returns (new_messages, new_end_offset).
-///
-/// Key behaviors:
-/// - If start_offset > 0, skips to first newline to handle partial lines
-/// - Handles incomplete line at EOF gracefully (doesn't advance offset past it)
-/// - Returns only newly parsed messages, not the entire file
-pub fn parse_jsonl_file_delta(
-    path: &Path,
-    start_offset: u64,
-    expected_size: u64,
-    project_hash: &str,
-    conversation_hash: &str,
-) -> Result<(Vec<ConversationMessage>, u64)> {
-    let file = File::open(path)?;
-    let file_size = file.metadata()?.len();
-
-    // Race condition protection: if file was truncated between the caller's
-    // metadata check and now, bail out so caller can do a full reparse
-    if file_size < expected_size {
-        anyhow::bail!("file was truncated during delta parse");
-    }
-
-    // Nothing new to parse
-    if start_offset >= file_size {
-        return Ok((Vec::new(), start_offset));
-    }
-
-    let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::Start(start_offset))?;
-
-    // If starting mid-file, skip to first complete line
-    // (the previous parse may have ended mid-line)
-    let mut current_offset = start_offset;
-    if start_offset > 0 {
-        let mut skip_buf = Vec::new();
-        let bytes_skipped = reader.read_until(b'\n', &mut skip_buf)?;
-        if bytes_skipped == 0 {
-            // EOF reached while looking for newline
-            return Ok((Vec::new(), start_offset));
-        }
-        current_offset += bytes_skipped as u64;
-    }
-
-    let mut messages = Vec::new();
-    let mut current_model: Option<String> = None;
-    let mut last_successful_offset = current_offset;
-
-    loop {
-        let mut line_buf = String::new();
-        let bytes_read = reader.read_line(&mut line_buf)?;
-
-        if bytes_read == 0 {
-            // EOF
-            break;
-        }
-
-        let line = line_buf.trim();
-
-        // Skip empty lines
-        if line.is_empty() {
-            current_offset += bytes_read as u64;
-            last_successful_offset = current_offset;
-            continue;
-        }
-
-        // Check if line is complete (ends with newline)
-        let is_complete_line = line_buf.ends_with('\n');
-
-        // Try to parse
-        let mut line_bytes = line.as_bytes().to_vec();
-        match simd_json::from_slice::<ClaudeCodeEntry>(&mut line_bytes) {
-            Ok(ClaudeCodeEntry::Message(entry)) => {
-                let model = entry.message.as_ref().and_then(|m| m.model.clone());
-                if let Some(m) = &model {
-                    current_model = Some(m.clone());
-                }
-
-                // Skip synthetic messages
-                if !matches!(model.as_deref(), Some("<synthetic>")) {
-                    let content = entry.message.as_ref().and_then(|m| m.content.clone());
-                    let usage = entry.message.as_ref().and_then(|m| m.usage.clone());
-                    let role = entry.message.as_ref().and_then(|m| m.role.clone());
-                    let message_id = entry.message.as_ref().and_then(|m| m.id.clone());
-                    let request_id = entry.request_id;
-                    let tool_use_result = entry.tool_use_result;
-                    let uuid = Some(entry.uuid.clone());
-
-                    let mut msg = ConversationMessage {
-                        global_hash: hash_text(&format!("{}_{}", conversation_hash, entry.uuid)),
-                        local_hash: None,
-                        application: Application::ClaudeCode,
-                        model: model.clone(),
-                        date: entry.timestamp,
-                        project_hash: project_hash.to_string(),
-                        conversation_hash: conversation_hash.to_string(),
-                        stats: Stats::default(),
-                        role: match role.as_deref() {
-                            Some("user") => MessageRole::User,
-                            _ => MessageRole::Assistant,
-                        },
-                        uuid,
-                        session_name: None,
-                    };
-
-                    // Extract tool stats from content
-                    if let Some(content_val) = &content {
-                        msg.stats = extract_tool_stats(content_val, &tool_use_result);
-                        msg.stats.tool_calls = match content_val {
-                            Content::Blocks(blocks) => blocks
-                                .iter()
-                                .filter(|c| matches!(c, ContentBlock::ToolUse { .. }))
-                                .count()
-                                as u32,
-                            _ => 0,
-                        };
-                    }
-
-                    if let Some(usage_val) = usage {
-                        let model_name = model
-                            .as_ref()
-                            .unwrap_or(&current_model.clone().unwrap_or_default())
-                            .to_owned();
-
-                        msg.stats.input_tokens = usage_val.input_tokens;
-                        msg.stats.output_tokens = usage_val.output_tokens;
-                        msg.stats.cache_creation_tokens = usage_val.cache_creation_input_tokens;
-                        msg.stats.cache_read_tokens = usage_val.cache_read_input_tokens;
-                        msg.stats.cached_tokens = usage_val.cache_creation_input_tokens
-                            + usage_val.cache_read_input_tokens;
-                        msg.stats.cost = calculate_cost_from_tokens(&usage_val, &model_name);
-
-                        if let Some(request_id) = request_id
-                            && let Some(message_id) = message_id
-                        {
-                            msg.local_hash = Some(fast_hash(&format!("{request_id}_{message_id}")));
-                        }
-                    } else {
-                        msg.role = MessageRole::User;
-                    }
-
-                    messages.push(msg);
-                }
-
-                current_offset += bytes_read as u64;
-                last_successful_offset = current_offset;
-            }
-            Ok(ClaudeCodeEntry::Summary(_)) | Ok(_) => {
-                // Skip summaries and other entry types in delta parsing
-                current_offset += bytes_read as u64;
-                last_successful_offset = current_offset;
-            }
-            Err(e) => {
-                if !is_complete_line {
-                    // Incomplete line at EOF - don't advance offset past it
-                    // This will be re-read on next delta parse when more data is available
-                    break;
-                } else {
-                    // Complete line but parse error - log and skip
-                    crate::utils::warn_once(format!(
-                        "Skipping invalid entry in {} at offset {}: {}",
-                        path.display(),
-                        current_offset,
-                        e
-                    ));
-                    current_offset += bytes_read as u64;
-                    last_successful_offset = current_offset;
-                }
-            }
-        }
-    }
-
-    Ok((messages, last_successful_offset))
 }
 
 // Type alias for token fingerprint
