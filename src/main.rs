@@ -10,7 +10,6 @@ use analyzers::{
 
 mod analyzer;
 mod analyzers;
-mod cache;
 mod config;
 mod mcp;
 mod models;
@@ -60,8 +59,6 @@ enum Commands {
     Stats(StatsArgs),
     /// Run as an MCP (Model Context Protocol) server
     Mcp,
-    /// Manage the persistent cache
-    Cache(CacheArgs),
 }
 
 #[derive(Args)]
@@ -112,28 +109,6 @@ enum ConfigSubcommands {
         /// Configuration value
         value: String,
     },
-}
-
-#[derive(Args)]
-struct CacheArgs {
-    #[command(subcommand)]
-    subcommand: CacheSubcommands,
-}
-
-#[derive(Subcommand)]
-enum CacheSubcommands {
-    /// Show cache statistics
-    Stats,
-    /// Clear cache
-    Clear {
-        /// Clear only a specific analyzer's cache (e.g., "Claude Code")
-        #[arg(long)]
-        analyzer: Option<String>,
-    },
-    /// Rebuild cache from scratch
-    Rebuild,
-    /// Show cache database path
-    Path,
 }
 
 #[tokio::main]
@@ -191,12 +166,6 @@ async fn main() {
         Some(Commands::Mcp) => {
             if let Err(e) = mcp::run_mcp_server().await {
                 eprintln!("MCP server error: {e:#}");
-                std::process::exit(1);
-            }
-        }
-        Some(Commands::Cache(cache_args)) => {
-            if let Err(e) = handle_cache_subcommand(cache_args).await {
-                eprintln!("Cache error: {e:#}");
                 std::process::exit(1);
             }
         }
@@ -422,66 +391,4 @@ async fn handle_config_subcommand(config_args: ConfigArgs) {
             }
         }
     }
-}
-
-async fn handle_cache_subcommand(cache_args: CacheArgs) -> Result<()> {
-    use cache::{MmapCacheRepository, cache_db_path, format_bytes};
-
-    match cache_args.subcommand {
-        CacheSubcommands::Stats => {
-            let repo = MmapCacheRepository::open().context("Failed to open cache")?;
-            let stats = repo.stats();
-
-            println!("Cache Statistics:");
-            println!("  Total entries: {}", stats.total_entries);
-            println!("  Index size: {}", format_bytes(stats.db_size));
-            println!();
-
-            if stats.by_analyzer.is_empty() {
-                println!("  No cached data");
-            } else {
-                println!("  By analyzer:");
-                let mut analyzers: Vec<_> = stats.by_analyzer.iter().collect();
-                analyzers.sort_by_key(|(name, _)| name.as_str());
-                for (analyzer, count) in analyzers {
-                    println!("    {}: {} files", analyzer, count);
-                }
-            }
-        }
-        CacheSubcommands::Clear { analyzer } => {
-            let repo = MmapCacheRepository::open().context("Failed to open cache")?;
-
-            if let Some(name) = analyzer {
-                repo.invalidate_analyzer(&name);
-                repo.persist()?;
-                println!("Cleared cache for: {}", name);
-            } else {
-                repo.clear()?;
-                println!("Cleared all cache");
-            }
-        }
-        CacheSubcommands::Rebuild => {
-            let repo = MmapCacheRepository::open().context("Failed to open cache")?;
-            repo.clear()?;
-            println!("Cache cleared. Rebuilding...");
-
-            let registry = create_analyzer_registry();
-            let stats = registry.load_all_stats().await?;
-            registry.persist_cache()?;
-
-            let total_messages: usize = stats.analyzer_stats.iter().map(|s| s.messages.len()).sum();
-
-            println!(
-                "Cache rebuilt with {} messages from {} analyzers",
-                total_messages,
-                stats.analyzer_stats.len()
-            );
-        }
-        CacheSubcommands::Path => {
-            let path = cache_db_path()?;
-            println!("{}", path.display());
-        }
-    }
-
-    Ok(())
 }

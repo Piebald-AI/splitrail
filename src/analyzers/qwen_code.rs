@@ -1,9 +1,7 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::cache::FileCacheEntry;
 use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output_cost};
 use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, FileMetadata,
-    MessageRole, Stats,
+    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
 };
 use crate::utils::{deserialize_utc_timestamp, hash_text};
 use anyhow::Result;
@@ -378,22 +376,5 @@ impl Analyzer for QwenCodeAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
-    }
-
-    fn supports_caching(&self) -> bool {
-        true
-    }
-
-    fn parse_single_file(&self, source: &DataSource) -> Result<FileCacheEntry> {
-        let metadata = FileMetadata::from_path(&source.path)?;
-        let messages = parse_json_session_file(&source.path)?;
-        let daily_contributions = crate::utils::aggregate_by_date_simple(&messages);
-
-        Ok(FileCacheEntry {
-            metadata,
-            messages,
-            daily_contributions,
-            cached_model: None,
-        })
     }
 }
