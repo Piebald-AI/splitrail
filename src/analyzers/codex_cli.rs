@@ -381,9 +381,10 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                             entries.push(ConversationMessage {
                                 date: wrapper.timestamp,
                                 global_hash: hash_text(&format!(
-                                    "{}_{}",
+                                    "{}_{}_user_{}",
                                     file_path_str,
-                                    wrapper.timestamp.to_rfc3339()
+                                    wrapper.timestamp.to_rfc3339(),
+                                    entries.len()
                                 )),
                                 local_hash: None,
                                 conversation_hash: hash_text(&file_path_str),
@@ -418,9 +419,10 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                     application: Application::CodexCli,
                                     model: Some(model_state.name.clone()),
                                     global_hash: hash_text(&format!(
-                                        "{}_{}_assistant",
+                                        "{}_{}_assistant_{}",
                                         file_path_str,
-                                        wrapper.timestamp.to_rfc3339()
+                                        wrapper.timestamp.to_rfc3339(),
+                                        entries.len()
                                     )),
                                     local_hash: None,
                                     conversation_hash: hash_text(&file_path_str),
@@ -482,9 +484,10 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 application: Application::CodexCli,
                                 model: Some(model_state.name.clone()),
                                 global_hash: hash_text(&format!(
-                                    "{}_{}_token",
+                                    "{}_{}_token_{}",
                                     file_path_str,
-                                    wrapper.timestamp.to_rfc3339()
+                                    wrapper.timestamp.to_rfc3339(),
+                                    entries.len()
                                 )),
                                 local_hash: None,
                                 conversation_hash: hash_text(&file_path_str),
