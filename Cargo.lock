@@ -2152,6 +2152,7 @@ dependencies = [
  "dirs",
  "futures",
  "glob",
+ "iana-time-zone",
  "jwalk",
  "notify",
  "notify-types",
