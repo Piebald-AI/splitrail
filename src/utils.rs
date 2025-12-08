@@ -327,5 +327,10 @@ where
         .map_err(serde::de::Error::custom)
 }
 
+/// Get the system's local timezone as an IANA timezone string (e.g., "America/Chicago")
+pub fn get_local_timezone() -> String {
+    iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string())
+}
+
 #[cfg(test)]
 mod tests;

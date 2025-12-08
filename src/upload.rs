@@ -47,6 +47,7 @@ where
         let target_count = chunk_start + messages_in_chunk;
 
         // Start the HTTP request
+        let timezone = utils::get_local_timezone();
         let mut http_request = Box::pin(
             client
                 .post(format!("{}/api/upload-stats", config.server.url))
@@ -55,6 +56,7 @@ where
                     format!("Bearer {}", config.server.api_token),
                 )
                 .header("Content-Type", "application/json")
+                .header("X-Timezone", &timezone)
                 .simd_json(&chunk)
                 .send(),
         );
