@@ -1,10 +1,43 @@
+<div>
+<div align="right">
+<a href="https://piebald.ai"><img width="200" top="20" align="right" src="https://github.com/Piebald-AI/.github/raw/main/Wordmark.svg"></a>
+</div>
+
+<div align="left">
+
+### Announcement: Piebald is released!
+We've released **Piebald**, the ultimate agentic AI developer experience. \
+Download it and try it out for free!  **https://piebald.ai/**
+
+<sub>[Scroll down for Splitrail.](#splitrail) :point_down:</sub>
+
+</div>
+</div>
+
+<div align="left">
+<a href="https://piebald.ai">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/79c18689-e2f0-4008-a13f-61c80756286a">
+  <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/25cb5df8-cf15-4cae-9c1e-e88645f06ee1">
+  <img alt="hero" width="600" src="https://github.com/user-attachments/assets/25cb5df8-cf15-4cae-9c1e-e88645f06ee1">
+</picture>
+</a>
+</div>
+
 # Splitrail
 
-Splitrail is a **fast, cross-platform, real-time Claude Code / Codex CLI / Gemini CLI / Qwen Code / Cline / Roo Code / Kilo Code / GitHub Copilot / OpenCode / Pi Agent token usage tracker and cost monitor.**  Run one command to instantly review all of your CLI coding agent usage.  Upload your usage data to your private account on the [Splitrail Cloud](https://splitrail.dev) for safe-keeping and cross-machine usage aggregation.
+Splitrail is a **fast, cross-platform, real-time token usage tracker and cost monitor for**:
+- [Gemini CLI](https://github.com/google-gemini/gemini-cli) (and [Qwen Code](https://github.com/qwenlm/qwen-code))
+- [Claude Code](https://github.com/anthropics/claude-code)
+- [Codex CLI](https://github.com/openai/codex)
+- [Cline](https://github.com/cline/cline) / [Roo Code](https://github.com/RooCodeInc/Roo-Code) / [Kilo Code](https://github.com/Kilo-Org/kilocode)
+- [GitHub Copilot](https://github.com/features/copilot)
+- [OpenCode](https://github.com/sst/opencode)
+- [Pi Agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)
+
+Run one command to instantly review all of your CLI coding agent usage.  Upload your usage data to your private account on the [Splitrail Cloud](https://splitrail.dev) for safe-keeping and cross-machine usage aggregation.  From the team behind [<img src="https://github.com/Piebald-AI/piebald/raw/main/assets/logo.svg" width="15"> **Piebald.**](https://piebald.ai/)
 
 **Download the binary for your platform on the [Releases](https://github.com/Piebald-AI/splitrail/releases) page.**
-
-Also check out our developer-first agentic AI experience, [Piebald](https://piebald.ai/).
 
 ## Screenshots
 
@@ -56,4 +89,8 @@ cargo run
 
 -----
 
-© 2025 [Piebald LLC](https://piebald.ai). All rights reserved.
+## License
+
+[MIT](https://github.com/Piebald-AI/splitrail/blob/main/LICENSE)
+
+Copyright © 2025 [Piebald LLC](https://piebald.ai).
