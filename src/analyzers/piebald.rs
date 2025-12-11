@@ -1,7 +1,6 @@
 //! Piebald analyzer - reads usage data from Piebald's SQLite database.
 //!
-//! Piebald is a local-first AI chat interface that stores conversations in a SQLite database.
-//! This is the first SQLite-based analyzer in splitrail.
+//! https://piebald.ai
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
