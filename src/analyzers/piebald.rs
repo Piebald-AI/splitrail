@@ -8,7 +8,7 @@ use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, Mes
 use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -118,22 +118,10 @@ fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
 /// Piebald stores timestamps in RFC3339 format with timezone (e.g., "2025-12-10T15:55:48.819321712+00:00").
 /// Returns None if the timestamp cannot be parsed.
 fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
-    // Try RFC3339 first (with timezone) - this is Piebald's format
-    if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-        return Some(dt.with_timezone(&Utc));
-    }
-
-    // Try SQLite's default datetime format as fallback
-    if let Ok(naive) = NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
-        return Some(naive.and_utc());
-    }
-
-    // Try with fractional seconds
-    if let Ok(naive) = NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.f") {
-        return Some(naive.and_utc());
-    }
-
-    None
+    // Piebald uses RFC3339 format exclusively
+    DateTime::parse_from_rfc3339(ts)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 /// Convert Piebald messages to splitrail's ConversationMessage format.
@@ -322,13 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_timestamp_sqlite_format() {
-        let ts = "2025-12-10 14:30:00";
-        let dt = parse_timestamp(ts).expect("should parse SQLite format");
-        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2025-12-10");
-    }
-
-    #[test]
     fn test_parse_timestamp_rfc3339() {
         let ts = "2025-12-10T14:30:00Z";
         let dt = parse_timestamp(ts).expect("should parse RFC3339 format");
@@ -336,15 +317,27 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_timestamp_with_millis() {
-        let ts = "2025-12-10 14:30:00.123";
-        let dt = parse_timestamp(ts).expect("should parse format with milliseconds");
+    fn test_parse_timestamp_rfc3339_with_nanoseconds() {
+        // This is Piebald's actual timestamp format
+        let ts = "2025-12-10T15:55:48.819321712+00:00";
+        let dt = parse_timestamp(ts).expect("should parse RFC3339 with nanoseconds");
         assert_eq!(dt.format("%Y-%m-%d").to_string(), "2025-12-10");
     }
 
     #[test]
-    fn test_parse_timestamp_invalid() {
-        let ts = "invalid-timestamp";
-        assert!(parse_timestamp(ts).is_none());
+    fn test_parse_timestamp_rfc3339_with_offset() {
+        let ts = "2025-12-10T08:30:00-07:00";
+        let dt = parse_timestamp(ts).expect("should parse RFC3339 with timezone offset");
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2025-12-10");
+    }
+
+    #[test]
+    fn test_parse_timestamp_rejects_non_rfc3339() {
+        // SQLite format is not supported
+        assert!(parse_timestamp("2025-12-10 14:30:00").is_none());
+        // Milliseconds without timezone is not supported
+        assert!(parse_timestamp("2025-12-10 14:30:00.123").is_none());
+        // Invalid format
+        assert!(parse_timestamp("invalid-timestamp").is_none());
     }
 }
