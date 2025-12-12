@@ -152,8 +152,8 @@ fn convert_messages(
             // Parse timestamp - skip messages with invalid timestamps
             let date = parse_timestamp(&msg.created_at)?;
 
-            // Use project path from chat's current_directory, falling back to "piebald" if not set
-            let project_hash = hash_text(chat.current_directory.as_deref().unwrap_or("piebald"));
+            // Use project path from chat's current_directory, falling back to "ungrouped" if not set
+            let project_hash = hash_text(chat.current_directory.as_deref().unwrap_or("ungrouped"));
 
             // Piebald messages have unique database IDs, so we use the message ID directly
             // for deduplication. No forking support means no duplicate messages.
