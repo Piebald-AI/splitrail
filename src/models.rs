@@ -297,6 +297,32 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
         is_estimated: false,
     },
+    "gpt-5.2" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.75,
+            output_per_1m: 14.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.175,
+        },
+        is_estimated: false,
+    },
+    "gpt-5.2-pro" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 21.0,
+            output_per_1m: 168.0,
+        },
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
+    "gpt-5-pro" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 15.0,
+            output_per_1m: 120.0,
+        },
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
 
     // Anthropic Models
     "claude-opus-4-5" => ModelInfo {
@@ -672,6 +698,9 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5.1-codex" => "gpt-5.1-codex",
     "gpt-5.1-codex-mini" => "gpt-5.1-codex-mini",
     "gpt-5.1-codex-max" => "gpt-5.1-codex-max",
+    "gpt-5.2" => "gpt-5.2",
+    "gpt-5.2-pro" => "gpt-5.2-pro",
+    "gpt-5-pro" => "gpt-5-pro",
 
     // Anthropic aliases
     "claude-opus-4-5" => "claude-opus-4-5",
