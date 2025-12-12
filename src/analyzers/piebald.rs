@@ -153,11 +153,7 @@ fn convert_messages(
             let date = parse_timestamp(&msg.created_at)?;
 
             // Use project path from chat's current_directory, falling back to "piebald" if not set
-            let project_hash = hash_text(
-                chat.current_directory
-                    .as_deref()
-                    .unwrap_or("piebald"),
-            );
+            let project_hash = hash_text(chat.current_directory.as_deref().unwrap_or("piebald"));
 
             // Piebald messages have unique database IDs, so we use the message ID directly
             // for deduplication. No forking support means no duplicate messages.
@@ -271,7 +267,9 @@ impl Analyzer for PiebaldAnalyzer {
         }
 
         // Deduplicate by local hash
-        Ok(crate::utils::deduplicate_by_local_hash_parallel(all_messages))
+        Ok(crate::utils::deduplicate_by_local_hash_parallel(
+            all_messages,
+        ))
     }
 
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {

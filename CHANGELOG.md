@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2025-12-06
+- **Breaking**: Removed the disk-based caching system entirely to fix stats fluctuation bugs during file watching - @mike1858
+- Added in-memory message cache for fast incremental updates during file watching - @mike1858
+- Removed cache CLI commands (`cache stats`, `cache clear`, `cache rebuild`, `cache path`) - @mike1858
+- Cold startup is now ~1s instead of instant, but results are guaranteed correct - @mike1858
+- Added timezone support for uploads - @mike1858
+- Fixed Codex CLI duplicate entries by including entry count in globalHash - @mike1858
+- Added GPT-5.2, GPT-5.2-Pro, and GPT-5-Pro model pricing support - @mike1858
+
 ## [3.1.1] - 2025-12-05
 - Use real GPT-5.1-Codex-Max's pricing (reported pricings should be a bit lower) - @mike1858
 
