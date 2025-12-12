@@ -48,6 +48,7 @@ struct PiebaldChat {
     id: i64,
     title: Option<String>,
     model: Option<String>,
+    current_directory: Option<String>,
 }
 
 /// Represents a message from Piebald's database.
@@ -65,7 +66,8 @@ struct PiebaldMessage {
 
 /// Query all chats from the database.
 fn query_chats(conn: &Connection) -> Result<Vec<PiebaldChat>> {
-    let mut stmt = conn.prepare("SELECT id, title, model FROM chats ORDER BY created_at")?;
+    let mut stmt =
+        conn.prepare("SELECT id, title, model, current_directory FROM chats ORDER BY created_at")?;
 
     let chats = stmt
         .query_map([], |row| {
@@ -73,6 +75,7 @@ fn query_chats(conn: &Connection) -> Result<Vec<PiebaldChat>> {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 model: row.get(2)?,
+                current_directory: row.get(3)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -112,25 +115,25 @@ fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
 
 /// Parse a timestamp string from Piebald's database.
 ///
-/// Piebald stores timestamps in SQLite's datetime format: "YYYY-MM-DD HH:MM:SS"
-fn parse_timestamp(ts: &str) -> DateTime<Utc> {
-    // Try RFC3339 first (with timezone)
+/// Piebald stores timestamps in RFC3339 format with timezone (e.g., "2025-12-10T15:55:48.819321712+00:00").
+/// Returns None if the timestamp cannot be parsed.
+fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
+    // Try RFC3339 first (with timezone) - this is Piebald's format
     if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-        return dt.with_timezone(&Utc);
+        return Some(dt.with_timezone(&Utc));
     }
 
-    // Try SQLite's default datetime format
+    // Try SQLite's default datetime format as fallback
     if let Ok(naive) = NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") {
-        return naive.and_utc();
+        return Some(naive.and_utc());
     }
 
-    // Try with milliseconds
+    // Try with fractional seconds
     if let Ok(naive) = NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S%.f") {
-        return naive.and_utc();
+        return Some(naive.and_utc());
     }
 
-    // Fallback to now
-    Utc::now()
+    None
 }
 
 /// Convert Piebald messages to splitrail's ConversationMessage format.
@@ -141,20 +144,25 @@ fn convert_messages(
     // Build chat lookup map for O(1) access
     let chat_map: HashMap<i64, &PiebaldChat> = chats.iter().map(|c| (c.id, c)).collect();
 
-    // Piebald is global (no project concept) - use constant hash
-    let project_hash = hash_text("piebald");
-
     messages
         .into_iter()
         .filter_map(|msg| {
             let chat = chat_map.get(&msg.parent_chat_id)?;
 
-            let date = parse_timestamp(&msg.created_at);
+            // Parse timestamp - skip messages with invalid timestamps
+            let date = parse_timestamp(&msg.created_at)?;
 
-            // Generate hashes for deduplication
-            let conversation_hash = hash_text(&msg.parent_chat_id.to_string());
-            let local_hash = hash_text(&msg.id.to_string());
-            let global_hash = hash_text(&format!("piebald_{}_{}", msg.parent_chat_id, msg.id));
+            // Use project path from chat's current_directory, falling back to "piebald" if not set
+            let project_hash = hash_text(
+                chat.current_directory
+                    .as_deref()
+                    .unwrap_or("piebald"),
+            );
+
+            // Piebald messages have unique database IDs, so we use the message ID directly
+            // for deduplication. No forking support means no duplicate messages.
+            let conversation_hash = msg.parent_chat_id.to_string();
+            let global_hash = format!("piebald_{}", msg.id);
 
             // Determine role
             let role = match msg.role.to_lowercase().as_str() {
@@ -203,9 +211,9 @@ fn convert_messages(
             Some(ConversationMessage {
                 application: Application::Piebald,
                 date,
-                project_hash: project_hash.clone(),
+                project_hash,
                 conversation_hash,
-                local_hash: Some(local_hash),
+                local_hash: Some(msg.id.to_string()),
                 global_hash,
                 model: model_str,
                 stats,
@@ -234,10 +242,10 @@ impl Analyzer for PiebaldAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        if let Some(path) = get_piebald_db_path() {
-            if path.exists() {
-                return Ok(vec![DataSource { path }]);
-            }
+        if let Some(path) = get_piebald_db_path()
+            && path.exists()
+        {
+            return Ok(vec![DataSource { path }]);
         }
         Ok(Vec::new())
     }
@@ -269,10 +277,7 @@ impl Analyzer for PiebaldAnalyzer {
     async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
         let sources = self.discover_data_sources()?;
         let messages = self.parse_conversations(sources).await?;
-        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        // Remove "unknown" dates
-        daily_stats.retain(|date, _| date != "unknown");
+        let daily_stats = crate::utils::aggregate_by_date(&messages);
 
         let num_conversations = daily_stats
             .values()
@@ -321,21 +326,27 @@ mod tests {
     #[test]
     fn test_parse_timestamp_sqlite_format() {
         let ts = "2025-12-10 14:30:00";
-        let dt = parse_timestamp(ts);
+        let dt = parse_timestamp(ts).expect("should parse SQLite format");
         assert_eq!(dt.format("%Y-%m-%d").to_string(), "2025-12-10");
     }
 
     #[test]
     fn test_parse_timestamp_rfc3339() {
         let ts = "2025-12-10T14:30:00Z";
-        let dt = parse_timestamp(ts);
+        let dt = parse_timestamp(ts).expect("should parse RFC3339 format");
         assert_eq!(dt.format("%Y-%m-%d").to_string(), "2025-12-10");
     }
 
     #[test]
     fn test_parse_timestamp_with_millis() {
         let ts = "2025-12-10 14:30:00.123";
-        let dt = parse_timestamp(ts);
+        let dt = parse_timestamp(ts).expect("should parse format with milliseconds");
         assert_eq!(dt.format("%Y-%m-%d").to_string(), "2025-12-10");
+    }
+
+    #[test]
+    fn test_parse_timestamp_invalid() {
+        let ts = "invalid-timestamp";
+        assert!(parse_timestamp(ts).is_none());
     }
 }
