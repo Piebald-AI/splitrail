@@ -16,6 +16,7 @@ pub enum Application {
     Copilot,
     OpenCode,
     PiAgent,
+    Piebald,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

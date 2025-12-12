@@ -6,6 +6,7 @@ pub mod gemini_cli;
 pub mod kilo_code;
 pub mod opencode;
 pub mod pi_agent;
+pub mod piebald;
 pub mod qwen_code;
 pub mod roo_code;
 
@@ -17,6 +18,7 @@ pub use gemini_cli::GeminiCliAnalyzer;
 pub use kilo_code::KiloCodeAnalyzer;
 pub use opencode::OpenCodeAnalyzer;
 pub use pi_agent::PiAgentAnalyzer;
+pub use piebald::PiebaldAnalyzer;
 pub use qwen_code::QwenCodeAnalyzer;
 pub use roo_code::RooCodeAnalyzer;
 
