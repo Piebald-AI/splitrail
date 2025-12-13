@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] - 2025-12-13
+- Added update notifications: Splitrail now checks GitHub Releases on startup and displays a banner when a new version is available - @mike1858
+
 ## [3.2.0] - 2025-12-13
 - We now fully support [<img src="https://github.com/Piebald-AI/piebald/raw/main/assets/logo.svg" width="15"> **Piebald**](https://piebald.ai/)!  Track your Piebald usage across all your favorite providers - @mike1858
 - **Breaking**: Removed the disk-based caching system entirely to fix stats fluctuation bugs during file watching - @mike1858
