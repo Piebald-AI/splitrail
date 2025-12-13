@@ -9,6 +9,17 @@ use std::time::Duration;
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// Get the shared HTTP client singleton
+pub fn get_http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("Failed to create HTTP client")
+    })
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -25,13 +36,7 @@ where
         return Ok(());
     }
 
-    let client = HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .expect("Failed to create HTTP client")
-    });
+    let client = get_http_client();
 
     let chunks: Vec<_> = messages.chunks(CHUNK_SIZE).collect();
     let total_messages = messages.len();

@@ -75,6 +75,7 @@ pub fn run_tui(
     stats_receiver: watch::Receiver<MultiAnalyzerStats>,
     format_options: &NumberFormatOptions,
     upload_status: Arc<Mutex<UploadStatus>>,
+    update_status: Arc<Mutex<crate::version_check::UpdateStatus>>,
     file_watcher: FileWatcher,
     mut stats_manager: RealtimeStatsManager,
 ) -> Result<()> {
@@ -108,6 +109,7 @@ pub fn run_tui(
             &mut scroll_offset,
             &mut stats_view_mode,
             upload_status,
+            update_status,
             file_watcher,
             watcher_tx,
         ))
@@ -128,6 +130,7 @@ async fn run_app_for_tests<B, FPoll, FRead>(
     scroll_offset: &mut usize,
     stats_view_mode: &mut StatsViewMode,
     upload_status: Arc<Mutex<UploadStatus>>,
+    update_status: Arc<Mutex<crate::version_check::UpdateStatus>>,
     file_watcher: FileWatcher,
     watcher_tx: mpsc::UnboundedSender<WatcherEvent>,
     mut poll: FPoll,
@@ -267,6 +270,7 @@ where
                     format_options,
                     &mut ui_state,
                     upload_status.clone(),
+                    update_status.clone(),
                     &session_table_cache,
                 );
             })?;
@@ -628,6 +632,7 @@ async fn run_app(
     scroll_offset: &mut usize,
     stats_view_mode: &mut StatsViewMode,
     upload_status: Arc<Mutex<UploadStatus>>,
+    update_status: Arc<Mutex<crate::version_check::UpdateStatus>>,
     file_watcher: FileWatcher,
     watcher_tx: mpsc::UnboundedSender<WatcherEvent>,
 ) -> Result<()> {
@@ -646,6 +651,10 @@ async fn run_app(
     let mut needs_redraw = true;
     let mut last_upload_status = {
         let status = upload_status.lock().unwrap();
+        format!("{:?}", *status)
+    };
+    let mut last_update_status = {
+        let status = update_status.lock().unwrap();
         format!("{:?}", *status)
     };
     let mut dots_counter = 0; // Counter for dots animation (advance every 5 frames = 500ms)
@@ -670,6 +679,16 @@ async fn run_app(
     let mut pending_session_recompute: Option<SessionRecomputeHandle> = None;
 
     loop {
+        // Check for update status changes
+        let current_update_status = {
+            let status = update_status.lock().unwrap();
+            format!("{:?}", *status)
+        };
+        if current_update_status != last_update_status {
+            last_update_status = current_update_status;
+            needs_redraw = true;
+        }
+
         // Check for stats updates
         if stats_receiver.has_changed()? {
             current_stats = stats_receiver.borrow_and_update().clone();
@@ -753,6 +772,7 @@ async fn run_app(
                     format_options,
                     &mut ui_state,
                     upload_status.clone(),
+                    update_status.clone(),
                     &session_table_cache,
                 );
             })?;
@@ -791,6 +811,18 @@ async fn run_app(
             // Handle quitting.
             if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
                 break;
+            }
+
+            // Handle update notification dismissal
+            if matches!(key.code, KeyCode::Char('u'))
+                && let Ok(mut status) = update_status.lock()
+                && matches!(
+                    *status,
+                    crate::version_check::UpdateStatus::Available { .. }
+                )
+            {
+                *status = crate::version_check::UpdateStatus::Dismissed;
+                needs_redraw = true;
             }
 
             // Only handle navigation keys if we have data (`filtered_stats` is non-empty).
@@ -1156,6 +1188,7 @@ fn draw_ui(
     format_options: &NumberFormatOptions,
     ui_state: &mut UiState,
     upload_status: Arc<Mutex<UploadStatus>>,
+    update_status: Arc<Mutex<crate::version_check::UpdateStatus>>,
     session_table_cache: &[SessionTableCache],
 ) {
     // Since we're already working with filtered stats, has_data is simply whether we have any stats
@@ -1168,23 +1201,54 @@ fn draw_ui(
         false
     };
 
-    // Adjust layout based on whether we have data or not
-    let chunks = if has_data {
-        Layout::vertical([
-            Constraint::Length(3),                             // Header
-            Constraint::Length(1),                             // Tabs
-            Constraint::Min(3),                                // Main table
-            Constraint::Length(9),                             // Summary stats
-            Constraint::Length(if has_error { 4 } else { 2 }), // Help text
-        ])
-        .split(frame.area())
+    // Check if update is available
+    let show_update_banner = if let Ok(status) = update_status.lock() {
+        matches!(
+            *status,
+            crate::version_check::UpdateStatus::Available { .. }
+        )
     } else {
-        Layout::vertical([
-            Constraint::Length(3), // Header
-            Constraint::Min(3),    // No-data message
-            Constraint::Length(1), // Help text
-        ])
-        .split(frame.area())
+        false
+    };
+
+    // Adjust layout based on whether we have data and update banner
+    let (chunks, chunk_offset) = if has_data {
+        if show_update_banner {
+            (
+                Layout::vertical([
+                    Constraint::Length(3),                             // Header
+                    Constraint::Length(1),                             // Update banner
+                    Constraint::Length(1),                             // Tabs
+                    Constraint::Min(3),                                // Main table
+                    Constraint::Length(9),                             // Summary stats
+                    Constraint::Length(if has_error { 4 } else { 2 }), // Help text
+                ])
+                .split(frame.area()),
+                1, // Offset for banner
+            )
+        } else {
+            (
+                Layout::vertical([
+                    Constraint::Length(3),                             // Header
+                    Constraint::Length(1),                             // Tabs
+                    Constraint::Min(3),                                // Main table
+                    Constraint::Length(9),                             // Summary stats
+                    Constraint::Length(if has_error { 4 } else { 2 }), // Help text
+                ])
+                .split(frame.area()),
+                0, // No offset
+            )
+        }
+    } else {
+        (
+            Layout::vertical([
+                Constraint::Length(3), // Header
+                Constraint::Min(3),    // No-data message
+                Constraint::Length(1), // Help text
+            ])
+            .split(frame.area()),
+            0, // No offset (no banner in no-data view)
+        )
     };
 
     // Header
@@ -1199,6 +1263,23 @@ fn draw_ui(
         ),
     ]));
     frame.render_widget(header, chunks[0]);
+
+    // Update banner (if showing)
+    if show_update_banner
+        && let Ok(status) = update_status.lock()
+        && let crate::version_check::UpdateStatus::Available { latest, current } = &*status
+    {
+        let banner = Paragraph::new(format!(
+            " New version available: {} -> {} (press 'u' to dismiss)",
+            current, latest
+        ))
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+        frame.render_widget(banner, chunks[1]);
+    }
 
     if has_data {
         // Tabs
@@ -1219,7 +1300,7 @@ fn draw_ui(
             .padding("", "")
             .divider(" | ");
 
-        frame.render_widget(tabs, chunks[1]);
+        frame.render_widget(tabs, chunks[1 + chunk_offset]);
 
         // Get current analyzer stats
         if let Some(current_stats) = filtered_stats.get(ui_state.selected_tab)
@@ -1230,7 +1311,7 @@ fn draw_ui(
                 StatsViewMode::Daily => {
                     let (_, has_estimated) = draw_daily_stats_table(
                         frame,
-                        chunks[2],
+                        chunks[2 + chunk_offset],
                         current_stats,
                         format_options,
                         current_table_state,
@@ -1246,7 +1327,7 @@ fn draw_ui(
                     if let Some(cache) = session_table_cache.get(ui_state.selected_tab) {
                         draw_session_stats_table(
                             frame,
-                            chunks[2],
+                            chunks[2 + chunk_offset],
                             cache,
                             format_options,
                             current_table_state,
@@ -1259,10 +1340,15 @@ fn draw_ui(
             };
 
             // Summary stats - pass all filtered stats for aggregation
-            draw_summary_stats(frame, chunks[3], filtered_stats, format_options);
+            draw_summary_stats(
+                frame,
+                chunks[3 + chunk_offset],
+                filtered_stats,
+                format_options,
+            );
 
             // Help text for data view with upload status
-            let help_area = chunks[4];
+            let help_area = chunks[4 + chunk_offset];
 
             // Split help area horizontally: help text on left, upload status on right
             let help_chunks = Layout::horizontal([

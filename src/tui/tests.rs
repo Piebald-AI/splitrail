@@ -124,6 +124,7 @@ fn run_tui_with_events(
     let mut scroll_offset = 0usize;
     let mut stats_view_mode = StatsViewMode::Daily;
     let upload_status = Arc::new(Mutex::new(UploadStatus::None));
+    let update_status = Arc::new(Mutex::new(crate::version_check::UpdateStatus::UpToDate));
     let file_watcher = FileWatcher::for_tests();
     let (watcher_tx, _watcher_rx) = mpsc::unbounded_channel();
 
@@ -144,6 +145,7 @@ fn run_tui_with_events(
             &mut scroll_offset,
             &mut stats_view_mode,
             upload_status,
+            update_status,
             file_watcher,
             watcher_tx,
             |_: std::time::Duration| Ok(!event_queue.borrow().is_empty()),
