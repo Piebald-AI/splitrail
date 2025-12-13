@@ -37,6 +37,11 @@ Splitrail is a **fast, cross-platform, real-time token usage tracker and cost mo
 
 Run one command to instantly review all of your CLI coding agent usage.  Upload your usage data to your private account on the [Splitrail Cloud](https://splitrail.dev) for safe-keeping and cross-machine usage aggregation.  From the team behind [<img src="https://github.com/Piebald-AI/piebald/raw/main/assets/logo.svg" width="15"> **Piebald.**](https://piebald.ai/)
 
+
+> [!note]
+> ⭐ **If you find Splitrail useful, please consider [starring the repository](https://github.com/Piebald-AI/splitrail) to show your support!** ⭐
+
+
 **Download the binary for your platform on the [Releases](https://github.com/Piebald-AI/splitrail/releases) page.**
 
 ## Screenshots
