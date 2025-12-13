@@ -19,6 +19,7 @@ mod tui;
 mod types;
 mod upload;
 mod utils;
+mod version_check;
 mod watcher;
 
 #[derive(Parser)]
@@ -219,6 +220,9 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     // Create upload status for TUI
     let upload_status = Arc::new(Mutex::new(tui::UploadStatus::None));
 
+    // Spawn background version check
+    let update_status = version_check::spawn_version_check();
+
     // Set upload status on stats manager for real-time upload tracking
     stats_manager.set_upload_status(upload_status.clone());
 
@@ -257,6 +261,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         stats_manager.get_stats_receiver(),
         &format_options,
         upload_status.clone(),
+        update_status,
         file_watcher,
         stats_manager,
     ) {
