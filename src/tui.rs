@@ -816,7 +816,10 @@ async fn run_app(
             // Handle update notification dismissal
             if matches!(key.code, KeyCode::Char('u'))
                 && let Ok(mut status) = update_status.lock()
-                && matches!(*status, crate::version_check::UpdateStatus::Available { .. })
+                && matches!(
+                    *status,
+                    crate::version_check::UpdateStatus::Available { .. }
+                )
             {
                 *status = crate::version_check::UpdateStatus::Dismissed;
                 needs_redraw = true;
@@ -1200,7 +1203,10 @@ fn draw_ui(
 
     // Check if update is available
     let show_update_banner = if let Ok(status) = update_status.lock() {
-        matches!(*status, crate::version_check::UpdateStatus::Available { .. })
+        matches!(
+            *status,
+            crate::version_check::UpdateStatus::Available { .. }
+        )
     } else {
         false
     };
@@ -1267,7 +1273,11 @@ fn draw_ui(
             " New version available: {} -> {} (press 'u' to dismiss)",
             current, latest
         ))
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
         frame.render_widget(banner, chunks[1]);
     }
 
@@ -1330,7 +1340,12 @@ fn draw_ui(
             };
 
             // Summary stats - pass all filtered stats for aggregation
-            draw_summary_stats(frame, chunks[3 + chunk_offset], filtered_stats, format_options);
+            draw_summary_stats(
+                frame,
+                chunks[3 + chunk_offset],
+                filtered_stats,
+                format_options,
+            );
 
             // Help text for data view with upload status
             let help_area = chunks[4 + chunk_offset];
