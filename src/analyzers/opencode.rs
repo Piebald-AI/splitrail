@@ -79,13 +79,23 @@ struct OpenCodeMessageTime {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeMessageSummary {
+struct OpenCodeMessageSummaryDetails {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]
     diffs: Vec<OwnedValue>,
+}
+
+/// The `summary` field can be either a boolean flag (`true`) indicating a summary message,
+/// or an object containing summary details. This enum handles both cases.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum OpenCodeMessageSummary {
+    Flag(bool),
+    Details(OpenCodeMessageSummaryDetails),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -515,5 +525,75 @@ impl Analyzer for OpenCodeAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The `summary` field in OpenCode messages has 3 valid states observed in real data:
+    //
+    // 1. Absent - field not present
+    // 2. Boolean - `"summary": true` (indicates a summary message; `false` not observed)
+    // 3. Object - `"summary": { "title": "...", "body": "...", "diffs": [...] }`
+    //
+    // Test data below is from real OpenCode message files, shortened for brevity.
+    // See: https://github.com/Piebald-AI/splitrail/issues/82
+
+    #[test]
+    fn test_parse_message_with_boolean_summary() {
+        let json = r#"{
+            "id": "msg_b1377b33f001HK4wL4AFesueYC",
+            "sessionID": "ses_4ec88e3ceffeuc6U278whBC1TE",
+            "role": "assistant",
+            "time": { "created": 1765558170431, "completed": 1765558177390 },
+            "modelID": "claude-opus-4-5",
+            "providerID": "anthropic",
+            "summary": true,
+            "tokens": { "input": 9, "output": 101, "reasoning": 0, "cache": { "read": 0, "write": 162060 } },
+            "finish": "stop"
+        }"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).expect("should parse");
+        assert_eq!(msg.id, "msg_b1377b33f001HK4wL4AFesueYC");
+        assert!(matches!(
+            msg.summary,
+            Some(OpenCodeMessageSummary::Flag(true))
+        ));
+    }
+
+    #[test]
+    fn test_parse_message_with_object_summary() {
+        let json = r#"{
+            "id": "msg_b42fdd2ed00115jZW5RSdppbds",
+            "sessionID": "ses_4bd022d14ffeIcvK1800hA6gN2",
+            "role": "user",
+            "time": { "created": 1766355489517 },
+            "summary": { "title": "Analyzing OpenCode summary field patterns", "diffs": [] },
+            "agent": "general",
+            "model": { "providerID": "anthropic", "modelID": "claude-opus-4-5" }
+        }"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).expect("should parse");
+        assert_eq!(msg.id, "msg_b42fdd2ed00115jZW5RSdppbds");
+        assert!(matches!(
+            msg.summary,
+            Some(OpenCodeMessageSummary::Details(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_message_without_summary() {
+        let json = r#"{
+            "id": "msg_929a16848001TDUN2qM31WbRp6",
+            "sessionID": "ses_6d65e97bdffepVt6J7EnV8BZdS",
+            "role": "user",
+            "time": { "created": 1757340067912 }
+        }"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).expect("should parse");
+        assert_eq!(msg.id, "msg_929a16848001TDUN2qM31WbRp6");
+        assert!(msg.summary.is_none());
     }
 }
