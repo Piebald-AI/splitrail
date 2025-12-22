@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 pub struct SessionAggregate {
     pub session_id: String,
     pub first_timestamp: DateTime<Utc>,
+    #[allow(dead_code)] // Used in tests and preserved for external API
     pub analyzer_name: String,
     pub stats: Stats,
     pub models: Vec<String>,

@@ -2086,12 +2086,11 @@ fn draw_session_stats_table(
         Cell::new(""),
         Cell::new("Session"),
         Cell::new("Started"),
-        Cell::new("Tool"),
         Cell::new(Text::from("Cost").right_aligned()),
+        Cell::new(Text::from("Cached Tks").right_aligned()),
         Cell::new(Text::from("Inp Tks").right_aligned()),
         Cell::new(Text::from("Outp Tks").right_aligned()),
         Cell::new(Text::from("Reason Tks").right_aligned()),
-        Cell::new(Text::from("Total Tks").right_aligned()),
         Cell::new(Text::from("Tools").right_aligned()),
         Cell::new("Models"),
     ])
@@ -2153,10 +2152,10 @@ fn draw_session_stats_table(
 
     // Recompute bests/totals for the filtered subset so highlighting and totals stay accurate.
     let mut best_cost_i: Option<usize> = None;
+    let mut best_cached_tokens_i: Option<usize> = None;
     let mut best_input_tokens_i: Option<usize> = None;
     let mut best_output_tokens_i: Option<usize> = None;
     let mut best_reasoning_tokens_i: Option<usize> = None;
-    let mut best_total_tokens_i: Option<usize> = None;
     let mut best_tool_calls_i: Option<usize> = None;
 
     let mut total_cost = 0.0;
@@ -2173,6 +2172,15 @@ fn draw_session_stats_table(
             .unwrap_or(true)
         {
             best_cost_i = Some(idx);
+        }
+
+        if best_cached_tokens_i
+            .map(|best_idx| {
+                session.stats.cached_tokens > filtered_sessions[best_idx].stats.cached_tokens
+            })
+            .unwrap_or(true)
+        {
+            best_cached_tokens_i = Some(idx);
         }
 
         if best_input_tokens_i
@@ -2200,20 +2208,6 @@ fn draw_session_stats_table(
             .unwrap_or(true)
         {
             best_reasoning_tokens_i = Some(idx);
-        }
-
-        let total_tokens =
-            session.stats.input_tokens + session.stats.output_tokens + session.stats.cached_tokens;
-        if best_total_tokens_i
-            .map(|best_idx| {
-                total_tokens
-                    > filtered_sessions[best_idx].stats.input_tokens
-                        + filtered_sessions[best_idx].stats.output_tokens
-                        + filtered_sessions[best_idx].stats.cached_tokens
-            })
-            .unwrap_or(true)
-        {
-            best_total_tokens_i = Some(idx);
         }
 
         if best_tool_calls_i
@@ -2269,11 +2263,6 @@ fn draw_session_stats_table(
 
             let started_cell = Line::from(Span::raw(ts_str));
 
-            let tool_cell = Line::from(Span::styled(
-                session.analyzer_name.clone(),
-                Style::default().fg(Color::Cyan),
-            ));
-
             let cost_cell = if best_cost_i == Some(i) {
                 Line::from(Span::styled(
                     format!("${:.2}", session.stats.cost),
@@ -2283,6 +2272,19 @@ fn draw_session_stats_table(
                 Line::from(Span::styled(
                     format!("${:.2}", session.stats.cost),
                     Style::default().fg(Color::Yellow),
+                ))
+            }
+            .right_aligned();
+
+            let cached_cell = if best_cached_tokens_i == Some(i) {
+                Line::from(Span::styled(
+                    format_number(session.stats.cached_tokens, format_options),
+                    Style::default().fg(Color::Red),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    format_number(session.stats.cached_tokens, format_options),
+                    Style::default().add_modifier(Modifier::DIM),
                 ))
             }
             .right_aligned();
@@ -2326,20 +2328,6 @@ fn draw_session_stats_table(
             }
             .right_aligned();
 
-            let total_tokens = session.stats.input_tokens
-                + session.stats.output_tokens
-                + session.stats.cached_tokens;
-
-            let total_cell = if best_total_tokens_i == Some(i) {
-                Line::from(Span::styled(
-                    format_number(total_tokens, format_options),
-                    Style::default().fg(Color::Red),
-                ))
-            } else {
-                Line::from(Span::raw(format_number(total_tokens, format_options)))
-            }
-            .right_aligned();
-
             let tools_cell = if best_tool_calls_i == Some(i) {
                 Line::from(Span::styled(
                     format_number(session.stats.tool_calls as u64, format_options),
@@ -2368,12 +2356,11 @@ fn draw_session_stats_table(
                 Line::from(Span::raw("")),
                 session_cell,
                 started_cell,
-                tool_cell,
                 cost_cell,
+                cached_cell,
                 input_cell,
                 output_cell,
                 reasoning_cell,
-                total_cell,
                 tools_cell,
                 models_cell,
             ]);
@@ -2395,7 +2382,7 @@ fn draw_session_stats_table(
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
-                    "──────────────",
+                    "──────────",
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
@@ -2412,10 +2399,6 @@ fn draw_session_stats_table(
                 )),
                 Line::from(Span::styled(
                     "───────────",
-                    Style::default().add_modifier(Modifier::DIM),
-                )),
-                Line::from(Span::styled(
-                    "────────────",
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
@@ -2437,11 +2420,17 @@ fn draw_session_stats_table(
                     Style::default().add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::raw("")),
-                Line::from(Span::raw("")),
                 Line::from(Span::styled(
                     format!("${total_cost:.2}"),
                     Style::default()
                         .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .right_aligned(),
+                Line::from(Span::styled(
+                    format_number(total_cached_tokens, format_options),
+                    Style::default()
+                        .add_modifier(Modifier::DIM)
                         .add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
@@ -2457,14 +2446,6 @@ fn draw_session_stats_table(
                 .right_aligned(),
                 Line::from(Span::styled(
                     format_number(total_reasoning_tokens, format_options),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ))
-                .right_aligned(),
-                Line::from(Span::styled(
-                    format_number(
-                        total_input_tokens + total_output_tokens + total_cached_tokens,
-                        format_options,
-                    ),
                     Style::default().add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
@@ -2493,12 +2474,11 @@ fn draw_session_stats_table(
             Constraint::Length(1),  // Arrow / highlight symbol space
             Constraint::Length(32), // Session (increased width for name)
             Constraint::Length(17), // Started
-            Constraint::Length(14), // Tool
             Constraint::Length(10), // Cost
+            Constraint::Length(10), // Cached Tks
             Constraint::Length(8),  // Input
             Constraint::Length(9),  // Output
             Constraint::Length(11), // Reason Tks
-            Constraint::Length(11), // Total tokens
             Constraint::Length(6),  // Tools
             Constraint::Min(10),    // Models
         ],
