@@ -151,6 +151,18 @@ pub fn run_tui(
     result
 }
 
+/// Result state from running the TUI in test mode.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct TestRunResult {
+    /// Whether sort order is currently reversed.
+    pub sort_reversed: bool,
+    /// The day filter for each tab (set when drilling into a specific day).
+    pub session_day_filters: Vec<Option<String>>,
+    /// The selected row index for each tab.
+    pub selected_rows: Vec<Option<usize>>,
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_app_for_tests<B, FPoll, FRead>(
@@ -167,7 +179,7 @@ async fn run_app_for_tests<B, FPoll, FRead>(
     mut poll: FPoll,
     mut read: FRead,
     max_iterations: usize,
-) -> Result<()>
+) -> Result<TestRunResult>
 where
     B: ratatui::backend::Backend,
     FPoll: FnMut(Duration) -> std::io::Result<bool>,
@@ -663,7 +675,11 @@ where
         }
     }
 
-    Ok(())
+    Ok(TestRunResult {
+        sort_reversed,
+        session_day_filters,
+        selected_rows: table_states.iter().map(|ts| ts.selected()).collect(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
