@@ -1,6 +1,6 @@
 use crate::tui::logic::*;
 use crate::tui::{
-    StatsViewMode, UploadStatus, create_upload_progress_callback, run_app_for_tests,
+    StatsViewMode, TestRunResult, UploadStatus, create_upload_progress_callback, run_app_for_tests,
     show_upload_error, show_upload_success, update_day_filters, update_table_states,
     update_window_offsets,
 };
@@ -103,11 +103,17 @@ fn make_multi_single_tool_two_days() -> MultiAnalyzerStats {
     }
 }
 
+struct TuiTestResult {
+    selected_tab: usize,
+    stats_view_mode: StatsViewMode,
+    test_state: TestRunResult,
+}
+
 fn run_tui_with_events(
     stats: MultiAnalyzerStats,
     events: Vec<Event>,
     max_iterations: usize,
-) -> (usize, StatsViewMode) {
+) -> TuiTestResult {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal");
 
@@ -136,7 +142,7 @@ fn run_tui_with_events(
         .build()
         .expect("runtime");
 
-    rt.block_on(async {
+    let test_state = rt.block_on(async {
         run_app_for_tests(
             &mut terminal,
             rx,
@@ -157,10 +163,14 @@ fn run_tui_with_events(
             max_iterations,
         )
         .await
-        .expect("run_app_for_tests ok");
+        .expect("run_app_for_tests ok")
     });
 
-    (selected_tab, stats_view_mode)
+    TuiTestResult {
+        selected_tab,
+        stats_view_mode,
+        test_state,
+    }
 }
 
 #[test]
@@ -1175,9 +1185,9 @@ fn test_tui_quit_behavior() {
         KeyModifiers::empty(),
     ))];
 
-    let (selected_tab, view_mode) = run_tui_with_events(multi, events, 10);
-    assert_eq!(selected_tab, 0);
-    assert_eq!(view_mode, StatsViewMode::Daily);
+    let result = run_tui_with_events(multi, events, 10);
+    assert_eq!(result.selected_tab, 0);
+    assert_eq!(result.stats_view_mode, StatsViewMode::Daily);
 }
 
 #[test]
@@ -1190,9 +1200,9 @@ fn test_tui_tab_switch_and_session_toggle() {
         Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
     ];
 
-    let (selected_tab, view_mode) = run_tui_with_events(multi, events, 50);
-    assert_eq!(selected_tab, 1);
-    assert_eq!(view_mode, StatsViewMode::Session);
+    let result = run_tui_with_events(multi, events, 50);
+    assert_eq!(result.selected_tab, 1);
+    assert_eq!(result.stats_view_mode, StatsViewMode::Session);
 }
 
 #[test]
@@ -1212,8 +1222,8 @@ fn test_tui_date_jump_behavior() {
         Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
     ];
 
-    let (_selected_tab, view_mode) = run_tui_with_events(multi, events, 80);
-    assert_eq!(view_mode, StatsViewMode::Daily);
+    let result = run_tui_with_events(multi, events, 80);
+    assert_eq!(result.stats_view_mode, StatsViewMode::Daily);
 }
 
 #[test]
@@ -1247,8 +1257,8 @@ fn test_tui_drill_into_session_with_enter() {
         Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
     ];
 
-    let (_selected_tab, view_mode) = run_tui_with_events(multi, events, 80);
-    assert_eq!(view_mode, StatsViewMode::Session);
+    let result = run_tui_with_events(multi, events, 80);
+    assert_eq!(result.stats_view_mode, StatsViewMode::Session);
 }
 
 #[test]
@@ -1447,5 +1457,81 @@ fn test_single_message_single_session_state() {
     assert_eq!(
         sessions[0].session_name,
         Some("Single Message Session".to_string())
+    );
+}
+
+// ============================================================================
+// REVERSE SORT ('r' KEY) INTEGRATION TESTS
+// ============================================================================
+
+#[test]
+fn test_tui_r_key_toggles_sort_order() {
+    // make_multi_single_tool_two_days has "2025-01-01" and "2025-02-01"
+    // Normal: row 0 = "2025-01-01", Reversed: row 0 = "2025-02-01"
+
+    // Toggle once and drill - selection stays at row 0, but item changes
+    let events = vec![
+        Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
+    ];
+    let result = run_tui_with_events(make_multi_single_tool_two_days(), events, 50);
+    assert!(result.test_state.sort_reversed);
+    assert_eq!(
+        result.test_state.selected_rows[0],
+        Some(0),
+        "Selection should stay at row 0"
+    );
+    assert_eq!(
+        result.test_state.session_day_filters[0],
+        Some("2025-02-01".to_string()),
+        "Row 0 should now be latest date after reverse"
+    );
+
+    // Toggle twice and drill - back to normal order
+    let events = vec![
+        Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
+    ];
+    let result = run_tui_with_events(make_multi_single_tool_two_days(), events, 50);
+    assert!(!result.test_state.sort_reversed);
+    assert_eq!(result.test_state.selected_rows[0], Some(0));
+    assert_eq!(
+        result.test_state.session_day_filters[0],
+        Some("2025-01-01".to_string()),
+        "Row 0 should be earliest date after double toggle"
+    );
+}
+
+#[test]
+fn test_tui_drill_selects_correct_day_for_sort_order() {
+    // make_multi_single_tool_two_days has dates "2025-01-01" and "2025-02-01"
+    // Normal: row 0 = earliest, Reversed: row 0 = latest
+
+    // Normal order - first row is earliest
+    let events = vec![
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
+    ];
+    let result = run_tui_with_events(make_multi_single_tool_two_days(), events, 80);
+    assert_eq!(
+        result.test_state.session_day_filters[0],
+        Some("2025-01-01".to_string()),
+        "Normal order: first row should be earliest date"
+    );
+
+    // Reversed order - first row is latest
+    let events = vec![
+        Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
+    ];
+    let result = run_tui_with_events(make_multi_single_tool_two_days(), events, 80);
+    assert_eq!(
+        result.test_state.session_day_filters[0],
+        Some("2025-02-01".to_string()),
+        "Reversed order: first row should be latest date"
     );
 }
