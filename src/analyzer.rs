@@ -20,29 +20,17 @@ const VSCODE_GUI_FORKS: &[&str] = &[
 /// VSCode CLI/server forks (remote development)
 const VSCODE_CLI_FORKS: &[&str] = &["vscode-server", "vscode-server-insiders"];
 
-/// Discover data sources for VSCode extension-based analyzers using jwalk.
+/// Get all tasks directories for a VSCode extension across all forks and platforms.
 ///
-/// This handles the complexity of multiple VSCode forks across different OSes:
-/// - Linux GUI: `~/.config/{fork}/User/globalStorage/{extension_id}/tasks/*/`
-/// - Linux CLI: `~/.{fork}/data/User/globalStorage/{extension_id}/tasks/*/`
-/// - macOS: `~/Library/Application Support/{fork}/User/globalStorage/{extension_id}/tasks/*/`
-/// - Windows: `%APPDATA%\{fork}\User\globalStorage\{extension_id}\tasks\*\`
-///
-/// # Arguments
-/// * `extension_id` - The VSCode extension ID (e.g., "saoudrizwan.claude-dev")
-/// * `target_filename` - The filename to search for (e.g., "ui_messages.json")
-/// * `return_parent_dir` - If true, returns the parent directory instead of the file path
-pub fn discover_vscode_extension_sources(
-    extension_id: &str,
-    target_filename: &str,
-    return_parent_dir: bool,
-) -> Result<Vec<DataSource>> {
-    let mut sources = Vec::new();
+/// This is the single source of truth for VSCode extension data locations:
+/// - Linux GUI: `~/.config/{fork}/User/globalStorage/{extension_id}/tasks/`
+/// - Linux CLI: `~/.{fork}/data/User/globalStorage/{extension_id}/tasks/`
+/// - macOS: `~/Library/Application Support/{fork}/User/globalStorage/{extension_id}/tasks/`
+/// - Windows: `%APPDATA%\{fork}\User\globalStorage\{extension_id}\tasks\`
+pub fn get_vscode_extension_tasks_dirs(extension_id: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
 
     if let Some(home_dir) = dirs::home_dir() {
-        // Collect all potential tasks directories
-        let mut tasks_dirs = Vec::new();
-
         // Linux GUI forks: ~/.config/{fork}/User/globalStorage/{ext}/tasks
         for fork in VSCODE_GUI_FORKS {
             let tasks_dir = home_dir
@@ -52,7 +40,7 @@ pub fn discover_vscode_extension_sources(
                 .join(extension_id)
                 .join("tasks");
             if tasks_dir.is_dir() {
-                tasks_dirs.push(tasks_dir);
+                dirs.push(tasks_dir);
             }
         }
 
@@ -64,7 +52,7 @@ pub fn discover_vscode_extension_sources(
                 .join(extension_id)
                 .join("tasks");
             if tasks_dir.is_dir() {
-                tasks_dirs.push(tasks_dir);
+                dirs.push(tasks_dir);
             }
         }
 
@@ -77,34 +65,7 @@ pub fn discover_vscode_extension_sources(
                 .join(extension_id)
                 .join("tasks");
             if tasks_dir.is_dir() {
-                tasks_dirs.push(tasks_dir);
-            }
-        }
-
-        // Walk each tasks directory with jwalk (parallel)
-        for tasks_dir in tasks_dirs {
-            // Pattern: {task_id}/{target_filename}
-            for entry in WalkDir::new(&tasks_dir)
-                .min_depth(2)
-                .max_depth(2)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path()
-                            .file_name()
-                            .is_some_and(|name| name == target_filename)
-                })
-            {
-                let path = if return_parent_dir {
-                    entry.path().parent().map(|p| p.to_path_buf())
-                } else {
-                    Some(entry.path())
-                };
-
-                if let Some(p) = path {
-                    sources.push(DataSource { path: p });
-                }
+                dirs.push(tasks_dir);
             }
         }
     }
@@ -119,28 +80,49 @@ pub fn discover_vscode_extension_sources(
                 .join(extension_id)
                 .join("tasks");
             if tasks_dir.is_dir() {
-                for entry in WalkDir::new(&tasks_dir)
-                    .min_depth(2)
-                    .max_depth(2)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_type().is_file()
-                            && e.path()
-                                .file_name()
-                                .is_some_and(|name| name == target_filename)
-                    })
-                {
-                    let path = if return_parent_dir {
-                        entry.path().parent().map(|p| p.to_path_buf())
-                    } else {
-                        Some(entry.path())
-                    };
+                dirs.push(tasks_dir);
+            }
+        }
+    }
 
-                    if let Some(p) = path {
-                        sources.push(DataSource { path: p });
-                    }
-                }
+    dirs
+}
+
+/// Discover data sources for VSCode extension-based analyzers using jwalk.
+///
+/// # Arguments
+/// * `extension_id` - The VSCode extension ID (e.g., "saoudrizwan.claude-dev")
+/// * `target_filename` - The filename to search for (e.g., "ui_messages.json")
+/// * `return_parent_dir` - If true, returns the parent directory instead of the file path
+pub fn discover_vscode_extension_sources(
+    extension_id: &str,
+    target_filename: &str,
+    return_parent_dir: bool,
+) -> Result<Vec<DataSource>> {
+    let mut sources = Vec::new();
+
+    for tasks_dir in get_vscode_extension_tasks_dirs(extension_id) {
+        // Pattern: {task_id}/{target_filename}
+        for entry in WalkDir::new(&tasks_dir)
+            .min_depth(2)
+            .max_depth(2)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().is_file()
+                    && e.path()
+                        .file_name()
+                        .is_some_and(|name| name == target_filename)
+            })
+        {
+            let path = if return_parent_dir {
+                entry.path().parent().map(|p| p.to_path_buf())
+            } else {
+                Some(entry.path())
+            };
+
+            if let Some(p) = path {
+                sources.push(DataSource { path: p });
             }
         }
     }
@@ -177,6 +159,22 @@ pub trait Analyzer: Send + Sync {
 
     /// Check if this analyzer is available on the current system
     fn is_available(&self) -> bool;
+
+    /// Get directories to watch for file changes.
+    ///
+    /// Returns the root data directories for this analyzer. The file watcher will
+    /// recursively watch these directories for new, modified, or deleted files.
+    ///
+    /// This is important for analyzers with nested directory structures (e.g.,
+    /// `sessions/{id}/file.json`) where new subdirectories need to be detected.
+    /// Without this, only existing subdirectories would be watched, missing new
+    /// sessions/projects/tasks.
+    ///
+    /// Default implementation returns empty vec, which falls back to watching
+    /// parent directories of discovered data sources (legacy behavior).
+    fn get_watch_directories(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// Registry for managing multiple analyzers
@@ -405,20 +403,34 @@ impl AnalyzerRegistry {
         false
     }
 
-    /// Get a mapping of data directories to analyzer names for file watching
-    /// Uses cached data sources to avoid redundant glob scans
+    /// Get a mapping of data directories to analyzer names for file watching.
+    ///
+    /// Prefers explicit watch directories from `get_watch_directories()` when available,
+    /// which allows detecting new subdirectories (sessions/projects/tasks).
+    /// Falls back to parent directories of data sources for backward compatibility.
     pub fn get_directory_to_analyzer_mapping(&self) -> std::collections::HashMap<PathBuf, String> {
         let mut dir_to_analyzer = std::collections::HashMap::new();
 
         for analyzer in self.available_analyzers() {
-            // Use cached sources instead of calling discover_data_sources() again
-            if let Ok(sources) = self.get_cached_data_sources(analyzer) {
-                for source in sources {
-                    if let Some(parent) = source.path.parent()
-                        && parent.exists()
-                    {
-                        dir_to_analyzer
-                            .insert(parent.to_path_buf(), analyzer.display_name().to_string());
+            let watch_dirs = analyzer.get_watch_directories();
+
+            if !watch_dirs.is_empty() {
+                // Use explicit watch directories (preferred - catches new subdirectories)
+                for dir in watch_dirs {
+                    if dir.exists() {
+                        dir_to_analyzer.insert(dir, analyzer.display_name().to_string());
+                    }
+                }
+            } else {
+                // Fallback: derive from data sources (legacy behavior)
+                if let Ok(sources) = self.get_cached_data_sources(analyzer) {
+                    for source in sources {
+                        if let Some(parent) = source.path.parent()
+                            && parent.exists()
+                        {
+                            dir_to_analyzer
+                                .insert(parent.to_path_buf(), analyzer.display_name().to_string());
+                        }
                     }
                 }
             }
@@ -585,6 +597,130 @@ mod tests {
         let mapping = registry.get_directory_to_analyzer_mapping();
         // Parent directory of the source should be mapped to "mapper".
         assert_eq!(mapping.get(&base).map(String::as_str), Some("mapper"));
+    }
+
+    /// Test analyzer that overrides get_watch_directories() to return a custom root dir.
+    /// This simulates analyzers with nested subdirectory structures.
+    struct TestAnalyzerWithWatchDirs {
+        name: &'static str,
+        sources: Vec<PathBuf>,
+        watch_dirs: Vec<PathBuf>,
+    }
+
+    #[async_trait]
+    impl Analyzer for TestAnalyzerWithWatchDirs {
+        fn display_name(&self) -> &'static str {
+            self.name
+        }
+
+        fn get_data_glob_patterns(&self) -> Vec<String> {
+            vec!["*.json".to_string()]
+        }
+
+        fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
+            Ok(self
+                .sources
+                .iter()
+                .cloned()
+                .map(|path| DataSource { path })
+                .collect())
+        }
+
+        async fn parse_conversations(
+            &self,
+            _sources: Vec<DataSource>,
+        ) -> Result<Vec<ConversationMessage>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+            Ok(AgenticCodingToolStats {
+                daily_stats: BTreeMap::new(),
+                num_conversations: 0,
+                messages: Vec::new(),
+                analyzer_name: self.name.to_string(),
+            })
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn get_watch_directories(&self) -> Vec<PathBuf> {
+            self.watch_dirs.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_uses_explicit_watch_directories() {
+        use std::fs;
+
+        // Simulate nested structure like OpenCode: message/{session}/{file}.json
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let message_dir = temp_dir.path().join("message");
+        let session1_dir = message_dir.join("session1");
+        let session2_dir = message_dir.join("session2");
+        fs::create_dir_all(&session1_dir).expect("mkdirs session1");
+        fs::create_dir_all(&session2_dir).expect("mkdirs session2");
+
+        let file1 = session1_dir.join("msg1.json");
+        let file2 = session2_dir.join("msg2.json");
+
+        let mut registry = AnalyzerRegistry::new();
+        let analyzer = TestAnalyzerWithWatchDirs {
+            name: "nested",
+            sources: vec![file1.clone(), file2.clone()],
+            watch_dirs: vec![message_dir.clone()],
+        };
+
+        registry.register(analyzer);
+
+        let mapping = registry.get_directory_to_analyzer_mapping();
+
+        // With explicit watch directories, only the root message_dir should be watched.
+        // NOT the individual session directories.
+        assert_eq!(
+            mapping.get(&message_dir).map(String::as_str),
+            Some("nested"),
+            "Should watch the explicit root directory"
+        );
+        assert!(
+            !mapping.contains_key(&session1_dir),
+            "Should NOT watch individual session directories when watch_dirs is set"
+        );
+        assert!(
+            !mapping.contains_key(&session2_dir),
+            "Should NOT watch individual session directories when watch_dirs is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_falls_back_to_parent_dirs_when_no_watch_dirs() {
+        use std::fs;
+
+        // Without explicit watch_dirs, should fall back to parent directories
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let base = temp_dir.path().join("data").join("files");
+        fs::create_dir_all(&base).expect("mkdirs");
+        let file_path = base.join("data.json");
+
+        let mut registry = AnalyzerRegistry::new();
+        let analyzer = TestAnalyzerWithWatchDirs {
+            name: "fallback",
+            sources: vec![file_path.clone()],
+            watch_dirs: vec![], // Empty = use legacy behavior
+        };
+
+        registry.register(analyzer);
+
+        let mapping = registry.get_directory_to_analyzer_mapping();
+
+        // Should fall back to parent directory of the source file
+        assert_eq!(
+            mapping.get(&base).map(String::as_str),
+            Some("fallback"),
+            "Should fall back to watching parent directory when watch_dirs is empty"
+        );
     }
 
     // =========================================================================
