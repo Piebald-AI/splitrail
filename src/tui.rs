@@ -1430,12 +1430,21 @@ fn draw_ui(
             };
 
             // Summary stats - pass all filtered stats for aggregation (only if visible)
+            // When in Session mode with a day filter, only show totals for that day
             let help_chunk_offset = if ui_state.show_totals {
+                let day_filter = match ui_state.stats_view_mode {
+                    StatsViewMode::Session => ui_state
+                        .session_day_filters
+                        .get(ui_state.selected_tab)
+                        .and_then(|f| f.as_ref()),
+                    StatsViewMode::Daily => None,
+                };
                 draw_summary_stats(
                     frame,
                     chunks[3 + chunk_offset],
                     filtered_stats,
                     format_options,
+                    day_filter,
                 );
                 4 + chunk_offset
             } else {
@@ -2508,8 +2517,9 @@ fn draw_summary_stats(
     area: Rect,
     filtered_stats: &[&AgenticCodingToolStats],
     format_options: &NumberFormatOptions,
+    day_filter: Option<&String>,
 ) {
-    // Aggregate stats from all tools
+    // Aggregate stats from all tools, optionally filtered to a single day
     let mut total_cost: f64 = 0.0;
     let mut total_cached: u64 = 0;
     let mut total_input: u64 = 0;
@@ -2519,39 +2529,23 @@ fn draw_summary_stats(
     let mut all_days = std::collections::HashSet::new();
 
     for stats in filtered_stats {
-        total_cost += stats
-            .daily_stats
-            .values()
-            .map(|s| s.stats.cost)
-            .sum::<f64>();
-        total_cached += stats
-            .daily_stats
-            .values()
-            .map(|s| s.stats.cached_tokens)
-            .sum::<u64>();
-        total_input += stats
-            .daily_stats
-            .values()
-            .map(|s| s.stats.input_tokens)
-            .sum::<u64>();
-        total_output += stats
-            .daily_stats
-            .values()
-            .map(|s| s.stats.output_tokens)
-            .sum::<u64>();
-        total_reasoning += stats
-            .daily_stats
-            .values()
-            .map(|s| s.stats.reasoning_tokens)
-            .sum::<u64>();
-        total_tool_calls += stats
-            .daily_stats
-            .values()
-            .map(|s| s.stats.tool_calls as u64)
-            .sum::<u64>();
+        // Filter to specific day if day_filter is set
+        let daily_iter: Box<dyn Iterator<Item = (&String, &crate::types::DailyStats)>> =
+            if let Some(day) = day_filter {
+                Box::new(stats.daily_stats.iter().filter(move |(d, _)| *d == day))
+            } else {
+                Box::new(stats.daily_stats.iter())
+            };
 
-        // Collect unique days across all tools that have actual data
-        for (day, day_stats) in &stats.daily_stats {
+        for (day, day_stats) in daily_iter {
+            total_cost += day_stats.stats.cost;
+            total_cached += day_stats.stats.cached_tokens;
+            total_input += day_stats.stats.input_tokens;
+            total_output += day_stats.stats.output_tokens;
+            total_reasoning += day_stats.stats.reasoning_tokens;
+            total_tool_calls += day_stats.stats.tool_calls as u64;
+
+            // Collect unique days across all tools that have actual data
             if day_stats.stats.cost > 0.0
                 || day_stats.stats.input_tokens > 0
                 || day_stats.stats.output_tokens > 0
@@ -2617,9 +2611,16 @@ fn draw_summary_stats(
             Style::default().dim(),
         )]),
     );
+
+    // Show "Totals" or "Totals for <date>" depending on filter
+    let title = if let Some(day) = day_filter {
+        format!("Totals for {}", crate::utils::format_date_for_display(day))
+    } else {
+        "Totals".to_string()
+    };
     summary_lines.insert(
         0,
-        Line::from(vec![Span::styled("Totals", Style::default().bold().dim())]),
+        Line::from(vec![Span::styled(title, Style::default().bold().dim())]),
     );
 
     let summary_widget =
