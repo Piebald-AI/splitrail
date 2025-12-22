@@ -1242,9 +1242,9 @@ fn test_tui_toggle_summary_panel() {
 
     // The test passes if run_tui_with_events completes without panic
     // The toggle state is internal, but we verify the key handling works
-    let (selected_tab, view_mode) = run_tui_with_events(multi, events, 50);
-    assert_eq!(selected_tab, 0);
-    assert_eq!(view_mode, StatsViewMode::Daily);
+    let result = run_tui_with_events(multi, events, 50);
+    assert_eq!(result.selected_tab, 0);
+    assert_eq!(result.stats_view_mode, StatsViewMode::Daily);
 }
 
 #[test]
