@@ -1,4 +1,6 @@
-use crate::analyzer::{Analyzer, DataSource, discover_vscode_extension_sources};
+use crate::analyzer::{
+    Analyzer, DataSource, discover_vscode_extension_sources, get_vscode_extension_tasks_dirs,
+};
 use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
@@ -7,7 +9,7 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const ROO_CODE_EXTENSION_ID: &str = "rooveterinaryinc.roo-cline";
 
@@ -376,12 +378,15 @@ impl Analyzer for RooCodeAnalyzer {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
     }
+
+    fn get_watch_directories(&self) -> Vec<PathBuf> {
+        get_vscode_extension_tasks_dirs(ROO_CODE_EXTENSION_ID)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_extract_project_hash() {
