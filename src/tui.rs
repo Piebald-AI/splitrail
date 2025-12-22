@@ -51,6 +51,36 @@ enum StatsViewMode {
     Session,
 }
 
+/// A simple Either type for iterators to avoid allocation when reversing.
+enum EitherIter<L, R> {
+    Left(L),
+    Right(R),
+}
+
+impl<L, R, T> Iterator for EitherIter<L, R>
+where
+    L: Iterator<Item = T>,
+    R: Iterator<Item = T>,
+{
+    type Item = T;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            EitherIter::Left(l) => l.next(),
+            EitherIter::Right(r) => r.next(),
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            EitherIter::Left(l) => l.size_hint(),
+            EitherIter::Right(r) => r.size_hint(),
+        }
+    }
+}
+
 struct UiState<'a> {
     table_states: &'a mut [TableState],
     _scroll_offset: usize,
@@ -60,6 +90,7 @@ struct UiState<'a> {
     session_day_filters: &'a mut [Option<String>],
     date_jump_active: bool,
     date_jump_buffer: &'a str,
+    sort_reversed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +151,18 @@ pub fn run_tui(
     result
 }
 
+/// Result state from running the TUI in test mode.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct TestRunResult {
+    /// Whether sort order is currently reversed.
+    pub sort_reversed: bool,
+    /// The day filter for each tab (set when drilling into a specific day).
+    pub session_day_filters: Vec<Option<String>>,
+    /// The selected row index for each tab.
+    pub selected_rows: Vec<Option<usize>>,
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn run_app_for_tests<B, FPoll, FRead>(
@@ -136,7 +179,7 @@ async fn run_app_for_tests<B, FPoll, FRead>(
     mut poll: FPoll,
     mut read: FRead,
     max_iterations: usize,
-) -> Result<()>
+) -> Result<TestRunResult>
 where
     B: ratatui::backend::Backend,
     FPoll: FnMut(Duration) -> std::io::Result<bool>,
@@ -147,6 +190,7 @@ where
     let mut session_day_filters: Vec<Option<String>> = Vec::new();
     let mut date_jump_active = false;
     let mut date_jump_buffer = String::new();
+    let mut sort_reversed = false;
     let mut current_stats = stats_receiver.borrow().clone();
 
     // Initialize table states for current stats
@@ -263,6 +307,7 @@ where
                     session_day_filters: &mut session_day_filters,
                     date_jump_active,
                     date_jump_buffer: &date_jump_buffer,
+                    sort_reversed,
                 };
                 draw_ui(
                     frame,
@@ -605,22 +650,36 @@ where
                         && let Some(table_state) = table_states.get_mut(*selected_tab)
                         && let Some(selected_idx) = table_state.selected()
                         && selected_idx < current_stats.daily_stats.len()
-                        && let Some((day_key, _)) =
-                            current_stats.daily_stats.iter().nth(selected_idx)
                     {
-                        session_day_filters[*selected_tab] = Some(day_key.to_string());
-                        *stats_view_mode = StatsViewMode::Session;
-                        session_window_offsets[*selected_tab] = 0;
-                        table_state.select(Some(0));
-                        needs_redraw = true;
+                        let day_key = if sort_reversed {
+                            current_stats.daily_stats.iter().rev().nth(selected_idx)
+                        } else {
+                            current_stats.daily_stats.iter().nth(selected_idx)
+                        }
+                        .map(|(k, _)| k);
+                        if let Some(day_key) = day_key {
+                            session_day_filters[*selected_tab] = Some(day_key.to_string());
+                            *stats_view_mode = StatsViewMode::Session;
+                            session_window_offsets[*selected_tab] = 0;
+                            table_state.select(Some(0));
+                            needs_redraw = true;
+                        }
                     }
+                }
+                KeyCode::Char('r') => {
+                    sort_reversed = !sort_reversed;
+                    needs_redraw = true;
                 }
                 _ => {}
             }
         }
     }
 
-    Ok(())
+    Ok(TestRunResult {
+        sort_reversed,
+        session_day_filters,
+        selected_rows: table_states.iter().map(|ts| ts.selected()).collect(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -641,6 +700,7 @@ async fn run_app(
     let mut session_day_filters: Vec<Option<String>> = Vec::new();
     let mut date_jump_active = false;
     let mut date_jump_buffer = String::new();
+    let mut sort_reversed = false;
     let mut current_stats = stats_receiver.borrow().clone();
 
     // Initialize table states for current stats
@@ -765,6 +825,7 @@ async fn run_app(
                     session_day_filters: &mut session_day_filters,
                     date_jump_active,
                     date_jump_buffer: &date_jump_buffer,
+                    sort_reversed,
                 };
                 draw_ui(
                     frame,
@@ -1164,15 +1225,25 @@ async fn run_app(
                         && let Some(table_state) = table_states.get_mut(*selected_tab)
                         && let Some(selected_idx) = table_state.selected()
                         && selected_idx < current_stats.daily_stats.len()
-                        && let Some((day_key, _)) =
-                            current_stats.daily_stats.iter().nth(selected_idx)
                     {
-                        session_day_filters[*selected_tab] = Some(day_key.to_string());
-                        *stats_view_mode = StatsViewMode::Session;
-                        session_window_offsets[*selected_tab] = 0;
-                        table_state.select(Some(0));
-                        needs_redraw = true;
+                        let day_key = if sort_reversed {
+                            current_stats.daily_stats.iter().rev().nth(selected_idx)
+                        } else {
+                            current_stats.daily_stats.iter().nth(selected_idx)
+                        }
+                        .map(|(k, _)| k);
+                        if let Some(day_key) = day_key {
+                            session_day_filters[*selected_tab] = Some(day_key.to_string());
+                            *stats_view_mode = StatsViewMode::Session;
+                            session_window_offsets[*selected_tab] = 0;
+                            table_state.select(Some(0));
+                            needs_redraw = true;
+                        }
                     }
+                }
+                KeyCode::Char('r') => {
+                    sort_reversed = !sort_reversed;
+                    needs_redraw = true;
                 }
                 _ => {}
             }
@@ -1320,6 +1391,7 @@ fn draw_ui(
                         } else {
                             ""
                         },
+                        ui_state.sort_reversed,
                     );
                     has_estimated
                 }
@@ -1333,6 +1405,7 @@ fn draw_ui(
                             current_table_state,
                             &mut ui_state.session_window_offsets[ui_state.selected_tab],
                             ui_state.session_day_filters[ui_state.selected_tab].as_ref(),
+                            ui_state.sort_reversed,
                         );
                     }
                     false // Session view doesn't track estimated models yet
@@ -1359,10 +1432,10 @@ fn draw_ui(
 
             let base_help_text = match ui_state.stats_view_mode {
                 StatsViewMode::Daily => {
-                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • / for date jump • Enter to drill into day • Ctrl+T for per-session view • q/Esc to quit"
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • / for date jump • Enter to drill into day • Ctrl+T for per-session view • q/Esc to quit"
                 }
                 StatsViewMode::Session => {
-                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • Ctrl+T for per-day view • q/Esc to quit"
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • Ctrl+T for per-day view • q/Esc to quit"
                 }
             };
 
@@ -1454,6 +1527,7 @@ fn draw_daily_stats_table(
     format_options: &NumberFormatOptions,
     table_state: &mut TableState,
     date_filter: &str,
+    sort_reversed: bool,
 ) -> (usize, bool) {
     let header = Row::new(vec![
         Cell::new(""),
@@ -1529,7 +1603,14 @@ fn draw_daily_stats_table(
     let mut total_tool_calls = 0;
     let mut total_conversations = 0;
 
-    for (i, (date, day_stats)) in stats.daily_stats.iter().enumerate() {
+    // Use EitherIter to avoid allocation when reversing
+    let items_to_render = if sort_reversed {
+        EitherIter::Right(stats.daily_stats.iter().rev())
+    } else {
+        EitherIter::Left(stats.daily_stats.iter())
+    };
+
+    for (i, (date, day_stats)) in items_to_render.enumerate() {
         // Filter rows based on date search
         if !date_filter.is_empty() && !date_matches_buffer(date, date_filter) {
             continue;
@@ -1959,6 +2040,7 @@ fn draw_daily_stats_table(
     (total_rows, has_estimated_models)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_session_stats_table(
     frame: &mut Frame,
     area: Rect,
@@ -1967,6 +2049,7 @@ fn draw_session_stats_table(
     table_state: &mut TableState,
     window_offset: &mut usize,
     day_filter: Option<&String>,
+    sort_reversed: bool,
 ) {
     let header = Row::new(vec![
         Cell::new(""),
@@ -1984,13 +2067,19 @@ fn draw_session_stats_table(
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
 
-    let filtered_sessions: Vec<&SessionAggregate> = match day_filter {
-        Some(day) => cache
-            .sessions
-            .iter()
-            .filter(|s| &s.day_key == day)
-            .collect(),
-        None => cache.sessions.iter().collect(),
+    let filtered_sessions: Vec<&SessionAggregate> = {
+        let mut sessions: Vec<_> = match day_filter {
+            Some(day) => cache
+                .sessions
+                .iter()
+                .filter(|s| &s.day_key == day)
+                .collect(),
+            None => cache.sessions.iter().collect(),
+        };
+        if sort_reversed {
+            sessions.reverse();
+        }
+        sessions
     };
 
     let total_session_rows = filtered_sessions.len();
