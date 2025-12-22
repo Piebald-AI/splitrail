@@ -7,7 +7,7 @@ use simd_json::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::analyzer::{Analyzer, DataSource};
@@ -29,6 +29,11 @@ pub struct ClaudeCodeAnalyzer;
 impl ClaudeCodeAnalyzer {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Returns the root directory for Claude Code project data.
+    fn data_dir() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".claude").join("projects"))
     }
 }
 
@@ -52,20 +57,18 @@ impl Analyzer for ClaudeCodeAnalyzer {
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
         let mut sources = Vec::new();
 
-        if let Some(home_dir) = dirs::home_dir() {
-            let projects_dir = home_dir.join(".claude").join("projects");
-
-            if projects_dir.is_dir() {
-                // jwalk walks directories in parallel
-                for entry in WalkDir::new(&projects_dir)
-                    .min_depth(2)
-                    .max_depth(2)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-                {
-                    sources.push(DataSource { path: entry.path() });
-                }
+        if let Some(projects_dir) = Self::data_dir()
+            && projects_dir.is_dir()
+        {
+            // jwalk walks directories in parallel
+            for entry in WalkDir::new(&projects_dir)
+                .min_depth(2)
+                .max_depth(2)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            {
+                sources.push(DataSource { path: entry.path() });
             }
         }
 
@@ -222,6 +225,13 @@ impl Analyzer for ClaudeCodeAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    fn get_watch_directories(&self) -> Vec<PathBuf> {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .collect()
     }
 }
 

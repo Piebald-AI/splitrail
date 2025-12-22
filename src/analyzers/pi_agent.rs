@@ -9,13 +9,18 @@ use rayon::prelude::*;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct PiAgentAnalyzer;
 
 impl PiAgentAnalyzer {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Returns the root directory for Pi Agent session data.
+    fn data_dir() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".pi").join("agent").join("sessions"))
     }
 }
 
@@ -410,20 +415,18 @@ impl Analyzer for PiAgentAnalyzer {
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
         let mut sources = Vec::new();
 
-        if let Some(home_dir) = dirs::home_dir() {
-            let sessions_dir = home_dir.join(".pi").join("agent").join("sessions");
-
-            if sessions_dir.is_dir() {
-                // Pattern: ~/.pi/agent/sessions/*/*.jsonl
-                for entry in WalkDir::new(&sessions_dir)
-                    .min_depth(2)
-                    .max_depth(2)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-                {
-                    sources.push(DataSource { path: entry.path() });
-                }
+        if let Some(sessions_dir) = Self::data_dir()
+            && sessions_dir.is_dir()
+        {
+            // Pattern: ~/.pi/agent/sessions/*/*.jsonl
+            for entry in WalkDir::new(&sessions_dir)
+                .min_depth(2)
+                .max_depth(2)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            {
+                sources.push(DataSource { path: entry.path() });
             }
         }
 
@@ -497,5 +500,12 @@ impl Analyzer for PiAgentAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    fn get_watch_directories(&self) -> Vec<PathBuf> {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .collect()
     }
 }

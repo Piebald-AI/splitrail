@@ -8,14 +8,44 @@ use jwalk::WalkDir;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tiktoken_rs::get_bpe_from_model;
 
 pub struct CopilotAnalyzer;
 
+/// VSCode forks that might have Copilot installed
+const COPILOT_VSCODE_FORKS: &[&str] = &[
+    "Code",
+    "Cursor",
+    "Windsurf",
+    "VSCodium",
+    "Positron",
+    "Code - Insiders",
+    "Antigravity",
+];
+
 impl CopilotAnalyzer {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Returns all VSCode workspaceStorage directories where Copilot data may exist.
+    fn workspace_storage_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+
+        if let Some(home_dir) = dirs::home_dir() {
+            // macOS paths: ~/Library/Application Support/{fork}/User/workspaceStorage
+            let app_support = home_dir.join("Library/Application Support");
+
+            for fork in COPILOT_VSCODE_FORKS {
+                let workspace_storage = app_support.join(fork).join("User/workspaceStorage");
+                if workspace_storage.is_dir() {
+                    dirs.push(workspace_storage);
+                }
+            }
+        }
+
+        dirs
     }
 }
 
@@ -423,44 +453,24 @@ impl Analyzer for CopilotAnalyzer {
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
         let mut sources = Vec::new();
 
-        // VSCode forks that might have Copilot installed
-        let vscode_forks = [
-            "Code",
-            "Cursor",
-            "Windsurf",
-            "VSCodium",
-            "Positron",
-            "Code - Insiders",
-            "Antigravity",
-        ];
-
-        if let Some(home_dir) = dirs::home_dir() {
-            // macOS paths
-            let app_support = home_dir.join("Library/Application Support");
-
-            for fork in &vscode_forks {
-                let workspace_storage = app_support.join(fork).join("User/workspaceStorage");
-
-                if workspace_storage.is_dir() {
-                    // Pattern: */chatSessions/*.json
-                    // jwalk walks directories in parallel
-                    for entry in WalkDir::new(&workspace_storage)
-                        .min_depth(3) // */chatSessions/*.json
-                        .max_depth(3)
-                        .into_iter()
-                        .filter_map(|e| e.ok())
-                        .filter(|e| {
-                            e.file_type().is_file()
-                                && e.path().extension().is_some_and(|ext| ext == "json")
-                                && e.path()
-                                    .parent()
-                                    .and_then(|p| p.file_name())
-                                    .is_some_and(|name| name == "chatSessions")
-                        })
-                    {
-                        sources.push(DataSource { path: entry.path() });
-                    }
-                }
+        for workspace_storage in Self::workspace_storage_dirs() {
+            // Pattern: */chatSessions/*.json
+            // jwalk walks directories in parallel
+            for entry in WalkDir::new(&workspace_storage)
+                .min_depth(3) // */chatSessions/*.json
+                .max_depth(3)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_type().is_file()
+                        && e.path().extension().is_some_and(|ext| ext == "json")
+                        && e.path()
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .is_some_and(|name| name == "chatSessions")
+                })
+            {
+                sources.push(DataSource { path: entry.path() });
             }
         }
 
@@ -517,12 +527,15 @@ impl Analyzer for CopilotAnalyzer {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
     }
+
+    fn get_watch_directories(&self) -> Vec<PathBuf> {
+        Self::workspace_storage_dirs()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_extract_project_hash() {

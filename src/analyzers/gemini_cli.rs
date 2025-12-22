@@ -11,13 +11,18 @@ use jwalk::WalkDir;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct GeminiCliAnalyzer;
 
 impl GeminiCliAnalyzer {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Returns the root directory for Gemini CLI data.
+    fn data_dir() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".gemini").join("tmp"))
     }
 }
 
@@ -308,28 +313,26 @@ impl Analyzer for GeminiCliAnalyzer {
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
         let mut sources = Vec::new();
 
-        if let Some(home_dir) = dirs::home_dir() {
-            let tmp_dir = home_dir.join(".gemini").join("tmp");
-
-            if tmp_dir.is_dir() {
-                // Pattern: ~/.gemini/tmp/*/chats/*.json
-                // jwalk walks directories in parallel
-                for entry in WalkDir::new(&tmp_dir)
-                    .min_depth(3) // */chats/*.json
-                    .max_depth(3)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_type().is_file()
-                            && e.path().extension().is_some_and(|ext| ext == "json")
-                            && e.path()
-                                .parent()
-                                .and_then(|p| p.file_name())
-                                .is_some_and(|name| name == "chats")
-                    })
-                {
-                    sources.push(DataSource { path: entry.path() });
-                }
+        if let Some(tmp_dir) = Self::data_dir()
+            && tmp_dir.is_dir()
+        {
+            // Pattern: ~/.gemini/tmp/*/chats/*.json
+            // jwalk walks directories in parallel
+            for entry in WalkDir::new(&tmp_dir)
+                .min_depth(3) // */chats/*.json
+                .max_depth(3)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_type().is_file()
+                        && e.path().extension().is_some_and(|ext| ext == "json")
+                        && e.path()
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .is_some_and(|name| name == "chats")
+                })
+            {
+                sources.push(DataSource { path: entry.path() });
             }
         }
 
@@ -383,5 +386,12 @@ impl Analyzer for GeminiCliAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    fn get_watch_directories(&self) -> Vec<PathBuf> {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .collect()
     }
 }

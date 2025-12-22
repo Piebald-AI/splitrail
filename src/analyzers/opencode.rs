@@ -13,13 +13,18 @@ use simd_json::OwnedValue;
 use simd_json::prelude::*;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct OpenCodeAnalyzer;
 
 impl OpenCodeAnalyzer {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Returns the root directory for OpenCode message data.
+    fn data_dir() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".local/share/opencode/storage/message"))
     }
 }
 
@@ -437,24 +442,21 @@ impl Analyzer for OpenCodeAnalyzer {
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
         let mut sources = Vec::new();
 
-        if let Some(home_dir) = dirs::home_dir() {
-            let message_dir = home_dir.join(".local/share/opencode/storage/message");
-
-            if message_dir.is_dir() {
-                // Pattern: ~/.local/share/opencode/storage/message/*/*.json
-                // jwalk walks directories in parallel
-                for entry in WalkDir::new(&message_dir)
-                    .min_depth(2) // */*.json
-                    .max_depth(2)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_type().is_file()
-                            && e.path().extension().is_some_and(|ext| ext == "json")
-                    })
-                {
-                    sources.push(DataSource { path: entry.path() });
-                }
+        if let Some(message_dir) = Self::data_dir()
+            && message_dir.is_dir()
+        {
+            // Pattern: ~/.local/share/opencode/storage/message/*/*.json
+            // jwalk walks directories in parallel
+            for entry in WalkDir::new(&message_dir)
+                .min_depth(2) // */*.json
+                .max_depth(2)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "json")
+                })
+            {
+                sources.push(DataSource { path: entry.path() });
             }
         }
 
@@ -525,6 +527,13 @@ impl Analyzer for OpenCodeAnalyzer {
     fn is_available(&self) -> bool {
         self.discover_data_sources()
             .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    fn get_watch_directories(&self) -> Vec<PathBuf> {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .collect()
     }
 }
 
