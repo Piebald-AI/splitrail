@@ -1227,6 +1227,27 @@ fn test_tui_date_jump_behavior() {
 }
 
 #[test]
+fn test_tui_toggle_summary_panel() {
+    let stats = make_tool_stats("with-data", true);
+    let multi = MultiAnalyzerStats {
+        analyzer_stats: vec![stats],
+    };
+
+    // Press 's' twice (toggle off, toggle on) then quit
+    let events = vec![
+        Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty())),
+        Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())),
+    ];
+
+    // The test passes if run_tui_with_events completes without panic
+    // The toggle state is internal, but we verify the key handling works
+    let result = run_tui_with_events(multi, events, 50);
+    assert_eq!(result.selected_tab, 0);
+    assert_eq!(result.stats_view_mode, StatsViewMode::Daily);
+}
+
+#[test]
 fn test_tui_drill_into_session_with_enter() {
     let multi = make_multi_single_tool_two_days();
 
