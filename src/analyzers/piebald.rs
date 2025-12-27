@@ -143,10 +143,13 @@ fn convert_messages(
             // Use project path from chat's current_directory, falling back to "ungrouped" if not set
             let project_hash = hash_text(chat.current_directory.as_deref().unwrap_or("ungrouped"));
 
-            // Piebald messages have unique database IDs, so we use the message ID directly
-            // for deduplication. No forking support means no duplicate messages.
+            // Generate globally unique hash using timestamp + message ID.
+            // The timestamp has nanosecond precision which is unique per installation,
+            // and combined with the message ID ensures no collisions across users.
+            // NOTE: We cannot use just msg.id because it's a local SQLite autoincrement
+            // that starts at 1 for every Piebald installation, causing collisions.
             let conversation_hash = msg.parent_chat_id.to_string();
-            let global_hash = format!("piebald_{}", msg.id);
+            let global_hash = hash_text(&format!("piebald_{}_{}", msg.created_at, msg.id));
 
             // Determine role
             let role = match msg.role.to_lowercase().as_str() {
