@@ -91,19 +91,34 @@ Each message needs:
 - `date`: Timestamp as `DateTime<Utc>`
 - `project_hash`: Hash of project/workspace path
 - `conversation_hash`: Hash of session/conversation ID
-- `local_hash`: Optional unique message ID within the agent
+- `local_hash`: `Option<String>` - unique message ID within the agent
 - `global_hash`: Unique ID across all Splitrail data (for deduplication on upload)
-- `model`: Model name (e.g., "claude-sonnet-4-5")
+- `model`: `Option<String>` - model name (None for user messages)
 - `stats`: Token counts, costs, tool calls (see `Stats` struct)
 - `role`: `MessageRole::User` or `MessageRole::Assistant`
-- `session_name`: Human-readable session title
+- `uuid`: `Option<String>` - unique identifier if available
+- `session_name`: `Option<String>` - human-readable session title
 
 ### Stats Extraction
 
-Populate `Stats` with:
-- `input_tokens`, `output_tokens`, `cache_*_tokens`
+Populate `Stats` with token/cost fields:
+- `input_tokens`, `output_tokens`, `reasoning_tokens`
+- `cache_creation_tokens`, `cache_read_tokens`, `cached_tokens`
 - `cost`: Use `models::calculate_total_cost()` if agent doesn't provide cost
-- `tool_calls`, `files_read`, `files_edited`, etc.
+- `tool_calls`
+
+File operation fields:
+- `terminal_commands`, `file_searches`, `file_content_searches`
+- `files_read`, `files_added`, `files_edited`, `files_deleted`
+- `lines_read`, `lines_added`, `lines_edited`, `lines_deleted`
+- `bytes_read`, `bytes_added`, `bytes_edited`, `bytes_deleted`
+
+Todo tracking fields:
+- `todos_created`, `todos_completed`, `todos_in_progress`
+- `todo_writes`, `todo_reads`
+
+Composition stats (lines by file type):
+- `code_lines`, `docs_lines`, `data_lines`, `media_lines`, `config_lines`, `other_lines`
 
 ## Step 3: Export the Analyzer
 
@@ -161,7 +176,7 @@ mod your_agent;
 
 ### VS Code Extensions
 
-For Cline-like VS Code extensions, use the helper:
+For Cline-like VS Code extensions, use the discovery helper:
 ```rust
 use crate::analyzer::discover_vscode_extension_sources;
 
@@ -174,15 +189,45 @@ fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
 }
 ```
 
+For watch directories, use `get_vscode_extension_tasks_dirs()`:
+```rust
+use crate::analyzer::get_vscode_extension_tasks_dirs;
+
+fn get_watch_directories(&self) -> Vec<PathBuf> {
+    get_vscode_extension_tasks_dirs("publisher.extension-id")
+}
+```
+
+Supported VSCode forks: Code, Code - Insiders, Cursor, Windsurf, VSCodium, Positron, Antigravity, plus CLI forks (vscode-server, vscode-server-insiders).
+
 ### CLI Tools with JSONL
 
 For CLI tools storing JSONL files (like Claude Code, Pi Agent):
 ```rust
-// Parse JSONL line by line with simd_json
-for line in buffer.split(|&b| b == b'\n') {
+// Read entire file, then parse JSONL line by line with simd_json
+let mut buffer = Vec::new();
+reader.read_to_end(&mut buffer)?;
+
+for (i, line) in buffer.split(|&b| b == b'\n').enumerate() {
+    // Skip empty lines
+    if line.is_empty() || line.iter().all(|&b| b.is_ascii_whitespace()) {
+        continue;
+    }
+
     let mut line_buf = line.to_vec();
-    let entry = simd_json::from_slice::<YourEntry>(&mut line_buf)?;
-    // ...
+    match simd_json::from_slice::<YourEntry>(&mut line_buf) {
+        Ok(entry) => {
+            // Process entry...
+        }
+        Err(e) => {
+            // Log and skip invalid lines rather than failing entirely
+            crate::utils::warn_once(format!(
+                "Skipping invalid entry in {} line {}: {}",
+                path.display(), i + 1, e
+            ));
+            continue;
+        }
+    }
 }
 ```
 
@@ -199,9 +244,9 @@ If the agent doesn't provide cost data, add model pricing to `src/models.rs`:
 1. Add to `MODEL_INDEX` with `ModelInfo` (pricing structure, caching)
 2. Add aliases to `MODEL_ALIASES` (date suffixes, etc.)
 
-## Example Agents
+## Example Analyzers
 
-- **Simple JSONL CLI**: `pi_agent.rs` - Good starting template
-- **VS Code extension**: `cline.rs`, `roo_code.rs`
+- **Simple JSONL CLI**: `pi_agent.rs`, `piebald.rs` - Good starting templates
+- **VS Code extension**: `cline.rs`, `roo_code.rs`, `kilo_code.rs`
 - **Complex with dedup**: `claude_code.rs`
 - **External data dirs**: `opencode.rs`
