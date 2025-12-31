@@ -1,9 +1,4 @@
----
-name: add-new-supported-agent
-description: Add support for a new AI coding agent/CLI tool. Use when implementing tracking for a new tool like a new Cline fork, coding CLI, or VS Code extension.
----
-
-# Adding a New Supported Agent
+# Adding a New Analyzer
 
 Splitrail tracks token usage from AI coding agents. Each agent has its own "analyzer" that discovers and parses its data files.
 
