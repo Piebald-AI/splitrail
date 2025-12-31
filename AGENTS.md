@@ -1,49 +1,10 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
+# Project Overview
 
 Splitrail is a high-performance, cross-platform usage tracker for AI coding assistants (Claude Code, Copilot, Cline, Pi Agent, etc.). It analyzes local data files from these tools, aggregates usage statistics, and provides real-time TUI monitoring with optional cloud upload capabilities.
 
-**Key Technologies:**
-- Rust (edition 2024) with async/await (Tokio)
-- Terminal UI (ratatui + crossterm)
-- MCP (Model Context Protocol) server support
+# Architecture
 
-## Building and Running
-
-### Basic Commands
-```bash
-# Build and run (release mode recommended for performance)
-cargo run --release
-
-# Run in development mode
-cargo run
-
-# Run tests
-cargo test
-
-# Run specific test
-cargo test test_name
-
-# Run tests for a specific module
-cargo test --test module_name
-
-# Build only (no run)
-cargo build --release
-```
-
-### Windows-Specific Setup
-Windows requires `lld-link.exe` from LLVM for fast compilation. Install via:
-```bash
-winget install --id LLVM.LLVM
-```
-Then add `C:\Program Files\LLVM\bin\` to system PATH.
-
-## Architecture
-
-### Core Analyzer System
+## Core Analyzer System
 
 The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trait as the foundation:
 
@@ -62,7 +23,7 @@ The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trai
    - Parses conversations from JSON/JSONL files
    - Normalizes to `ConversationMessage` format
 
-### Data Flow
+## Data Flow
 
 1. **Discovery**: Analyzers find data files using platform-specific paths
 2. **Parsing**: Parse JSON/JSONL files into `ConversationMessage` structs
@@ -70,7 +31,7 @@ The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trai
 4. **Aggregation**: Group messages by date, compute token counts, costs, file ops
 5. **Display**: TUI renders daily stats + real-time updates via file watcher
 
-### Key Types (`src/types.rs`)
+## Key Types (`src/types.rs`)
 
 - **ConversationMessage**: Normalized message format across all analyzers
   - Contains tokens, costs, file operations, tool usage stats
@@ -86,7 +47,7 @@ The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trai
   - Message counts, conversation counts, model breakdown
   - Embedded `Stats` struct with all metrics
 
-### Real-Time Monitoring
+## Real-Time Monitoring
 
 **FileWatcher** (`src/watcher.rs`) provides live updates:
 - Watches analyzer data directories using `notify` crate
@@ -98,7 +59,7 @@ The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trai
 - Auto-upload to Splitrail Cloud (if configured)
 - Stats updates to TUI via `tokio::sync::watch`
 
-### MCP Server (`src/mcp/`)
+## MCP Server (`src/mcp/`)
 
 Splitrail can run as an MCP (Model Context Protocol) server:
 ```bash
@@ -117,30 +78,18 @@ Resources:
 - `splitrail://summary` - Daily summaries across all dates
 - `splitrail://models` - Model usage breakdown
 
-## Testing Strategy
+# Testing Strategy
 
-### Test Organization
+## Test Organization
 - **Unit tests**: Inline with source (`#[cfg(test)] mod tests`)
 - **Integration tests**: `src/analyzers/tests/` for analyzer-specific parsing tests
 
-### Running Tests
-```bash
-# All tests
-cargo test
-
-# Specific analyzer
-cargo test claude_code
-
-# Single test
-cargo test test_name
-```
-
-### Test Data
+## Test Data
 Most analyzers use real-world JSON fixtures in test modules to verify parsing logic.
 
-## Common Development Tasks
+# Common Development Tasks
 
-### Adding a New Analyzer
+## Adding a New Analyzer
 
 1. Create new file in `src/analyzers/your_analyzer.rs`
 2. Implement the `Analyzer` trait:
@@ -157,14 +106,14 @@ Most analyzers use real-world JSON fixtures in test modules to verify parsing lo
 4. Register in `src/main.rs::create_analyzer_registry()`
 5. Add to `Application` enum in `src/types.rs`
 
-### Pricing Model Updates
+## Pricing Model Updates
 
 Token pricing is in `src/models.rs` using compile-time `phf` maps:
 - Add new model to appropriate constant (e.g., `ANTHROPIC_PRICING`)
-- Format: model name → `PricePerMillion { input, output, cache_creation, cache_read }`
+- Format: model name -> `PricePerMillion { input, output, cache_creation, cache_read }`
 - Prices in USD per million tokens
 
-## Configuration
+# Configuration
 
 User config stored at `~/.splitrail.toml`:
 ```toml
@@ -183,16 +132,26 @@ locale = "en"
 decimal_places = 2
 ```
 
-## Performance Considerations
+# Performance Considerations
 
 1. **Parallel Loading**: Analyzers load in parallel via `futures::join_all()`
 2. **Rayon for Parsing**: Use `.par_iter()` when parsing multiple files
 3. **Lazy Message Loading**: TUI loads messages on-demand for session view
 
-## Code Style
+# Code Style
 
 - Follow Rust 2024 edition conventions
 - Use `anyhow::Result` for error handling
 - Prefer `async/await` over raw futures
 - Use `parking_lot` locks over `std::sync` for performance
 - Keep large modules like `tui.rs` self-contained (consider refactoring if adding major features)
+
+# Post-Change Verification
+
+Run after code changes:
+```bash
+cargo build --release --quiet
+cargo test --quiet
+cargo clippy --quiet -- -D warnings
+cargo fmt --check
+```
