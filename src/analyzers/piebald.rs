@@ -62,6 +62,7 @@ struct PiebaldMessage {
     cache_read_tokens: Option<i64>,
     cache_write_tokens: Option<i64>,
     created_at: String,
+    updated_at: String,
 }
 
 /// Query all chats from the database.
@@ -88,9 +89,9 @@ fn query_chats(conn: &Connection) -> Result<Vec<PiebaldChat>> {
 fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
     let mut stmt = conn.prepare(
         "SELECT id, parent_chat_id, role, input_tokens, output_tokens,
-                reasoning_tokens, cache_read_tokens, cache_write_tokens, created_at
+                reasoning_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at
          FROM messages
-         ORDER BY created_at",
+         ORDER BY updated_at",
     )?;
 
     let messages = stmt
@@ -105,6 +106,7 @@ fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
                 cache_read_tokens: row.get(6)?,
                 cache_write_tokens: row.get(7)?,
                 created_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -137,13 +139,15 @@ fn convert_messages(
         .filter_map(|msg| {
             let chat = chat_map.get(&msg.parent_chat_id)?;
 
-            // Parse timestamp - skip messages with invalid timestamps
-            let date = parse_timestamp(&msg.created_at)?;
+            // Parse timestamp - use updated_at so that streaming updates are captured
+            // (updated_at changes when tokens are added during streaming)
+            let date = parse_timestamp(&msg.updated_at)?;
 
             // Use project path from chat's current_directory, falling back to "ungrouped" if not set
             let project_hash = hash_text(chat.current_directory.as_deref().unwrap_or("ungrouped"));
 
-            // Generate globally unique hash using timestamp + message ID.
+            // Generate globally unique hash using created_at timestamp + message ID.
+            // Use created_at (not updated_at) so the hash stays stable across token updates.
             // The timestamp has nanosecond precision which is unique per installation,
             // and combined with the message ID ensures no collisions across users.
             // NOTE: We cannot use just msg.id because it's a local SQLite autoincrement
