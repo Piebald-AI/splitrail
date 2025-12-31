@@ -435,7 +435,7 @@ impl ServerHandler for SplitrailMcpServer {
             }
             _ => Err(McpError::resource_not_found(
                 "resource_not_found",
-                Some(serde_json::json!({ "uri": uri })),
+                Some(rmcp::serde_json::json!({ "uri": uri })),
             )),
         }
     }

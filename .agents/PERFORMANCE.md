@@ -4,7 +4,7 @@
 
 - **Parallel analyzer loading** - `futures::join_all()` for concurrent stats loading
 - **Parallel file parsing** - `rayon` for parallel iteration over files
-- **Fast JSON parsing** - `simd_json` instead of `serde_json`
+- **Fast JSON parsing** - `simd_json` exclusively for all JSON operations (note: `rmcp` crate re-exports `serde_json` for MCP server types)
 - **Fast directory walking** - `jwalk` for parallel directory traversal
 - **Lazy message loading** - TUI loads messages on-demand for session view
 
