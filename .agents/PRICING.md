@@ -4,10 +4,11 @@ Token pricing is defined in `src/models.rs` using compile-time `phf` (perfect ha
 
 ## Adding a New Model
 
-1. Find the appropriate pricing map constant (e.g., `ANTHROPIC_PRICING`, `OPENAI_PRICING`) in `src/models.rs`
-2. Add the model entry with pricing per million tokens: input, output, cache_creation, cache_read
-3. If the model has aliases (date suffixes, etc.), add to `MODEL_ALIASES`
-4. Add `ModelInfo` to `MODEL_INDEX` with pricing structure and caching support
+1. Add a `ModelInfo` entry to `MODEL_INDEX` (line 65 in `src/models.rs`) with:
+   - `pricing`: Use `PricingStructure::Flat { input_per_1m, output_per_1m }` for flat-rate models, or `PricingStructure::Tiered` for tiered pricing
+   - `caching`: Use the appropriate `CachingSupport` variant (`None`, `OpenAI`, `Anthropic`, or `Google`)
+   - `is_estimated`: Set to `true` if pricing is not officially published
+2. If the model has aliases (date suffixes, etc.), add entries to `MODEL_ALIASES` mapping to the canonical model name
 
 See existing entries in `src/models.rs` for the pattern.
 
