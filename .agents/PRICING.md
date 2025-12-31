@@ -18,6 +18,6 @@ Use `models::calculate_total_cost()` when an analyzer doesn't provide cost data.
 
 ## Common Pricing Sources
 
-- Anthropic: https://www.anthropic.com/pricing
-- OpenAI: https://openai.com/pricing
-- Google: https://ai.google.dev/pricing
+- [Anthropic pricing](https://www.anthropic.com/pricing)
+- [OpenAI pricing](https://openai.com/pricing)
+- [Google AI pricing](https://ai.google.dev/pricing)
