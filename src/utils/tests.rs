@@ -1,6 +1,7 @@
 use super::*;
 use crate::types::{ConversationMessage, MessageRole, Stats};
 use chrono::{TimeZone, Utc};
+use std::collections::HashSet;
 
 #[test]
 fn test_format_number_comma() {
@@ -455,8 +456,7 @@ fn test_deduplicate_by_global_hash_parallel() {
     // Should have 2 unique entries (same_hash and different_hash)
     assert_eq!(result.len(), 2);
 
-    let hashes: std::collections::HashSet<_> =
-        result.iter().map(|m| m.global_hash.as_str()).collect();
+    let hashes: HashSet<_> = result.iter().map(|m| m.global_hash.as_str()).collect();
     assert!(hashes.contains("same_hash"));
     assert!(hashes.contains("different_hash"));
 }

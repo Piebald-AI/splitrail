@@ -22,6 +22,10 @@ mod utils;
 mod version_check;
 mod watcher;
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(name = "splitrail")]
 #[command(version)]
@@ -214,8 +218,8 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         }
     };
 
-    // Get the initial stats to check if we have data
-    let initial_stats = stats_manager.get_stats_receiver().borrow().clone();
+    // Release memory from parallel parsing back to OS
+    release_unused_memory();
 
     // Create upload status for TUI
     let upload_status = Arc::new(Mutex::new(tui::UploadStatus::None));
@@ -230,14 +234,20 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let config = config::Config::load().unwrap_or(None).unwrap_or_default();
     if config.upload.auto_upload {
         if config.is_configured() {
+            // For initial auto-upload, load full stats separately
+            let registry_for_upload = create_analyzer_registry();
             let upload_status_clone = upload_status.clone();
             tokio::spawn(async move {
-                upload::perform_background_upload(
-                    initial_stats,
-                    Some(upload_status_clone),
-                    Some(500),
-                )
-                .await;
+                if let Ok(full_stats) = registry_for_upload.load_all_stats().await {
+                    // Release memory from parallel parsing back to OS
+                    release_unused_memory();
+                    upload::perform_background_upload(
+                        full_stats,
+                        Some(upload_status_clone),
+                        Some(500),
+                    )
+                    .await;
+                }
             });
         } else {
             // Auto-upload is enabled but configuration is incomplete
@@ -272,6 +282,9 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
 async fn run_upload(args: UploadArgs) -> Result<()> {
     let registry = create_analyzer_registry();
     let stats = registry.load_all_stats().await?;
+
+    // Release memory from parallel parsing back to OS
+    release_unused_memory();
 
     // Load config file to get formatting options and upload date
     let config_file = config::Config::load().unwrap_or(None).unwrap_or_default();
@@ -360,6 +373,9 @@ async fn run_stats(args: StatsArgs) -> Result<()> {
     let registry = create_analyzer_registry();
     let mut stats = registry.load_all_stats().await?;
 
+    // Release memory from parallel parsing back to OS
+    release_unused_memory();
+
     if !args.include_messages {
         for analyzer_stats in &mut stats.analyzer_stats {
             analyzer_stats.messages.clear();
@@ -399,3 +415,22 @@ async fn handle_config_subcommand(config_args: ConfigArgs) {
         }
     }
 }
+
+/// Release unused memory back to the OS after heavy allocations.
+/// Call this after Rayon parallel operations complete to reclaim arena memory.
+#[cfg(feature = "mimalloc")]
+pub fn release_unused_memory() {
+    unsafe extern "C" {
+        fn mi_collect(force: bool);
+    }
+    // SAFETY: mi_collect is a safe FFI call that triggers garbage collection
+    // and returns unused memory to the OS. The `force` parameter (true) ensures
+    // aggressive collection.
+    unsafe {
+        mi_collect(true);
+    }
+}
+
+/// No-op when mimalloc is disabled.
+#[cfg(not(feature = "mimalloc"))]
+pub fn release_unused_memory() {}

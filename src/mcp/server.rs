@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -50,7 +50,7 @@ impl SplitrailMcpServer {
     fn get_daily_stats_for_analyzer(
         stats: &MultiAnalyzerStats,
         analyzer: Option<&str>,
-    ) -> std::collections::BTreeMap<String, crate::types::DailyStats> {
+    ) -> BTreeMap<String, crate::types::DailyStats> {
         if let Some(analyzer_name) = analyzer {
             // Find specific analyzer
             for analyzer_stats in &stats.analyzer_stats {
@@ -61,7 +61,7 @@ impl SplitrailMcpServer {
                     return analyzer_stats.daily_stats.clone();
                 }
             }
-            std::collections::BTreeMap::new()
+            BTreeMap::new()
         } else {
             // Combine all messages and aggregate
             let all_messages: Vec<_> = stats

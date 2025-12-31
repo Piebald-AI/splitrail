@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use crate::analyzer::AnalyzerRegistry;
 use crate::config::Config;
 use crate::tui::UploadStatus;
-use crate::types::MultiAnalyzerStats;
+use crate::types::MultiAnalyzerStatsView;
 use crate::upload;
 
 #[derive(Debug, Clone)]
@@ -20,10 +20,6 @@ pub enum WatcherEvent {
     FileChanged(String, PathBuf),
     /// A file was deleted (analyzer name, file path)
     FileDeleted(String, PathBuf),
-    /// Fallback: data changed for an analyzer (full reload)
-    /// Kept for API stability - may be used programmatically
-    #[allow(dead_code)]
-    DataChanged(String),
     /// An error occurred
     Error(String),
 }
@@ -69,18 +65,6 @@ impl FileWatcher {
             _watcher: watcher,
             event_rx,
         })
-    }
-
-    #[cfg(test)]
-    pub fn for_tests() -> Self {
-        let (_tx, event_rx) = mpsc::channel();
-        let watcher =
-            notify::recommended_watcher(|_res| {}).expect("failed to create test file watcher");
-
-        Self {
-            _watcher: watcher,
-            event_rx,
-        }
     }
 
     pub fn try_recv(&self) -> Option<WatcherEvent> {
@@ -137,9 +121,9 @@ fn find_analyzer_for_path(
 
 pub struct RealtimeStatsManager {
     registry: AnalyzerRegistry,
-    current_stats: MultiAnalyzerStats,
-    update_tx: watch::Sender<MultiAnalyzerStats>,
-    update_rx: watch::Receiver<MultiAnalyzerStats>,
+    current_stats: MultiAnalyzerStatsView,
+    update_tx: watch::Sender<MultiAnalyzerStatsView>,
+    update_rx: watch::Receiver<MultiAnalyzerStatsView>,
     last_upload_time: Option<Instant>,
     upload_debounce: Duration,
     upload_status: Option<Arc<Mutex<UploadStatus>>>,
@@ -149,8 +133,12 @@ pub struct RealtimeStatsManager {
 
 impl RealtimeStatsManager {
     pub async fn new(registry: AnalyzerRegistry) -> Result<Self> {
-        // Initial stats load using registry method
-        let initial_stats = registry.load_all_stats().await?;
+        // Initial stats load using a temporary thread pool for parallel parsing.
+        // The pool is dropped after loading, releasing thread-local memory.
+        let num_threads = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(8);
+        let initial_stats = registry.load_all_stats_views_parallel(num_threads)?;
         let (update_tx, update_rx) = watch::channel(initial_stats.clone());
 
         Ok(Self {
@@ -175,96 +163,107 @@ impl RealtimeStatsManager {
         // Caching has been removed - this is kept for API compatibility
     }
 
-    pub fn get_stats_receiver(&self) -> watch::Receiver<MultiAnalyzerStats> {
+    pub fn get_stats_receiver(&self) -> watch::Receiver<MultiAnalyzerStatsView> {
         self.update_rx.clone()
     }
 
     pub async fn handle_watcher_event(&mut self, event: WatcherEvent) -> Result<()> {
         match event {
             WatcherEvent::FileChanged(analyzer_name, path) => {
-                // Try incremental reload first (much faster - only reparses the changed file)
-                if self.registry.has_cached_messages(&analyzer_name) {
-                    self.reload_single_file(&analyzer_name, &path).await;
+                // True incremental update - O(1), only reparses the changed file
+                if self.registry.has_cached_contributions(&analyzer_name) {
+                    self.reload_single_file_incremental(&analyzer_name, &path)
+                        .await;
                 } else {
-                    // Fallback to full reload if cache not populated
+                    // Fallback to full reload if cache not populated (shouldn't happen normally)
                     self.registry.invalidate_cache(&analyzer_name);
                     self.reload_analyzer_stats(&analyzer_name).await;
                 }
             }
             WatcherEvent::FileDeleted(analyzer_name, path) => {
-                // Remove file from message cache
-                self.registry.remove_file_from_cache(&path);
-
-                // Invalidate data source cache to reflect deletion
-                self.registry.invalidate_cache(&analyzer_name);
-
-                // Reload stats (will use cached messages for other files)
-                self.reload_analyzer_stats(&analyzer_name).await;
-            }
-            WatcherEvent::DataChanged(analyzer_name) => {
-                // Full reload fallback
-                self.registry.invalidate_cache(&analyzer_name);
-                self.reload_analyzer_stats(&analyzer_name).await;
+                // Remove file from cache and get updated view
+                if let Some(updated_view) =
+                    self.registry.remove_file_from_cache(&analyzer_name, &path)
+                {
+                    self.apply_view_update(&analyzer_name, updated_view).await;
+                } else {
+                    // Fallback to full reload
+                    self.registry.invalidate_cache(&analyzer_name);
+                    self.reload_analyzer_stats(&analyzer_name).await;
+                }
             }
             WatcherEvent::Error(err) => {
                 eprintln!("File watcher error: {err}");
             }
         }
+
         Ok(())
     }
 
-    /// Helper to reload stats for a specific analyzer and broadcast updates
+    /// Helper to reload stats for a specific analyzer and broadcast updates (fallback)
     async fn reload_analyzer_stats(&mut self, analyzer_name: &str) {
         if let Some(analyzer) = self.registry.get_analyzer_by_display_name(analyzer_name) {
             // Full parse of all files for this analyzer
-            let result = analyzer.get_stats().await;
-            self.apply_stats_update(analyzer_name, result).await;
+            match analyzer.get_stats().await {
+                Ok(new_stats) => {
+                    let new_view = new_stats.into_view();
+                    self.apply_view_update(analyzer_name, new_view).await;
+                }
+                Err(e) => {
+                    eprintln!("Error reloading {analyzer_name} stats: {e}");
+                }
+            }
         }
     }
 
-    /// Helper to reload stats for a single file change (incremental, much faster)
-    async fn reload_single_file(&mut self, analyzer_name: &str, path: &Path) {
-        // Incremental reload - only reparse the changed file
-        let result = self.registry.reload_file(analyzer_name, path).await;
-        self.apply_stats_update(analyzer_name, result).await;
-    }
-
-    /// Apply a stats update result and broadcast to listeners
-    async fn apply_stats_update(
-        &mut self,
-        analyzer_name: &str,
-        result: anyhow::Result<crate::types::AgenticCodingToolStats>,
-    ) {
-        match result {
-            Ok(new_stats) => {
-                // Update the stats for this analyzer
-                let mut updated_analyzer_stats = self.current_stats.analyzer_stats.clone();
-
-                // Find and replace the stats for this analyzer
-                if let Some(pos) = updated_analyzer_stats
-                    .iter()
-                    .position(|s| s.analyzer_name == analyzer_name)
-                {
-                    updated_analyzer_stats[pos] = new_stats;
-                } else {
-                    // New analyzer data
-                    updated_analyzer_stats.push(new_stats);
-                }
-
-                self.current_stats = MultiAnalyzerStats {
-                    analyzer_stats: updated_analyzer_stats,
-                };
-
-                // Send the update
-                let _ = self.update_tx.send(self.current_stats.clone());
-
-                // Trigger auto-upload if enabled and debounce time has passed
-                self.trigger_auto_upload_if_enabled().await;
+    /// Helper to reload stats for a single file change using true incremental update
+    async fn reload_single_file_incremental(&mut self, analyzer_name: &str, path: &Path) {
+        // True incremental update - subtract old, add new
+        match self
+            .registry
+            .reload_file_incremental(analyzer_name, path)
+            .await
+        {
+            Ok(updated_view) => {
+                self.apply_view_update(analyzer_name, updated_view).await;
             }
             Err(e) => {
-                eprintln!("Error reloading {analyzer_name} stats: {e}");
+                eprintln!("Error in incremental reload for {analyzer_name}: {e}");
+                // Fallback to full reload on error
+                self.reload_analyzer_stats(analyzer_name).await;
             }
         }
+    }
+
+    /// Apply a view update and broadcast to listeners
+    async fn apply_view_update(
+        &mut self,
+        analyzer_name: &str,
+        new_view: crate::types::AnalyzerStatsView,
+    ) {
+        // Update the stats for this analyzer
+        let mut updated_views = self.current_stats.analyzer_stats.clone();
+
+        // Find and replace the stats for this analyzer
+        if let Some(pos) = updated_views
+            .iter()
+            .position(|s| s.analyzer_name == analyzer_name)
+        {
+            updated_views[pos] = new_view;
+        } else {
+            // New analyzer data
+            updated_views.push(new_view);
+        }
+
+        self.current_stats = MultiAnalyzerStatsView {
+            analyzer_stats: updated_views,
+        };
+
+        // Send the update
+        let _ = self.update_tx.send(self.current_stats.clone());
+
+        // Trigger auto-upload if enabled and debounce time has passed
+        self.trigger_auto_upload_if_enabled().await;
     }
 
     async fn trigger_auto_upload_if_enabled(&mut self) {
@@ -285,46 +284,13 @@ impl RealtimeStatsManager {
             return;
         }
 
-        // Check debounce timing
+        // Check debounce timing - skip actual upload for debounce period
+        // Upload will be triggered on next change after debounce expires
         let now = Instant::now();
         if let Some(last_time) = self.last_upload_time
             && now.duration_since(last_time) < self.upload_debounce
         {
-            // Schedule a delayed upload
-            let remaining_wait = self.upload_debounce - now.duration_since(last_time);
-            let stats = self.current_stats.clone();
-            let upload_status = self.upload_status.clone();
-            let upload_in_progress = self.upload_in_progress.clone();
-            let pending_upload = self.pending_upload.clone();
-
-            tokio::spawn(async move {
-                tokio::time::sleep(remaining_wait).await;
-
-                // Check if we should still upload
-                let should_upload = if let Ok(mut pending) = pending_upload.lock() {
-                    let was_pending = *pending;
-                    *pending = false;
-                    was_pending
-                } else {
-                    true
-                };
-
-                if should_upload {
-                    // Mark upload as in progress
-                    if let Ok(mut in_progress) = upload_in_progress.lock() {
-                        *in_progress = true;
-                    }
-
-                    upload::perform_background_upload(stats, upload_status, None).await;
-
-                    // Mark upload as complete
-                    if let Ok(mut in_progress) = upload_in_progress.lock() {
-                        *in_progress = false;
-                    }
-                }
-            });
-
-            // Mark that we have a pending upload scheduled
+            // Mark that we have pending changes to upload
             if let Ok(mut pending) = self.pending_upload.lock() {
                 *pending = true;
             }
@@ -333,39 +299,39 @@ impl RealtimeStatsManager {
 
         self.last_upload_time = Some(now);
 
-        // Mark upload as in progress
+        // Check if an upload is already in progress
         if let Ok(mut in_progress) = self.upload_in_progress.lock() {
+            if *in_progress {
+                // Mark that we have pending changes to upload
+                if let Ok(mut pending) = self.pending_upload.lock() {
+                    *pending = true;
+                }
+                return;
+            }
             *in_progress = true;
         }
 
-        // Clone necessary data for the async upload task
-        let stats = self.current_stats.clone();
+        // For upload, we need full stats (with messages)
+        let full_stats = match self.registry.load_all_stats().await {
+            Ok(stats) => stats,
+            Err(_) => {
+                if let Ok(mut in_progress) = self.upload_in_progress.lock() {
+                    *in_progress = false;
+                }
+                return;
+            }
+        };
+
         let upload_status = self.upload_status.clone();
         let upload_in_progress = self.upload_in_progress.clone();
-        let pending_upload = self.pending_upload.clone();
 
         // Spawn background upload task
         tokio::spawn(async move {
-            upload::perform_background_upload(stats.clone(), upload_status.clone(), None).await;
+            upload::perform_background_upload(full_stats, upload_status, None).await;
 
             // Mark upload as complete
             if let Ok(mut in_progress) = upload_in_progress.lock() {
                 *in_progress = false;
-            }
-
-            // Check if we need to upload again due to changes during the upload
-            let should_upload_again = if let Ok(mut pending) = pending_upload.lock() {
-                let was_pending = *pending;
-                *pending = false;
-                was_pending
-            } else {
-                false
-            };
-
-            if should_upload_again {
-                // Wait a short time before uploading again
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                upload::perform_background_upload(stats, upload_status, None).await;
             }
         });
     }
@@ -499,12 +465,15 @@ mod tests {
         );
 
         manager
-            .handle_watcher_event(WatcherEvent::DataChanged("test-analyzer".into()))
+            .handle_watcher_event(WatcherEvent::FileDeleted(
+                "test-analyzer".into(),
+                PathBuf::from("/fake/path.jsonl"),
+            ))
             .await
             .expect("handle_watcher_event");
 
         let updated = manager.get_stats_receiver().borrow().clone();
-        // After handling DataChanged, we should still have stats for the analyzer.
+        // After handling FileDeleted, we should still have stats for the analyzer.
         assert!(!updated.analyzer_stats.is_empty());
         assert_eq!(updated.analyzer_stats[0].analyzer_name, "test-analyzer");
 

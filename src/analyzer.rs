@@ -1,10 +1,15 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
+use futures::future::join_all;
 use jwalk::WalkDir;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use crate::types::{AgenticCodingToolStats, ConversationMessage};
+use crate::types::{
+    AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, FileContribution,
+};
+use crate::utils::hash_text;
 
 /// VSCode GUI forks that might have extensions installed
 const VSCODE_GUI_FORKS: &[&str] = &[
@@ -175,6 +180,12 @@ pub trait Analyzer: Send + Sync {
     fn get_watch_directories(&self) -> Vec<PathBuf> {
         Vec::new()
     }
+
+    /// Get lightweight view for TUI (default: compute full stats, convert to view).
+    /// Individual analyzers can override for efficiency if they can avoid loading messages.
+    async fn get_stats_view(&self) -> Result<crate::types::AnalyzerStatsView> {
+        self.get_stats().await.map(|s| s.into_view())
+    }
 }
 
 /// Registry for managing multiple analyzers
@@ -182,10 +193,13 @@ pub struct AnalyzerRegistry {
     analyzers: Vec<Box<dyn Analyzer>>,
     /// Cached data sources per analyzer (display_name -> sources)
     data_source_cache: DashMap<String, Vec<DataSource>>,
-    /// In-memory message cache for fast incremental updates during file watching.
-    /// Key: file path, Value: parsed messages from that file.
-    /// This allows us to reparse only changed files instead of all files.
-    message_cache: DashMap<PathBuf, Vec<crate::types::ConversationMessage>>,
+    /// Per-file contribution cache for true incremental updates.
+    /// Key: file path, Value: pre-computed aggregate contribution from that file.
+    /// Much smaller than storing raw messages (~1KB vs ~100KB per file).
+    file_contribution_cache: DashMap<PathBuf, FileContribution>,
+    /// Cached analyzer views for incremental updates.
+    /// Key: analyzer display name, Value: current aggregated view.
+    analyzer_views_cache: DashMap<String, AnalyzerStatsView>,
 }
 
 impl Default for AnalyzerRegistry {
@@ -200,7 +214,8 @@ impl AnalyzerRegistry {
         Self {
             analyzers: Vec::new(),
             data_source_cache: DashMap::new(),
-            message_cache: DashMap::new(),
+            file_contribution_cache: DashMap::new(),
+            analyzer_views_cache: DashMap::new(),
         }
     }
 
@@ -232,6 +247,8 @@ impl AnalyzerRegistry {
     /// Invalidate all caches
     pub fn invalidate_all_caches(&self) {
         self.data_source_cache.clear();
+        self.file_contribution_cache.clear();
+        self.analyzer_views_cache.clear();
     }
 
     /// Get available analyzers (those that are present on the system)
@@ -256,38 +273,27 @@ impl AnalyzerRegistry {
     }
 
     /// Load stats from all available analyzers in parallel.
-    /// Also populates the message cache for fast incremental updates during watching.
+    /// Used for uploads - returns full stats with messages.
     pub async fn load_all_stats(&self) -> Result<crate::types::MultiAnalyzerStats> {
-        use futures::future::join_all;
-
         let available_analyzers = self.available_analyzers();
 
         // Create futures for all analyzers - they'll run concurrently
         let futures: Vec<_> = available_analyzers
             .into_iter()
-            .map(|analyzer| async move {
-                let name = analyzer.display_name().to_string();
-                let sources = analyzer.discover_data_sources().ok();
-                let result = analyzer.get_stats().await;
-                (name, sources, result)
-            })
+            .map(|analyzer| async move { analyzer.get_stats().await })
             .collect();
 
         // Run all analyzers in parallel
         let results = join_all(futures).await;
 
         let mut all_stats = Vec::new();
-        for (name, sources, result) in results {
+        for result in results {
             match result {
                 Ok(stats) => {
-                    // Populate message cache: store messages keyed by file path
-                    if let Some(sources) = sources {
-                        self.populate_message_cache(&name, &sources, &stats.messages);
-                    }
                     all_stats.push(stats);
                 }
                 Err(e) => {
-                    eprintln!("⚠️  Error analyzing {} data: {}", name, e);
+                    eprintln!("⚠️  Error analyzing data: {}", e);
                 }
             }
         }
@@ -297,43 +303,121 @@ impl AnalyzerRegistry {
         })
     }
 
-    /// Populate the message cache from parsed messages.
-    /// Groups messages by their source file using conversation_hash matching.
-    fn populate_message_cache(
+    /// Load view-only stats using a temporary thread pool. Ran once at startup.
+    /// The pool is dropped after loading, releasing all thread-local memory.
+    /// Populates file contribution cache for true incremental updates.
+    pub fn load_all_stats_views_parallel(
         &self,
-        _analyzer_name: &str,
-        sources: &[DataSource],
-        messages: &[crate::types::ConversationMessage],
-    ) {
-        use crate::utils::hash_text;
+        num_threads: usize,
+    ) -> Result<crate::types::MultiAnalyzerStatsView> {
+        // Create the temporary pool
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to create thread pool: {}", e))?;
 
+        // Collect analyzer info
+        let available_analyzers = self.available_analyzers();
+        let analyzer_data: Vec<_> = available_analyzers
+            .iter()
+            .map(|a| {
+                let name = a.display_name().to_string();
+                let sources = self.get_cached_data_sources(*a).unwrap_or_default();
+                (name, sources)
+            })
+            .collect();
+
+        // Run all analyzer parsing inside the temp pool
+        // All into_par_iter() calls will use this pool
+        let all_stats: Vec<Result<AgenticCodingToolStats>> = pool.install(|| {
+            // Create a runtime for async operations inside the pool
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create runtime");
+
+            available_analyzers
+                .into_iter()
+                .map(|analyzer| rt.block_on(analyzer.get_stats()))
+                .collect()
+        });
+
+        // Pool is dropped here, releasing all thread memory
+        drop(pool);
+
+        // Build views from results
+        let mut all_views = Vec::new();
+        for ((name, sources), result) in analyzer_data.into_iter().zip(all_stats.into_iter()) {
+            match result {
+                Ok(stats) => {
+                    // Populate file contribution cache for incremental updates
+                    self.populate_file_contribution_cache(&name, &sources, &stats.messages);
+                    // Convert to view (drops messages)
+                    let view = stats.into_view();
+                    // Cache the view for incremental updates
+                    self.analyzer_views_cache.insert(name, view.clone());
+                    all_views.push(view);
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Error analyzing {} data: {}", name, e);
+                }
+            }
+        }
+
+        Ok(crate::types::MultiAnalyzerStatsView {
+            analyzer_stats: all_views,
+        })
+    }
+
+    /// Populate the file contribution cache from parsed messages.
+    /// Groups messages by their source file, computes per-file aggregates.
+    fn populate_file_contribution_cache(
+        &self,
+        analyzer_name: &str,
+        sources: &[DataSource],
+        messages: &[ConversationMessage],
+    ) {
         // Create a map of conversation_hash -> file_path
-        let hash_to_path: std::collections::HashMap<String, PathBuf> = sources
+        let hash_to_path: HashMap<String, PathBuf> = sources
             .iter()
             .map(|s| (hash_text(&s.path.to_string_lossy()), s.path.clone()))
             .collect();
 
         // Group messages by their source file
+        let mut file_messages: HashMap<PathBuf, Vec<ConversationMessage>> = HashMap::new();
         for msg in messages {
             if let Some(path) = hash_to_path.get(&msg.conversation_hash) {
-                self.message_cache
+                file_messages
                     .entry(path.clone())
                     .or_default()
                     .push(msg.clone());
             }
         }
+
+        // Compute and cache contribution for each file
+        for (path, msgs) in file_messages {
+            let contribution = FileContribution::from_messages(&msgs, analyzer_name);
+            self.file_contribution_cache.insert(path, contribution);
+        }
     }
 
-    /// Reload stats for a single file change (incremental update).
-    /// Much faster than reparsing all files - only reparses the changed file.
-    pub async fn reload_file(
+    /// Reload stats for a single file change using true incremental update.
+    /// O(1) update - only reparses the changed file, subtracts old contribution,
+    /// adds new contribution. No full reload needed.
+    pub async fn reload_file_incremental(
         &self,
         analyzer_name: &str,
         changed_path: &std::path::Path,
-    ) -> Result<crate::types::AgenticCodingToolStats> {
+    ) -> Result<AnalyzerStatsView> {
         let analyzer = self
             .get_analyzer_by_display_name(analyzer_name)
             .ok_or_else(|| anyhow::anyhow!("Analyzer not found: {}", analyzer_name))?;
+
+        // Get the old contribution (if any)
+        let old_contribution = self
+            .file_contribution_cache
+            .get(changed_path)
+            .map(|r| r.clone());
 
         // Parse just the changed file
         let source = DataSource {
@@ -341,66 +425,73 @@ impl AnalyzerRegistry {
         };
         let new_messages = analyzer.parse_conversations(vec![source]).await?;
 
-        // Update the message cache for this file
-        self.message_cache
-            .insert(changed_path.to_path_buf(), new_messages);
+        // Compute new contribution
+        let new_contribution = FileContribution::from_messages(&new_messages, analyzer_name);
 
-        // Rebuild stats from all cached messages for this analyzer
-        self.rebuild_stats_from_cache(analyzer_name, analyzer).await
+        // Update the contribution cache
+        self.file_contribution_cache
+            .insert(changed_path.to_path_buf(), new_contribution.clone());
+
+        // Get or create the cached view for this analyzer
+        let mut view = self
+            .analyzer_views_cache
+            .get(analyzer_name)
+            .map(|r| r.clone())
+            .unwrap_or_else(|| AnalyzerStatsView {
+                daily_stats: BTreeMap::new(),
+                session_aggregates: Vec::new(),
+                num_conversations: 0,
+                analyzer_name: analyzer_name.to_string(),
+            });
+
+        // Subtract old contribution (if any)
+        if let Some(old) = old_contribution {
+            view.subtract_contribution(&old);
+        }
+
+        // Add new contribution
+        view.add_contribution(&new_contribution);
+
+        // Update the view cache
+        self.analyzer_views_cache
+            .insert(analyzer_name.to_string(), view.clone());
+
+        Ok(view)
     }
 
-    /// Remove a file from the message cache (for file deletion events).
-    pub fn remove_file_from_cache(&self, path: &std::path::Path) {
-        self.message_cache.remove(path);
-    }
-
-    /// Rebuild stats from the message cache for a specific analyzer.
-    async fn rebuild_stats_from_cache(
+    /// Remove a file from the cache and update the view (for file deletion events).
+    /// Returns the updated view.
+    pub fn remove_file_from_cache(
         &self,
         analyzer_name: &str,
-        analyzer: &dyn Analyzer,
-    ) -> Result<crate::types::AgenticCodingToolStats> {
-        // Get all sources for this analyzer
-        let sources = self.get_cached_data_sources(analyzer)?;
+        path: &std::path::Path,
+    ) -> Option<AnalyzerStatsView> {
+        // Get the old contribution
+        let old_contribution = self.file_contribution_cache.remove(path);
 
-        // Collect all cached messages for files belonging to this analyzer
-        let mut all_messages = Vec::new();
-        for source in &sources {
-            if let Some(messages) = self.message_cache.get(&source.path) {
-                all_messages.extend(messages.clone());
+        if let Some((_, old)) = old_contribution {
+            // Update the cached view
+            if let Some(mut view) = self.analyzer_views_cache.get_mut(analyzer_name) {
+                view.subtract_contribution(&old);
+                return Some(view.clone());
             }
         }
 
-        // Deduplicate messages
-        let messages = crate::analyzers::deduplicate_messages(all_messages);
-
-        // Aggregate by date
-        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
-        daily_stats.retain(|date, _| date != "unknown");
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(crate::types::AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: analyzer_name.to_string(),
-        })
+        self.analyzer_views_cache
+            .get(analyzer_name)
+            .map(|r| r.clone())
     }
 
-    /// Check if the message cache is populated for an analyzer.
-    pub fn has_cached_messages(&self, analyzer_name: &str) -> bool {
-        if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name)
-            && let Ok(sources) = self.get_cached_data_sources(analyzer)
-        {
-            return sources
-                .iter()
-                .any(|s| self.message_cache.contains_key(&s.path));
-        }
-        false
+    /// Check if the contribution cache is populated for an analyzer.
+    pub fn has_cached_contributions(&self, analyzer_name: &str) -> bool {
+        self.analyzer_views_cache.contains_key(analyzer_name)
+    }
+
+    /// Get the cached view for an analyzer.
+    pub fn get_cached_view(&self, analyzer_name: &str) -> Option<AnalyzerStatsView> {
+        self.analyzer_views_cache
+            .get(analyzer_name)
+            .map(|r| r.clone())
     }
 
     /// Get a mapping of data directories to analyzer names for file watching.
