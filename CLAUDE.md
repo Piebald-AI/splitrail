@@ -8,7 +8,6 @@ Splitrail is a high-performance, cross-platform usage tracker for AI coding assi
 
 **Key Technologies:**
 - Rust (edition 2024) with async/await (Tokio)
-- Memory-mapped persistent caching (rkyv, memmap2) for fast incremental parsing
 - Terminal UI (ratatui + crossterm)
 - MCP (Model Context Protocol) server support
 
@@ -51,7 +50,6 @@ The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trai
 1. **AnalyzerRegistry** (`src/analyzer.rs`) - Central registry managing all analyzers
    - Discovers data sources across platforms (macOS, Linux, Windows)
    - Coordinates parallel loading of analyzer stats
-   - Manages two-tier caching system (see below)
 
 2. **Individual Analyzers** (`src/analyzers/`) - Platform-specific implementations
    - `claude_code.rs` - Claude Code analyzer (largest, most complex)
@@ -63,29 +61,6 @@ The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trai
    - Discovers data sources via glob patterns or VSCode extension paths
    - Parses conversations from JSON/JSONL files
    - Normalizes to `ConversationMessage` format
-   - Implements optional incremental caching via `parse_single_file()`
-
-### Two-Tier Caching System
-
-**Critical for performance** - the caching system enables instant startup and incremental updates:
-
-1. **Per-File Cache** (`src/cache/mmap_repository.rs`)
-   - Memory-mapped rkyv archive for zero-copy access
-   - Stores metadata + daily stats per file
-   - Separate message storage (loaded lazily)
-   - Detects file changes via size/mtime comparison
-   - Supports delta parsing for append-only JSONL files
-
-2. **Snapshot Cache** (`src/cache/mod.rs::load_snapshot_hot_only()`)
-   - Caches final deduplicated result per analyzer
-   - "Hot" snapshot: lightweight stats for TUI display
-   - "Cold" snapshot: full messages for session details
-   - Fingerprint-based invalidation (hashes all source file paths + metadata)
-
-**Cache Flow:**
-- **Warm start**: Fingerprint matches → load hot snapshot → instant display
-- **Incremental**: Files changed → parse only changed files → merge with cached messages → rebuild stats
-- **Cold start**: No cache → parse all files → save snapshot for next time
 
 ### Data Flow
 
@@ -115,8 +90,7 @@ The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trai
 
 **FileWatcher** (`src/watcher.rs`) provides live updates:
 - Watches analyzer data directories using `notify` crate
-- Invalidates cache entries on file changes
-- Triggers incremental re-parsing
+- Triggers incremental re-parsing on file changes
 - Updates TUI in real-time via channels
 
 **RealtimeStatsManager** coordinates:
@@ -133,8 +107,11 @@ cargo run -- mcp
 
 Provides tools for:
 - `get_daily_stats` - Query usage statistics with filtering
-- `get_conversation_messages` - Retrieve message details
-- `get_model_breakdown` - Analyze model usage distribution
+- `get_model_usage` - Analyze model usage distribution
+- `get_cost_breakdown` - Get cost breakdown over a date range
+- `get_file_operations` - Get file operation statistics
+- `compare_tools` - Compare usage across different AI coding tools
+- `list_analyzers` - List available analyzers
 
 Resources:
 - `splitrail://summary` - Daily summaries across all dates
@@ -145,7 +122,6 @@ Resources:
 ### Test Organization
 - **Unit tests**: Inline with source (`#[cfg(test)] mod tests`)
 - **Integration tests**: `src/analyzers/tests/` for analyzer-specific parsing tests
-- **Large test files**: Comprehensive tests in cache module for concurrency, persistence
 
 ### Running Tests
 ```bash
@@ -155,11 +131,8 @@ cargo test
 # Specific analyzer
 cargo test claude_code
 
-# Cache tests (many edge cases covered here)
-cargo test cache
-
 # Single test
-cargo test test_file_metadata_is_stale
+cargo test test_name
 ```
 
 ### Test Data
@@ -184,13 +157,6 @@ Most analyzers use real-world JSON fixtures in test modules to verify parsing lo
 4. Register in `src/main.rs::create_analyzer_registry()`
 5. Add to `Application` enum in `src/types.rs`
 
-### Enabling Incremental Caching for an Analyzer
-
-1. Implement `parse_single_file()` to parse one file
-2. Return `supports_caching() -> true`
-3. For JSONL files, implement `parse_single_file_incremental()` and return `supports_delta_parsing() -> true`
-4. Include pre-aggregated `daily_contributions` in `FileCacheEntry`
-
 ### Pricing Model Updates
 
 Token pricing is in `src/models.rs` using compile-time `phf` maps:
@@ -200,12 +166,15 @@ Token pricing is in `src/models.rs` using compile-time `phf` maps:
 
 ## Configuration
 
-User config stored at `~/.splitrail/config.toml`:
+User config stored at `~/.splitrail.toml`:
 ```toml
-[upload]
+[server]
+url = "https://splitrail.dev"
 api_token = "..."
-server_url = "https://splitrail.dev/api"
+
+[upload]
 auto_upload = false
+upload_today_only = false
 
 [formatting]
 number_comma = false
@@ -214,18 +183,11 @@ locale = "en"
 decimal_places = 2
 ```
 
-Cache stored at:
-- `~/.splitrail/cache.meta` - Memory-mapped metadata index
-- `~/.splitrail/snapshots/*.hot` - Hot snapshot cache
-- `~/.splitrail/snapshots/*.cold` - Cold message cache
-
 ## Performance Considerations
 
 1. **Parallel Loading**: Analyzers load in parallel via `futures::join_all()`
 2. **Rayon for Parsing**: Use `.par_iter()` when parsing multiple files
-3. **Zero-Copy Cache**: rkyv enables instant deserialization from mmap
-4. **Delta Parsing**: JSONL analyzers parse only new lines since last offset
-5. **Lazy Message Loading**: TUI loads messages on-demand for session view
+3. **Lazy Message Loading**: TUI loads messages on-demand for session view
 
 ## Code Style
 
