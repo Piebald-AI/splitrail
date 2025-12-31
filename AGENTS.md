@@ -27,10 +27,11 @@ Pluggable architecture with the `Analyzer` trait. Registry in `src/analyzer.rs`,
 
 Run after code changes:
 ```bash
-cargo build --release --quiet
-cargo test --quiet
-cargo clippy --quiet -- -D warnings
-cargo fmt --check
+cargo build --all-features --all-targets --quiet
+cargo test --all-features --quiet
+cargo clippy --all-features --quiet -- -D warnings
+cargo doc --all-features --quiet
+cargo fmt --all --quiet
 ```
 
 # Additional Context
