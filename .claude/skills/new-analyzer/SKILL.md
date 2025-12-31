@@ -1,3 +1,8 @@
+---
+name: new-analyzer
+description: Guide for adding a new AI coding agent analyzer to Splitrail. Use when implementing support for a new tool like Copilot, Cline, or similar.
+---
+
 # Adding a New Analyzer
 
 Splitrail tracks token usage from AI coding agents. Each agent has its own "analyzer" that discovers and parses its data files.

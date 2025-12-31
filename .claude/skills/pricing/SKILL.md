@@ -1,3 +1,8 @@
+---
+name: pricing
+description: Guide for updating model pricing in Splitrail. Use when adding new AI model costs or updating existing pricing data.
+---
+
 # Pricing Model Updates
 
 Token pricing is defined in `src/models.rs` using compile-time `phf` (perfect hash function) maps for fast lookups.

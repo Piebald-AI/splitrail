@@ -1,3 +1,8 @@
+---
+name: types
+description: Reference for Splitrail's core data types. Use when working with ConversationMessage, Stats, DailyStats, or other type definitions.
+---
+
 # Key Types
 
 Read `src/types.rs` for full definitions.

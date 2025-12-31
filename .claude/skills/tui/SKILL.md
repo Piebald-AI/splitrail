@@ -1,3 +1,8 @@
+---
+name: tui
+description: Guide for Splitrail's terminal UI and file watching. Use when modifying the TUI, stats display, or real-time update logic.
+---
+
 # Real-Time Monitoring & TUI
 
 Splitrail provides a terminal UI with live updates when analyzer data files change.

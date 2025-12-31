@@ -1,3 +1,8 @@
+---
+name: performance
+description: Performance optimization guidelines for Splitrail. Use when optimizing parsing, reducing memory usage, or improving throughput.
+---
+
 # Performance Considerations
 
 ## Techniques Used

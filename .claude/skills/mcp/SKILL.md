@@ -1,3 +1,8 @@
+---
+name: mcp
+description: Guide for working with Splitrail's MCP server. Use when adding tools, resources, or modifying the MCP interface.
+---
+
 # MCP Server
 
 Splitrail can run as an MCP server, allowing AI assistants to query usage statistics programmatically.
