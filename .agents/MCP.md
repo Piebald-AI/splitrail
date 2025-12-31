@@ -28,22 +28,10 @@ cargo run -- mcp
 
 ## Adding a New Tool
 
-1. Define the tool handler in `src/mcp/server.rs`:
-
-```rust
-#[tool(
-    name = "your_tool_name",
-    description = "What this tool does"
-)]
-async fn your_tool(
-    &self,
-    #[arg(description = "Parameter description")] param: String,
-) -> Result<YourResponse, McpError> {
-    // Implementation
-}
-```
-
+1. Define the tool handler in `src/mcp/server.rs` using the `#[tool]` macro
 2. Add request/response types to `src/mcp/types.rs` if needed
+
+See existing tools in `src/mcp/server.rs` for the pattern.
 
 ## Adding a New Resource
 

@@ -1,121 +1,24 @@
 # Key Types
 
-Core data structures in `src/types.rs`.
+Read `src/types.rs` for full definitions.
 
-## ConversationMessage
+## Core Types
 
-The normalized message format across all analyzers.
+- **ConversationMessage** - Normalized message format across all analyzers. Contains application source, timestamp, hashes for deduplication, model info, token/cost stats, and role.
 
-```rust
-pub struct ConversationMessage {
-    pub application: Application,       // Which AI tool (ClaudeCode, Copilot, etc.)
-    pub date: DateTime<Utc>,            // Message timestamp
-    pub project_hash: String,           // Hash of project/workspace path
-    pub conversation_hash: String,      // Hash of session/conversation ID
-    pub local_hash: Option<String>,     // Unique message ID within the agent
-    pub global_hash: String,            // Unique ID across all Splitrail data (for dedup)
-    pub model: Option<String>,          // Model name (None for user messages)
-    pub stats: Stats,                   // Token counts, costs, tool calls
-    pub role: MessageRole,              // User or Assistant
-    pub uuid: Option<String>,           // Unique identifier if available
-    pub session_name: Option<String>,   // Human-readable session title
-}
-```
+- **Stats** - Comprehensive usage metrics for a single message including token counts, costs, file operations, todo tracking, and composition stats by file type.
 
-### Hashing Strategy
+- **DailyStats** - Pre-aggregated stats per date with message counts, conversation counts, model breakdown, and embedded Stats.
 
-- `local_hash`: Used for deduplication within a single analyzer
-- `global_hash`: Used for deduplication on upload to Splitrail Cloud
+- **Application** - Enum identifying which AI coding tool a message came from.
 
-## Stats
+- **MessageRole** - User or Assistant.
 
-Comprehensive usage metrics for a single message.
+## Hashing Strategy
 
-```rust
-pub struct Stats {
-    // Token and cost stats
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub reasoning_tokens: u64,
-    pub cache_creation_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cached_tokens: u64,
-    pub cost: f64,
-    pub tool_calls: u32,
-
-    // File operation stats
-    pub terminal_commands: u64,
-    pub file_searches: u64,
-    pub file_content_searches: u64,
-    pub files_read: u64,
-    pub files_added: u64,
-    pub files_edited: u64,
-    pub files_deleted: u64,
-    pub lines_read: u64,
-    pub lines_added: u64,
-    pub lines_edited: u64,
-    pub lines_deleted: u64,
-    pub bytes_read: u64,
-    pub bytes_added: u64,
-    pub bytes_edited: u64,
-    pub bytes_deleted: u64,
-
-    // Todo stats
-    pub todos_created: u64,
-    pub todos_completed: u64,
-    pub todos_in_progress: u64,
-    pub todo_writes: u64,
-    pub todo_reads: u64,
-
-    // Composition stats (lines by file type)
-    pub code_lines: u64,
-    pub docs_lines: u64,
-    pub data_lines: u64,
-    pub media_lines: u64,
-    pub config_lines: u64,
-    pub other_lines: u64,
-}
-```
-
-## DailyStats
-
-Pre-aggregated stats per date.
-
-```rust
-pub struct DailyStats {
-    pub date: String,
-    pub user_messages: u32,
-    pub ai_messages: u32,
-    pub conversations: u32,
-    pub models: BTreeMap<String, u32>,
-    pub stats: Stats,  // Embedded aggregate stats
-}
-```
-
-## Application Enum
-
-Identifies which AI coding tool a message came from:
-
-```rust
-pub enum Application {
-    ClaudeCode,
-    Copilot,
-    Cline,
-    RooCode,
-    KiloCode,
-    CodexCli,
-    GeminiCli,
-    QwenCode,
-    OpenCode,
-    PiAgent,
-    Piebald,
-}
-```
+- `local_hash`: Deduplication within a single analyzer
+- `global_hash`: Deduplication on upload to Splitrail Cloud
 
 ## Aggregation
 
-Use `crate::utils::aggregate_by_date()` to group messages into `DailyStats`:
-
-```rust
-let daily_stats: BTreeMap<String, DailyStats> = utils::aggregate_by_date(&messages);
-```
+Use `crate::utils::aggregate_by_date()` to group messages into daily stats. See `src/utils.rs`.

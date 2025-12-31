@@ -4,32 +4,17 @@ Splitrail is a high-performance, cross-platform usage tracker for AI coding assi
 
 # Architecture
 
-## Core Analyzer System
+## Analyzer System
 
-The codebase uses a **pluggable analyzer architecture** with the `Analyzer` trait as the foundation:
-
-1. **AnalyzerRegistry** (`src/analyzer.rs`) - Central registry managing all analyzers
-   - Discovers data sources across platforms (macOS, Linux, Windows)
-   - Coordinates parallel loading of analyzer stats
-
-2. **Individual Analyzers** (`src/analyzers/`) - Platform-specific implementations
-   - `claude_code.rs` - Claude Code analyzer (largest, most complex)
-   - `copilot.rs` - GitHub Copilot
-   - `cline.rs`, `roo_code.rs`, `kilo_code.rs` - VSCode extensions
-   - `codex_cli.rs`, `gemini_cli.rs`, `qwen_code.rs`, `opencode.rs`, `pi_agent.rs` - CLI tools
-
-   Each analyzer:
-   - Discovers data sources via glob patterns or VSCode extension paths
-   - Parses conversations from JSON/JSONL files
-   - Normalizes to `ConversationMessage` format
+Pluggable architecture with the `Analyzer` trait. Registry in `src/analyzer.rs`, individual analyzers in `src/analyzers/`. Each analyzer discovers data sources, parses conversations, and normalizes to a common format.
 
 ## Data Flow
 
-1. **Discovery**: Analyzers find data files using platform-specific paths
-2. **Parsing**: Parse JSON/JSONL files into `ConversationMessage` structs
-3. **Deduplication**: Hash-based dedup using `global_hash` field (critical for accuracy)
-4. **Aggregation**: Group messages by date, compute token counts, costs, file ops
-5. **Display**: TUI renders daily stats + real-time updates via file watcher
+1. **Discovery**: Analyzers find data files using platform-specific paths (`src/analyzers/`)
+2. **Parsing**: Parse JSON/JSONL into normalized messages (`src/types.rs`)
+3. **Deduplication**: Hash-based dedup using global hash field
+4. **Aggregation**: Group by date, compute token counts, costs, file ops (`src/utils.rs`)
+5. **Display**: TUI renders daily stats + real-time updates (`src/tui.rs`, `src/watcher.rs`)
 
 # Code Style
 
@@ -53,7 +38,6 @@ cargo fmt --check
 Read these files when working on specific areas:
 
 - **Adding a new analyzer?** Read `.agents/NEW_ANALYZER.md`
-- **Working on tests?** Read `.agents/TESTING.md`
 - **Working on the MCP server?** Read `.agents/MCP.md`
 - **Updating model pricing?** Read `.agents/PRICING.md`
 - **Working with core types?** Read `.agents/TYPES.md`
