@@ -364,6 +364,7 @@ impl ServerHandler for SplitrailMcpServer {
                 .no_annotation(),
             ],
             next_cursor: None,
+            meta: None,
         })
     }
 

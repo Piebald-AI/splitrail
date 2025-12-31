@@ -20,7 +20,7 @@ use logic::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
@@ -183,6 +183,7 @@ async fn run_app_for_tests<B, FPoll, FRead>(
 ) -> Result<TestRunResult>
 where
     B: ratatui::backend::Backend,
+    <B as ratatui::backend::Backend>::Error: Send + Sync + 'static,
     FPoll: FnMut(Duration) -> std::io::Result<bool>,
     FRead: FnMut() -> std::io::Result<Event>,
 {
