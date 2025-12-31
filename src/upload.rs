@@ -13,7 +13,7 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 pub fn get_http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .danger_accept_invalid_certs(true)
             .build()
             .expect("Failed to create HTTP client")
