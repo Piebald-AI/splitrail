@@ -4,20 +4,22 @@ use crate::tui::UploadStatus;
 use crate::types::{ConversationMessage, ErrorResponse, MultiAnalyzerStats, UploadResponse};
 use crate::utils;
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-fn upload_log_path() -> &'static str {
-    "/tmp/SPLITRAIL.log"
+fn upload_log_path() -> PathBuf {
+    std::env::temp_dir().join("SPLITRAIL.log")
 }
 
 fn append_upload_log(line: &str) {
     use std::io::Write;
 
+    let log_path = upload_log_path();
     let mut file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(upload_log_path())
+        .open(&log_path)
     {
         Ok(f) => f,
         Err(_) => return,
@@ -37,7 +39,6 @@ fn upload_debug_log(line: impl Into<String>) {
     eprintln!("{line}");
     append_upload_log(&line);
 }
-
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -78,7 +79,11 @@ where
             config.server.url, config.upload.retry_attempts
         );
         let header3 = "[splitrail upload] Legend: prep_ms=serialize_json wait_ms=server+network parse_ms=decode_response";
-        let header4 = format!("[splitrail upload] writing logs to {}", upload_log_path());
+        let log_path_display = upload_log_path();
+        let header4 = format!(
+            "[splitrail upload] writing logs to {}",
+            log_path_display.display()
+        );
 
         utils::warn_once(header1.to_string());
         utils::warn_once(header2.clone());
@@ -150,7 +155,7 @@ where
                             response.status(),
                             prep_ms,
                             wait_ms,
-                            upload_log_path(),
+                            upload_log_path().display(),
                         ));
                     }
 
@@ -168,7 +173,7 @@ where
                                 chunks.len(),
                                 upload_response.success,
                                 parse_ms,
-                                upload_log_path(),
+                                upload_log_path().display(),
                             ));
                         }
 
