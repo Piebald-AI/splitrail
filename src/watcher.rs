@@ -237,9 +237,9 @@ impl RealtimeStatsManager {
     async fn apply_view_update(
         &mut self,
         analyzer_name: &str,
-        new_view: crate::types::AnalyzerStatsView,
+        new_view: Arc<crate::types::AnalyzerStatsView>,
     ) {
-        // Update the stats for this analyzer
+        // Update the stats for this analyzer - cloning Vec<Arc<_>> is cheap (just Arc pointer copies)
         let mut updated_views = self.current_stats.analyzer_stats.clone();
 
         // Find and replace the stats for this analyzer
@@ -257,7 +257,7 @@ impl RealtimeStatsManager {
             analyzer_stats: updated_views,
         };
 
-        // Send the update
+        // Send the update - cloning MultiAnalyzerStatsView is cheap (just Arc pointer copies)
         let _ = self.update_tx.send(self.current_stats.clone());
 
         // Trigger auto-upload if enabled and debounce time has passed

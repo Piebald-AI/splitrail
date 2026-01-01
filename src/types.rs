@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -293,7 +294,7 @@ pub struct MultiAnalyzerStats {
 }
 
 /// Lightweight view for TUI - NO raw messages, only pre-computed aggregates.
-/// Reduces memory from ~3.5MB to ~70KB per analyzer.
+/// Saves a lot of memory by not storing each message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyzerStatsView {
     pub daily_stats: BTreeMap<String, DailyStats>,
@@ -303,23 +304,25 @@ pub struct AnalyzerStatsView {
 }
 
 /// Container for TUI display - view-only stats without messages.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Uses Arc to share AnalyzerStatsView across caches and channels without cloning.
+#[derive(Debug, Clone)]
 pub struct MultiAnalyzerStatsView {
-    pub analyzer_stats: Vec<AnalyzerStatsView>,
+    pub analyzer_stats: Vec<Arc<AnalyzerStatsView>>,
 }
 
 impl AgenticCodingToolStats {
     /// Convert full stats to lightweight view, consuming self.
     /// Messages are dropped, session_aggregates are pre-computed.
-    pub fn into_view(self) -> AnalyzerStatsView {
+    /// Returns Arc for efficient sharing across caches.
+    pub fn into_view(self) -> Arc<AnalyzerStatsView> {
         let session_aggregates =
             aggregate_sessions_from_messages(&self.messages, &self.analyzer_name);
-        AnalyzerStatsView {
+        Arc::new(AnalyzerStatsView {
             daily_stats: self.daily_stats,
             session_aggregates,
             num_conversations: self.num_conversations,
             analyzer_name: self.analyzer_name,
-        }
+        })
     }
 }
 

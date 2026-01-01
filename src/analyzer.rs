@@ -5,6 +5,7 @@ use futures::future::join_all;
 use jwalk::WalkDir;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::types::{
@@ -232,8 +233,8 @@ pub struct AnalyzerRegistry {
     /// Using hash avoids allocations during incremental updates.
     file_contribution_cache: DashMap<PathHash, FileContribution>,
     /// Cached analyzer views for incremental updates.
-    /// Key: analyzer display name, Value: current aggregated view.
-    analyzer_views_cache: DashMap<String, AnalyzerStatsView>,
+    /// Key: analyzer display name, Value: current aggregated view (Arc-wrapped for sharing).
+    analyzer_views_cache: DashMap<String, Arc<AnalyzerStatsView>>,
 }
 
 impl Default for AnalyzerRegistry {
@@ -435,7 +436,7 @@ impl AnalyzerRegistry {
         &self,
         analyzer_name: &str,
         changed_path: &std::path::Path,
-    ) -> Result<AnalyzerStatsView> {
+    ) -> Result<Arc<AnalyzerStatsView>> {
         let analyzer = self
             .get_analyzer_by_display_name(analyzer_name)
             .ok_or_else(|| anyhow::anyhow!("Analyzer not found: {}", analyzer_name))?;
@@ -463,16 +464,22 @@ impl AnalyzerRegistry {
             .insert(path_hash, new_contribution.clone());
 
         // Get or create the cached view for this analyzer
-        let mut view = self
+        let mut arc_view = self
             .analyzer_views_cache
             .get(analyzer_name)
             .map(|r| r.clone())
-            .unwrap_or_else(|| AnalyzerStatsView {
-                daily_stats: BTreeMap::new(),
-                session_aggregates: Vec::new(),
-                num_conversations: 0,
-                analyzer_name: analyzer_name.to_string(),
+            .unwrap_or_else(|| {
+                Arc::new(AnalyzerStatsView {
+                    daily_stats: BTreeMap::new(),
+                    session_aggregates: Vec::new(),
+                    num_conversations: 0,
+                    analyzer_name: analyzer_name.to_string(),
+                })
             });
+
+        // Use Arc::make_mut for copy-on-write: mutates in-place if we have the only
+        // reference, otherwise clones first. This avoids unnecessary cloning.
+        let view = Arc::make_mut(&mut arc_view);
 
         // Subtract old contribution (if any)
         if let Some(old) = old_contribution {
@@ -484,9 +491,9 @@ impl AnalyzerRegistry {
 
         // Update the view cache
         self.analyzer_views_cache
-            .insert(analyzer_name.to_string(), view.clone());
+            .insert(analyzer_name.to_string(), arc_view.clone());
 
-        Ok(view)
+        Ok(arc_view)
     }
 
     /// Remove a file from the cache and update the view (for file deletion events).
@@ -495,16 +502,21 @@ impl AnalyzerRegistry {
         &self,
         analyzer_name: &str,
         path: &std::path::Path,
-    ) -> Option<AnalyzerStatsView> {
+    ) -> Option<Arc<AnalyzerStatsView>> {
         // Hash the path for lookup (no allocation)
         let path_hash = PathHash::new(path);
         let old_contribution = self.file_contribution_cache.remove(&path_hash);
 
         if let Some((_, old)) = old_contribution {
-            // Update the cached view
-            if let Some(mut view) = self.analyzer_views_cache.get_mut(analyzer_name) {
+            // Update the cached view using Arc::make_mut for copy-on-write
+            if let Some(existing) = self.analyzer_views_cache.get(analyzer_name) {
+                let mut arc_view = existing.clone();
+                drop(existing); // Release the read lock before modifying
+                let view = Arc::make_mut(&mut arc_view);
                 view.subtract_contribution(&old);
-                return Some(view.clone());
+                self.analyzer_views_cache
+                    .insert(analyzer_name.to_string(), arc_view.clone());
+                return Some(arc_view);
             }
         }
 
@@ -519,7 +531,7 @@ impl AnalyzerRegistry {
     }
 
     /// Get the cached view for an analyzer.
-    pub fn get_cached_view(&self, analyzer_name: &str) -> Option<AnalyzerStatsView> {
+    pub fn get_cached_view(&self, analyzer_name: &str) -> Option<Arc<AnalyzerStatsView>> {
         self.analyzer_views_cache
             .get(analyzer_name)
             .map(|r| r.clone())

@@ -27,9 +27,7 @@ impl CodexCliAnalyzer {
     }
 
     fn walk_data_dir() -> Option<WalkDir> {
-        Self::data_dir()
-            .filter(|d| d.is_dir())
-            .map(WalkDir::new)
+        Self::data_dir().filter(|d| d.is_dir()).map(WalkDir::new)
     }
 }
 
@@ -56,8 +54,7 @@ impl Analyzer for CodexCliAnalyzer {
             .flat_map(|w| w.into_iter())
             .filter_map(|e| e.ok())
             .filter(|e| {
-                e.file_type().is_file()
-                    && e.path().extension().is_some_and(|ext| ext == "jsonl")
+                e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "jsonl")
             })
             .map(|e| DataSource { path: e.path() })
             .collect();
@@ -71,8 +68,7 @@ impl Analyzer for CodexCliAnalyzer {
             .flat_map(|w| w.into_iter())
             .filter_map(|e| e.ok())
             .any(|e| {
-                e.file_type().is_file()
-                    && e.path().extension().is_some_and(|ext| ext == "jsonl")
+                e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "jsonl")
             })
     }
 
