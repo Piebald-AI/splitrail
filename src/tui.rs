@@ -847,46 +847,51 @@ fn draw_ui(
         if let Some(current_stats) = filtered_stats.get(ui_state.selected_tab)
             && let Some(current_table_state) = ui_state.table_states.get_mut(ui_state.selected_tab)
         {
-            crate::debug_log::lock_acquiring("READ-draw_ui", "current_tab");
-            let view = current_stats.read();
-            crate::debug_log::lock_acquired("READ-draw_ui", &view.analyzer_name);
-            let _log_guard =
-                crate::debug_log::LogOnDrop::new("READ-draw_ui", view.analyzer_name.to_string());
-            // Main table
-            let has_estimated_models = match ui_state.stats_view_mode {
-                StatsViewMode::Daily => {
-                    let (_, has_estimated) = draw_daily_stats_table(
-                        frame,
-                        chunks[2 + chunk_offset],
-                        &view,
-                        format_options,
-                        current_table_state,
-                        if ui_state.date_jump_active {
-                            ui_state.date_jump_buffer
-                        } else {
-                            ""
-                        },
-                        ui_state.sort_reversed,
-                    );
-                    has_estimated
-                }
-                StatsViewMode::Session => {
-                    draw_session_stats_table(
-                        frame,
-                        chunks[2 + chunk_offset],
-                        &view.session_aggregates,
-                        format_options,
-                        current_table_state,
-                        &mut ui_state.session_window_offsets[ui_state.selected_tab],
-                        ui_state.session_day_filters[ui_state.selected_tab].as_ref(),
-                        ui_state.sort_reversed,
-                    );
-                    false // Session view doesn't track estimated models yet
-                }
-            };
+            // Draw main table - hold read lock only for this scope
+            let has_estimated_models = {
+                crate::debug_log::lock_acquiring("READ-draw_ui", "current_tab");
+                let view = current_stats.read();
+                crate::debug_log::lock_acquired("READ-draw_ui", &view.analyzer_name);
+
+                let result = match ui_state.stats_view_mode {
+                    StatsViewMode::Daily => {
+                        let (_, has_estimated) = draw_daily_stats_table(
+                            frame,
+                            chunks[2 + chunk_offset],
+                            &view,
+                            format_options,
+                            current_table_state,
+                            if ui_state.date_jump_active {
+                                ui_state.date_jump_buffer
+                            } else {
+                                ""
+                            },
+                            ui_state.sort_reversed,
+                        );
+                        has_estimated
+                    }
+                    StatsViewMode::Session => {
+                        draw_session_stats_table(
+                            frame,
+                            chunks[2 + chunk_offset],
+                            &view.session_aggregates,
+                            format_options,
+                            current_table_state,
+                            &mut ui_state.session_window_offsets[ui_state.selected_tab],
+                            ui_state.session_day_filters[ui_state.selected_tab].as_ref(),
+                            ui_state.sort_reversed,
+                        );
+                        false // Session view doesn't track estimated models yet
+                    }
+                };
+
+                crate::debug_log::lock_released("READ-draw_ui", &view.analyzer_name);
+                result
+            }; // Read lock on current_stats released here BEFORE draw_summary_stats
 
             // Summary stats - pass all filtered stats for aggregation (only if visible)
             // When in Session mode with a day filter, only show totals for that day
+            // NOTE: This acquires its own read locks, so we must not hold any above
             let help_chunk_offset = if ui_state.show_totals {
                 let day_filter = match ui_state.stats_view_mode {
                     StatsViewMode::Session => ui_state
