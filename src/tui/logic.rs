@@ -121,14 +121,7 @@ pub fn has_data_view(stats: &crate::types::AnalyzerStatsView) -> bool {
 /// Check if a SharedAnalyzerView has any data to display.
 /// Acquires a read lock to check the data.
 pub fn has_data_shared(stats: &crate::types::SharedAnalyzerView) -> bool {
-    crate::debug_log::lock_acquiring("READ-has_data", "filter");
-    let guard = stats.read();
-    crate::debug_log::lock_acquired("READ-has_data", &guard.analyzer_name);
-    let result = has_data_view(&guard);
-    let name = guard.analyzer_name.clone();
-    drop(guard);
-    crate::debug_log::lock_released("READ-has_data", &name);
-    result
+    has_data_view(&stats.read())
 }
 
 /// Aggregate sessions from a slice of messages with a specified analyzer name.

@@ -240,9 +240,7 @@ impl RealtimeStatsManager {
         };
 
         // Send the update
-        crate::debug_log::log("WATCH", "SEND_START", "sending stats update");
         let _ = self.update_tx.send(stats);
-        crate::debug_log::log("WATCH", "SEND_DONE", "stats update sent");
 
         // Trigger auto-upload if enabled and debounce time has passed
         self.trigger_auto_upload_if_enabled().await;

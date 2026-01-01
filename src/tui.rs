@@ -112,22 +112,10 @@ pub fn run_tui(
     let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel::<WatcherEvent>();
 
     tokio::spawn(async move {
-        crate::debug_log::log("WATCHER", "STARTED", "watcher task running");
         while let Some(event) = watcher_rx.recv().await {
-            let event_desc = match &event {
-                WatcherEvent::FileChanged(name, path) => {
-                    format!("FileChanged({}, {:?})", name, path)
-                }
-                WatcherEvent::FileDeleted(name, path) => {
-                    format!("FileDeleted({}, {:?})", name, path)
-                }
-                WatcherEvent::Error(e) => format!("Error({:?})", e),
-            };
-            crate::debug_log::log("WATCHER", "EVENT_START", &event_desc);
             if let Err(e) = stats_manager.handle_watcher_event(event).await {
                 eprintln!("Error handling watcher event: {e}");
             }
-            crate::debug_log::log("WATCHER", "EVENT_DONE", "event processed");
         }
         // Persist cache when TUI exits
         stats_manager.persist_cache();
@@ -213,18 +201,14 @@ async fn run_app(
 
         // Check for stats updates
         if stats_receiver.has_changed()? {
-            crate::debug_log::log("WATCH", "BORROW_START", "borrowing stats");
             current_stats = stats_receiver.borrow_and_update().clone();
-            crate::debug_log::log("WATCH", "BORROW_DONE", "stats borrowed and cloned");
             // Recalculate filtered stats only when stats change
-            crate::debug_log::log("FILTER", "START", "filtering stats");
             filtered_stats = current_stats
                 .analyzer_stats
                 .iter()
                 .filter(|stats| has_data_shared(stats))
                 .cloned()
                 .collect();
-            crate::debug_log::log("FILTER", "DONE", "filtering complete");
             update_table_states(&mut table_states, &current_stats, selected_tab);
             update_window_offsets(&mut session_window_offsets, &table_states.len());
             update_day_filters(&mut session_day_filters, &table_states.len());
@@ -267,7 +251,6 @@ async fn run_app(
 
         // Only redraw if something has changed
         if needs_redraw {
-            crate::debug_log::log("DRAW", "START", "starting draw");
             terminal.draw(|frame| {
                 let mut ui_state = UiState {
                     table_states: &mut table_states,
@@ -290,7 +273,6 @@ async fn run_app(
                     update_status.clone(),
                 );
             })?;
-            crate::debug_log::log("DRAW", "DONE", "draw complete");
             needs_redraw = false;
         }
 
@@ -849,11 +831,8 @@ fn draw_ui(
         {
             // Draw main table - hold read lock only for this scope
             let has_estimated_models = {
-                crate::debug_log::lock_acquiring("READ-draw_ui", "current_tab");
                 let view = current_stats.read();
-                crate::debug_log::lock_acquired("READ-draw_ui", &view.analyzer_name);
-
-                let result = match ui_state.stats_view_mode {
+                match ui_state.stats_view_mode {
                     StatsViewMode::Daily => {
                         let (_, has_estimated) = draw_daily_stats_table(
                             frame,
@@ -883,10 +862,7 @@ fn draw_ui(
                         );
                         false // Session view doesn't track estimated models yet
                     }
-                };
-
-                crate::debug_log::lock_released("READ-draw_ui", &view.analyzer_name);
-                result
+                }
             }; // Read lock on current_stats released here BEFORE draw_summary_stats
 
             // Summary stats - pass all filtered stats for aggregation (only if visible)
@@ -1919,9 +1895,7 @@ fn draw_summary_stats(
     let mut all_days = HashSet::new();
 
     for stats_arc in filtered_stats {
-        crate::debug_log::lock_acquiring("READ-summary", "iter");
         let stats = stats_arc.read();
-        crate::debug_log::lock_acquired("READ-summary", &stats.analyzer_name);
         // Iterate directly - filter inline if day_filter is set
         for (day, day_stats) in stats.daily_stats.iter() {
             // Skip if day doesn't match filter
@@ -1951,9 +1925,6 @@ fn draw_summary_stats(
                 all_days.insert(day.clone());
             }
         }
-        let name = stats.analyzer_name.clone();
-        drop(stats);
-        crate::debug_log::lock_released("READ-summary", &name);
     }
 
     let total_tokens = total_cached + total_input + total_output;
