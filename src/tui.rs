@@ -3,7 +3,9 @@ pub mod logic;
 mod tests;
 
 use crate::models::is_model_estimated;
-use crate::types::{AnalyzerStatsView, DayKey, MultiAnalyzerStatsView, SharedAnalyzerView, resolve_model};
+use crate::types::{
+    AnalyzerStatsView, CompactDate, MultiAnalyzerStatsView, SharedAnalyzerView, resolve_model,
+};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
 use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
 use anyhow::Result;
@@ -85,7 +87,7 @@ struct UiState<'a> {
     selected_tab: usize,
     stats_view_mode: StatsViewMode,
     session_window_offsets: &'a mut [usize],
-    session_day_filters: &'a mut [Option<DayKey>],
+    session_day_filters: &'a mut [Option<CompactDate>],
     date_jump_active: bool,
     date_jump_buffer: &'a str,
     sort_reversed: bool,
@@ -156,7 +158,7 @@ async fn run_app(
 ) -> Result<()> {
     let mut table_states: Vec<TableState> = Vec::new();
     let mut session_window_offsets: Vec<usize> = Vec::new();
-    let mut session_day_filters: Vec<Option<DayKey>> = Vec::new();
+    let mut session_day_filters: Vec<Option<CompactDate>> = Vec::new();
     let mut date_jump_active = false;
     let mut date_jump_buffer = String::new();
     let mut sort_reversed = false;
@@ -378,7 +380,7 @@ async fn run_app(
                                 Some(day) => view
                                     .session_aggregates
                                     .iter()
-                                    .filter(|s| &s.day_key == day)
+                                    .filter(|s| &s.date == day)
                                     .count(),
                                 None => view.session_aggregates.len(),
                             };
@@ -406,7 +408,7 @@ async fn run_app(
                                 Some(day) => view
                                     .session_aggregates
                                     .iter()
-                                    .filter(|s| &s.day_key == day)
+                                    .filter(|s| &s.date == day)
                                     .count(),
                                 None => view.session_aggregates.len(),
                             };
@@ -450,7 +452,7 @@ async fn run_app(
                                             .map(|day| {
                                                 v.session_aggregates
                                                     .iter()
-                                                    .filter(|s| &s.day_key == day)
+                                                    .filter(|s| &s.date == day)
                                                     .count()
                                             })
                                             .unwrap_or_else(|| v.session_aggregates.len())
@@ -502,7 +504,7 @@ async fn run_app(
                                             .map(|day| {
                                                 v.session_aggregates
                                                     .iter()
-                                                    .filter(|s| &s.day_key == day)
+                                                    .filter(|s| &s.date == day)
                                                     .count()
                                             })
                                             .unwrap_or_else(|| v.session_aggregates.len())
@@ -550,7 +552,7 @@ async fn run_app(
                                             .map(|day| {
                                                 v.session_aggregates
                                                     .iter()
-                                                    .filter(|s| &s.day_key == day)
+                                                    .filter(|s| &s.date == day)
                                                     .count()
                                             })
                                             .unwrap_or_else(|| v.session_aggregates.len())
@@ -592,7 +594,7 @@ async fn run_app(
                                             .map(|day| {
                                                 v.session_aggregates
                                                     .iter()
-                                                    .filter(|s| &s.day_key == day)
+                                                    .filter(|s| &s.date == day)
                                                     .count()
                                             })
                                             .unwrap_or_else(|| v.session_aggregates.len())
@@ -651,7 +653,7 @@ async fn run_app(
                                     .map(|day| {
                                         v.session_aggregates
                                             .iter()
-                                            .filter(|s| &s.day_key == day)
+                                            .filter(|s| &s.date == day)
                                             .count()
                                     })
                                     .unwrap_or_else(|| v.session_aggregates.len());
@@ -677,7 +679,7 @@ async fn run_app(
                             } else {
                                 view.daily_stats.iter().nth(selected_idx)
                             }
-                            .and_then(|(k, _)| DayKey::from_str(k));
+                            .and_then(|(k, _)| CompactDate::from_str(k));
                             if let Some(day_key) = day_key {
                                 session_day_filters[*selected_tab] = Some(day_key);
                                 *stats_view_mode = StatsViewMode::Session;
@@ -1469,7 +1471,7 @@ fn draw_session_stats_table(
     format_options: &NumberFormatOptions,
     table_state: &mut TableState,
     window_offset: &mut usize,
-    day_filter: Option<DayKey>,
+    day_filter: Option<CompactDate>,
     sort_reversed: bool,
 ) {
     let header = Row::new(vec![
@@ -1489,7 +1491,7 @@ fn draw_session_stats_table(
 
     let filtered_sessions: Vec<&SessionAggregate> = {
         let mut sessions: Vec<_> = match day_filter {
-            Some(day) => sessions.iter().filter(|s| s.day_key == day).collect(),
+            Some(day) => sessions.iter().filter(|s| s.date == day).collect(),
             None => sessions.iter().collect(),
         };
         if sort_reversed {
@@ -1885,7 +1887,7 @@ fn draw_summary_stats(
     area: Rect,
     filtered_stats: &[SharedAnalyzerView],
     format_options: &NumberFormatOptions,
-    day_filter: Option<DayKey>,
+    day_filter: Option<CompactDate>,
 ) {
     // Aggregate stats from all tools, optionally filtered to a single day
     let mut total_cost_cents: u64 = 0;
@@ -1902,7 +1904,7 @@ fn draw_summary_stats(
         for (day, day_stats) in stats.daily_stats.iter() {
             // Skip if day doesn't match filter
             if let Some(filter_day) = day_filter
-                && DayKey::from_str(day) != Some(filter_day)
+                && CompactDate::from_str(day) != Some(filter_day)
             {
                 continue;
             }
@@ -2048,7 +2050,7 @@ fn update_window_offsets(window_offsets: &mut Vec<usize>, filtered_count: &usize
     }
 }
 
-fn update_day_filters(filters: &mut Vec<Option<DayKey>>, filtered_count: &usize) {
+fn update_day_filters(filters: &mut Vec<Option<CompactDate>>, filtered_count: &usize) {
     let old_len = filters.len();
     filters.resize(*filtered_count, None);
     if *filtered_count < old_len {

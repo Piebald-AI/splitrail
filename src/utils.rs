@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::types::{ConversationMessage, DailyStats, DayKey};
+use crate::types::{CompactDate, ConversationMessage, DailyStats};
 
 static WARNED_MESSAGES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -128,7 +128,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
         let daily_stats_entry = daily_stats
             .entry(date.clone())
             .or_insert_with(|| DailyStats {
-                date: DayKey::from_local(&entry.date),
+                date: CompactDate::from_local(&entry.date),
                 ..Default::default()
             });
 
@@ -211,7 +211,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 filled_stats.insert(
                     date_str.clone(),
                     DailyStats {
-                        date: DayKey::from_str(&date_str).unwrap_or_default(),
+                        date: CompactDate::from_str(&date_str).unwrap_or_default(),
                         ..Default::default()
                     },
                 );

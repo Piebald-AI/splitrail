@@ -33,20 +33,20 @@ pub fn resolve_model(key: Spur) -> &'static str {
 }
 
 // ============================================================================
-// DayKey - Compact date representation (4 bytes, no heap allocation)
+// CompactDate - Compact date representation (4 bytes, no heap allocation)
 // ============================================================================
 
 /// Compact representation of a date in "YYYY-MM-DD" format.
 /// Stored as year (u16) + month (u8) + day (u8) = 4 bytes total.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct DayKey {
+pub struct CompactDate {
     year: u16,
     month: u8,
     day: u8,
 }
 
-impl DayKey {
-    /// Create a DayKey directly from a DateTime (in local timezone).
+impl CompactDate {
+    /// Create a CompactDate directly from a DateTime (in local timezone).
     #[inline]
     pub fn from_local<Tz: chrono::TimeZone>(dt: &DateTime<Tz>) -> Self {
         use chrono::{Datelike, Local};
@@ -58,7 +58,7 @@ impl DayKey {
         }
     }
 
-    /// Create a DayKey from a "YYYY-MM-DD" string.
+    /// Create a CompactDate from a "YYYY-MM-DD" string.
     #[inline]
     pub fn from_str(s: &str) -> Option<Self> {
         Self::parse(s).map(|(year, month, day)| Self { year, month, day })
@@ -89,34 +89,34 @@ impl DayKey {
     }
 }
 
-impl Serialize for DayKey {
+impl Serialize for CompactDate {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.to_string())
     }
 }
 
-impl<'de> Deserialize<'de> for DayKey {
+impl<'de> Deserialize<'de> for CompactDate {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         Self::from_str(&s).ok_or_else(|| serde::de::Error::custom("invalid date format"))
     }
 }
 
-impl Ord for DayKey {
+impl Ord for CompactDate {
     #[inline]
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (self.year, self.month, self.day).cmp(&(other.year, other.month, other.day))
     }
 }
 
-impl PartialOrd for DayKey {
+impl PartialOrd for CompactDate {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl fmt::Display for DayKey {
+impl fmt::Display for CompactDate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
     }
@@ -139,8 +139,7 @@ pub struct SessionAggregate {
     /// Interned model names - each Spur is 4 bytes vs 24+ bytes for String
     pub models: Vec<Spur>,
     pub session_name: Option<String>,
-    /// Compact date key - 10 bytes inline, no heap allocation
-    pub day_key: DayKey,
+    pub date: CompactDate,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -194,7 +193,7 @@ pub struct ConversationMessage {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyStats {
-    pub date: DayKey,
+    pub date: CompactDate,
     pub user_messages: u32,
     pub ai_messages: u32,
     pub conversations: u32,
@@ -556,7 +555,7 @@ impl AnalyzerStatsView {
                 .daily_stats
                 .entry(date.clone())
                 .or_insert_with(|| DailyStats {
-                    date: DayKey::from_str(date).unwrap_or_default(),
+                    date: CompactDate::from_str(date).unwrap_or_default(),
                     ..Default::default()
                 }) += day_stats;
         }
@@ -577,7 +576,7 @@ impl AnalyzerStatsView {
                 }
                 if new_session.first_timestamp < existing.first_timestamp {
                     existing.first_timestamp = new_session.first_timestamp;
-                    existing.day_key = new_session.day_key;
+                    existing.date = new_session.date;
                 }
                 if existing.session_name.is_none() {
                     existing.session_name = new_session.session_name.clone();
@@ -618,7 +617,7 @@ impl AnalyzerStatsView {
                 .find(|s| s.session_id == old_session.session_id)
             {
                 existing.stats -= old_session.stats; // TuiStats is Copy
-                                                     // Remove models that were in the old session
+                // Remove models that were in the old session
                 for model in &old_session.models {
                     existing.models.retain(|m| m != model);
                 }
