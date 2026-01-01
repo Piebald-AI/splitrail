@@ -1,4 +1,4 @@
-use crate::types::{ConversationMessage, Stats};
+use crate::types::{ConversationMessage, Stats, TuiStats};
 use chrono::Local;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -6,48 +6,17 @@ use std::sync::Arc;
 // Re-export SessionAggregate from types
 pub use crate::types::SessionAggregate;
 
-pub fn accumulate_stats(dst: &mut Stats, src: &Stats) {
-    // Token and cost stats
-    dst.input_tokens += src.input_tokens;
-    dst.output_tokens += src.output_tokens;
-    dst.reasoning_tokens += src.reasoning_tokens;
-    dst.cache_creation_tokens += src.cache_creation_tokens;
-    dst.cache_read_tokens += src.cache_read_tokens;
-    dst.cached_tokens += src.cached_tokens;
-    dst.cost += src.cost;
-    dst.tool_calls += src.tool_calls;
-
-    // File operation stats
-    dst.terminal_commands += src.terminal_commands;
-    dst.file_searches += src.file_searches;
-    dst.file_content_searches += src.file_content_searches;
-    dst.files_read += src.files_read;
-    dst.files_added += src.files_added;
-    dst.files_edited += src.files_edited;
-    dst.files_deleted += src.files_deleted;
-    dst.lines_read += src.lines_read;
-    dst.lines_added += src.lines_added;
-    dst.lines_edited += src.lines_edited;
-    dst.lines_deleted += src.lines_deleted;
-    dst.bytes_read += src.bytes_read;
-    dst.bytes_added += src.bytes_added;
-    dst.bytes_edited += src.bytes_edited;
-    dst.bytes_deleted += src.bytes_deleted;
-
-    // Todo stats
-    dst.todos_created += src.todos_created;
-    dst.todos_completed += src.todos_completed;
-    dst.todos_in_progress += src.todos_in_progress;
-    dst.todo_writes += src.todo_writes;
-    dst.todo_reads += src.todo_reads;
-
-    // Composition stats
-    dst.code_lines += src.code_lines;
-    dst.docs_lines += src.docs_lines;
-    dst.data_lines += src.data_lines;
-    dst.media_lines += src.media_lines;
-    dst.config_lines += src.config_lines;
-    dst.other_lines += src.other_lines;
+/// Accumulate TUI-relevant stats from a full Stats into a TuiStats.
+/// Only copies the 6 fields displayed in the TUI.
+pub fn accumulate_tui_stats(dst: &mut TuiStats, src: &Stats) {
+    dst.input_tokens = dst.input_tokens.saturating_add(src.input_tokens as u32);
+    dst.output_tokens = dst.output_tokens.saturating_add(src.output_tokens as u32);
+    dst.reasoning_tokens = dst
+        .reasoning_tokens
+        .saturating_add(src.reasoning_tokens as u32);
+    dst.cached_tokens = dst.cached_tokens.saturating_add(src.cached_tokens as u32);
+    dst.add_cost(src.cost);
+    dst.tool_calls = dst.tool_calls.saturating_add(src.tool_calls);
 }
 
 /// Check if a date string (YYYY-MM-DD format) matches the user's search buffer
@@ -141,7 +110,7 @@ pub fn date_matches_buffer(day: &str, buffer: &str) -> bool {
 pub fn has_data_view(stats: &crate::types::AnalyzerStatsView) -> bool {
     stats.num_conversations > 0
         || stats.daily_stats.values().any(|day| {
-            day.stats.cost > 0.0
+            day.stats.cost_cents > 0
                 || day.stats.input_tokens > 0
                 || day.stats.output_tokens > 0
                 || day.stats.reasoning_tokens > 0
@@ -183,7 +152,7 @@ pub fn aggregate_sessions_from_messages(
                 session_id: key.clone(),
                 first_timestamp: msg.date,
                 analyzer_name: Arc::clone(&analyzer_name), // cheap Arc clone
-                stats: Stats::default(),
+                stats: TuiStats::default(),
                 models: Vec::new(),
                 session_name: None,
                 day_key: msg
@@ -207,7 +176,7 @@ pub fn aggregate_sessions_from_messages(
             if !entry.models.iter().any(|m| m == model) {
                 entry.models.push(model.clone());
             }
-            accumulate_stats(&mut entry.stats, &msg.stats);
+            accumulate_tui_stats(&mut entry.stats, &msg.stats);
         }
 
         // Capture session name if available

@@ -17,7 +17,7 @@ pub struct SessionAggregate {
     pub first_timestamp: DateTime<Utc>,
     /// Shared across all sessions from the same analyzer (Arc clone is cheap)
     pub analyzer_name: Arc<str>,
-    pub stats: Stats,
+    pub stats: TuiStats,
     pub models: Vec<String>,
     pub session_name: Option<String>,
     pub day_key: String,
@@ -79,7 +79,7 @@ pub struct DailyStats {
     pub ai_messages: u32,
     pub conversations: u32,
     pub models: BTreeMap<String, u32>,
-    pub stats: Stats,
+    pub stats: TuiStats,
 }
 
 impl std::ops::AddAssign<&DailyStats> for DailyStats {
@@ -90,7 +90,7 @@ impl std::ops::AddAssign<&DailyStats> for DailyStats {
         for (model, count) in &rhs.models {
             *self.models.entry(model.clone()).or_insert(0) += count;
         }
-        self.stats += rhs.stats.clone();
+        self.stats += rhs.stats;
     }
 }
 
@@ -107,7 +107,7 @@ impl std::ops::SubAssign<&DailyStats> for DailyStats {
                 }
             }
         }
-        self.stats -= rhs.stats.clone();
+        self.stats -= rhs.stats;
     }
 }
 
@@ -262,6 +262,77 @@ impl std::ops::SubAssign for Stats {
     }
 }
 
+/// Lightweight stats for TUI display only (24 bytes vs 320 bytes for full Stats).
+/// Contains only fields actually rendered in the UI.
+/// Uses u32 for memory efficiency - sufficient for per-session and per-day values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuiStats {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub reasoning_tokens: u32,
+    pub cached_tokens: u32,
+    pub cost_cents: u32, // Store as cents to avoid f32 precision issues
+    pub tool_calls: u32,
+}
+
+impl TuiStats {
+    /// Get cost as f64 dollars for display
+    #[inline]
+    pub fn cost(&self) -> f64 {
+        self.cost_cents as f64 / 100.0
+    }
+
+    /// Set cost from f64 dollars
+    #[inline]
+    pub fn set_cost(&mut self, dollars: f64) {
+        self.cost_cents = (dollars * 100.0).round() as u32;
+    }
+
+    /// Add cost from f64 dollars
+    #[inline]
+    pub fn add_cost(&mut self, dollars: f64) {
+        self.cost_cents = self
+            .cost_cents
+            .saturating_add((dollars * 100.0).round() as u32);
+    }
+}
+
+impl From<&Stats> for TuiStats {
+    fn from(s: &Stats) -> Self {
+        TuiStats {
+            input_tokens: s.input_tokens as u32,
+            output_tokens: s.output_tokens as u32,
+            reasoning_tokens: s.reasoning_tokens as u32,
+            cached_tokens: s.cached_tokens as u32,
+            cost_cents: (s.cost * 100.0).round() as u32,
+            tool_calls: s.tool_calls,
+        }
+    }
+}
+
+impl std::ops::AddAssign for TuiStats {
+    fn add_assign(&mut self, rhs: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(rhs.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(rhs.output_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(rhs.reasoning_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(rhs.cached_tokens);
+        self.cost_cents = self.cost_cents.saturating_add(rhs.cost_cents);
+        self.tool_calls = self.tool_calls.saturating_add(rhs.tool_calls);
+    }
+}
+
+impl std::ops::SubAssign for TuiStats {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.input_tokens = self.input_tokens.saturating_sub(rhs.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_sub(rhs.output_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_sub(rhs.reasoning_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_sub(rhs.cached_tokens);
+        self.cost_cents = self.cost_cents.saturating_sub(rhs.cost_cents);
+        self.tool_calls = self.tool_calls.saturating_sub(rhs.tool_calls);
+    }
+}
+
 impl FileCategory {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
@@ -378,7 +449,7 @@ impl AnalyzerStatsView {
                 .find(|s| s.session_id == new_session.session_id)
             {
                 // Merge into existing session
-                existing.stats += new_session.stats.clone();
+                existing.stats += new_session.stats;
                 for model in &new_session.models {
                     if !existing.models.contains(model) {
                         existing.models.push(model.clone());
@@ -426,7 +497,7 @@ impl AnalyzerStatsView {
                 .iter_mut()
                 .find(|s| s.session_id == old_session.session_id)
             {
-                existing.stats -= old_session.stats.clone();
+                existing.stats -= old_session.stats; // TuiStats is Copy
                 // Remove models that were in the old session
                 for model in &old_session.models {
                     existing.models.retain(|m| m != model);

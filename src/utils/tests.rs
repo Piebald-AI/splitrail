@@ -12,9 +12,9 @@ fn test_format_number_comma() {
         decimal_places: 2,
     };
 
-    assert_eq!(format_number(1000, &options), "1,000");
-    assert_eq!(format_number(1000000, &options), "1,000,000");
-    assert_eq!(format_number(123, &options), "123");
+    assert_eq!(format_number(1000_u64, &options), "1,000");
+    assert_eq!(format_number(1000000_u64, &options), "1,000,000");
+    assert_eq!(format_number(123_u64, &options), "123");
 }
 
 #[test]
@@ -26,11 +26,11 @@ fn test_format_number_human() {
         decimal_places: 1,
     };
 
-    assert_eq!(format_number(100, &options), "100");
-    assert_eq!(format_number(1500, &options), "1.5k");
-    assert_eq!(format_number(1_500_000, &options), "1.5m");
-    assert_eq!(format_number(1_500_000_000, &options), "1.5b");
-    assert_eq!(format_number(1_500_000_000_000, &options), "1.5t");
+    assert_eq!(format_number(100_u64, &options), "100");
+    assert_eq!(format_number(1500_u64, &options), "1.5k");
+    assert_eq!(format_number(1_500_000_u64, &options), "1.5m");
+    assert_eq!(format_number(1_500_000_000_u64, &options), "1.5b");
+    assert_eq!(format_number(1_500_000_000_000_u64, &options), "1.5t");
 }
 
 #[test]
@@ -42,7 +42,7 @@ fn test_format_number_plain() {
         decimal_places: 2,
     };
 
-    assert_eq!(format_number(1000, &options), "1000");
+    assert_eq!(format_number(1000_u64, &options), "1000");
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn test_aggregate_by_date_basic() {
     assert_eq!(stats.ai_messages, 1);
     assert_eq!(stats.conversations, 1);
     assert_eq!(stats.stats.input_tokens, 100);
-    assert_eq!(stats.stats.cost, 0.01);
+    assert_eq!(stats.stats.cost(), 0.01);
 }
 
 #[test]

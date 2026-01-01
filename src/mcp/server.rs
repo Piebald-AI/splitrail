@@ -13,7 +13,7 @@ use rmcp::{
     tool_router,
 };
 
-use crate::types::{MultiAnalyzerStats, Stats};
+use crate::types::MultiAnalyzerStats;
 use crate::{create_analyzer_registry, utils};
 
 use super::types::*;
@@ -183,7 +183,7 @@ impl SplitrailMcpServer {
             })
             .map(|(date, ds)| DailyCost {
                 date: date.clone(),
-                cost: ds.stats.cost,
+                cost: ds.stats.cost(),
             })
             .collect();
 
@@ -210,35 +210,60 @@ impl SplitrailMcpServer {
         Parameters(req): Parameters<GetFileOpsRequest>,
     ) -> Result<Json<FileOpsResponse>, String> {
         let stats = self.load_stats().await.map_err(|e| e.to_string())?;
-        let daily_stats = Self::get_daily_stats_for_analyzer(&stats, req.analyzer.as_deref());
 
-        let mut aggregated = Stats::default();
-
-        if let Some(date) = req.date {
-            if let Some(ds) = daily_stats.get(&date) {
-                aggregated = ds.stats.clone();
-            }
+        // Collect messages, optionally filtered by analyzer
+        let messages: Vec<_> = if let Some(ref analyzer_name) = req.analyzer {
+            stats
+                .analyzer_stats
+                .iter()
+                .filter(|a| a.analyzer_name.eq_ignore_ascii_case(analyzer_name))
+                .flat_map(|a| a.messages.iter())
+                .collect()
         } else {
-            for ds in daily_stats.values() {
-                aggregated.files_read += ds.stats.files_read;
-                aggregated.files_edited += ds.stats.files_edited;
-                aggregated.files_added += ds.stats.files_added;
-                aggregated.files_deleted += ds.stats.files_deleted;
-                aggregated.lines_read += ds.stats.lines_read;
-                aggregated.lines_edited += ds.stats.lines_edited;
-                aggregated.lines_added += ds.stats.lines_added;
-                aggregated.lines_deleted += ds.stats.lines_deleted;
-                aggregated.bytes_read += ds.stats.bytes_read;
-                aggregated.bytes_edited += ds.stats.bytes_edited;
-                aggregated.bytes_added += ds.stats.bytes_added;
-                aggregated.bytes_deleted += ds.stats.bytes_deleted;
-                aggregated.terminal_commands += ds.stats.terminal_commands;
-                aggregated.file_searches += ds.stats.file_searches;
-                aggregated.file_content_searches += ds.stats.file_content_searches;
-            }
+            stats
+                .analyzer_stats
+                .iter()
+                .flat_map(|a| a.messages.iter())
+                .collect()
+        };
+
+        // Filter by date if specified
+        let filtered: Vec<_> = if let Some(ref date) = req.date {
+            messages
+                .into_iter()
+                .filter(|m| {
+                    m.date
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string()
+                        == *date
+                })
+                .collect()
+        } else {
+            messages
+        };
+
+        // Sum file operations from raw Stats
+        let mut response = FileOpsResponse::default();
+        for msg in filtered {
+            response.files_read += msg.stats.files_read;
+            response.files_edited += msg.stats.files_edited;
+            response.files_added += msg.stats.files_added;
+            response.files_deleted += msg.stats.files_deleted;
+            response.lines_read += msg.stats.lines_read;
+            response.lines_edited += msg.stats.lines_edited;
+            response.lines_added += msg.stats.lines_added;
+            response.lines_deleted += msg.stats.lines_deleted;
+            response.bytes_read += msg.stats.bytes_read;
+            response.bytes_edited += msg.stats.bytes_edited;
+            response.bytes_added += msg.stats.bytes_added;
+            response.bytes_deleted += msg.stats.bytes_deleted;
+            response.terminal_commands += msg.stats.terminal_commands;
+            response.file_searches += msg.stats.file_searches;
+            response.file_content_searches += msg.stats.file_content_searches;
         }
 
-        Ok(Json(FileOpsResponse::from(&aggregated)))
+        Ok(Json(response))
     }
 
     #[tool(
@@ -273,7 +298,7 @@ impl SplitrailMcpServer {
                     })
                     .collect();
 
-                let total_cost: f64 = filtered_stats.iter().map(|(_, ds)| ds.stats.cost).sum();
+                let total_cost: f64 = filtered_stats.iter().map(|(_, ds)| ds.stats.cost()).sum();
                 let total_messages: u64 = filtered_stats
                     .iter()
                     .map(|(_, ds)| (ds.user_messages + ds.ai_messages) as u64)
@@ -284,7 +309,7 @@ impl SplitrailMcpServer {
                     .sum();
                 let total_tokens: u64 = filtered_stats
                     .iter()
-                    .map(|(_, ds)| ds.stats.input_tokens + ds.stats.output_tokens)
+                    .map(|(_, ds)| (ds.stats.input_tokens as u64) + (ds.stats.output_tokens as u64))
                     .sum();
                 let total_tool_calls: u32 = filtered_stats
                     .iter()
@@ -391,7 +416,7 @@ impl ServerHandler for SplitrailMcpServer {
                         ds.user_messages,
                         ds.ai_messages,
                         ds.conversations,
-                        ds.stats.cost,
+                        ds.stats.cost(),
                         ds.stats.input_tokens,
                         ds.stats.output_tokens
                     )

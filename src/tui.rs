@@ -1040,24 +1040,24 @@ fn draw_daily_stats_table(
     // Find best values for highlighting
     // TODO: Let's refactor this.
 
-    let mut best_cost = 0.0;
+    let mut best_cost_cents: u32 = 0;
     let mut best_cost_i = 0;
-    let mut best_cached_tokens = 0;
+    let mut best_cached_tokens: u32 = 0;
     let mut best_cached_tokens_i = 0;
-    let mut best_input_tokens = 0;
+    let mut best_input_tokens: u32 = 0;
     let mut best_input_tokens_i = 0;
-    let mut best_output_tokens = 0;
+    let mut best_output_tokens: u32 = 0;
     let mut best_output_tokens_i = 0;
-    let mut best_reasoning_tokens = 0;
+    let mut best_reasoning_tokens: u32 = 0;
     let mut best_reasoning_tokens_i = 0;
     let mut best_conversations = 0;
     let mut best_conversations_i = 0;
-    let mut best_tool_calls = 0;
+    let mut best_tool_calls: u32 = 0;
     let mut best_tool_calls_i = 0;
 
     for (i, day_stats) in stats.daily_stats.values().enumerate() {
-        if day_stats.stats.cost > best_cost {
-            best_cost = day_stats.stats.cost;
+        if day_stats.stats.cost_cents > best_cost_cents {
+            best_cost_cents = day_stats.stats.cost_cents;
             best_cost_i = i;
         }
         if day_stats.stats.cached_tokens > best_cached_tokens {
@@ -1087,13 +1087,13 @@ fn draw_daily_stats_table(
     }
 
     let mut rows = Vec::new();
-    let mut total_cost = 0.0;
-    let mut total_cached = 0;
-    let mut total_input = 0;
-    let mut total_output = 0;
-    let mut total_reasoning = 0;
-    let mut total_tool_calls = 0;
-    let mut total_conversations = 0;
+    let mut total_cost_cents: u64 = 0;
+    let mut total_cached: u64 = 0;
+    let mut total_input: u64 = 0;
+    let mut total_output: u64 = 0;
+    let mut total_reasoning: u64 = 0;
+    let mut total_tool_calls: u64 = 0;
+    let mut total_conversations: u64 = 0;
 
     // Use EitherIter to avoid allocation when reversing
     let items_to_render = if sort_reversed {
@@ -1108,13 +1108,13 @@ fn draw_daily_stats_table(
             continue;
         }
 
-        total_cost += day_stats.stats.cost;
-        total_cached += day_stats.stats.cached_tokens;
-        total_input += day_stats.stats.input_tokens;
-        total_output += day_stats.stats.output_tokens;
-        total_reasoning += day_stats.stats.reasoning_tokens;
-        total_tool_calls += day_stats.stats.tool_calls;
-        total_conversations += day_stats.conversations;
+        total_cost_cents += day_stats.stats.cost_cents as u64;
+        total_cached += day_stats.stats.cached_tokens as u64;
+        total_input += day_stats.stats.input_tokens as u64;
+        total_output += day_stats.stats.output_tokens as u64;
+        total_reasoning += day_stats.stats.reasoning_tokens as u64;
+        total_tool_calls += day_stats.stats.tool_calls as u64;
+        total_conversations += day_stats.conversations as u64;
 
         let mut models_vec: Vec<String> = day_stats
             .models
@@ -1130,15 +1130,8 @@ fn draw_daily_stats_table(
         models_vec.sort();
         let models = models_vec.join(", ");
 
-        let lines_summary = format!(
-            "{}/{}/{}",
-            format_number(day_stats.stats.lines_read, format_options),
-            format_number(day_stats.stats.lines_edited, format_options),
-            format_number(day_stats.stats.lines_added, format_options)
-        );
-
         // Check if this is an empty row
-        let is_empty_row = day_stats.stats.cost == 0.0
+        let is_empty_row = day_stats.stats.cost_cents == 0
             && day_stats.stats.cached_tokens == 0
             && day_stats.stats.input_tokens == 0
             && day_stats.stats.output_tokens == 0
@@ -1160,17 +1153,17 @@ fn draw_daily_stats_table(
 
         let cost_cell = if is_empty_row {
             Line::from(Span::styled(
-                format!("${:.2}", day_stats.stats.cost),
+                format!("${:.2}", day_stats.stats.cost()),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_cost_i {
             Line::from(Span::styled(
-                format!("${:.2}", day_stats.stats.cost),
+                format!("${:.2}", day_stats.stats.cost()),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::styled(
-                format!("${:.2}", day_stats.stats.cost),
+                format!("${:.2}", day_stats.stats.cost()),
                 Style::default().fg(Color::Yellow),
             ))
         }
@@ -1280,19 +1273,6 @@ fn draw_daily_stats_table(
             Line::from(Span::styled(
                 format_number(day_stats.stats.tool_calls as u64, format_options),
                 Style::default().fg(Color::Green),
-            ))
-        }
-        .right_aligned();
-
-        let _lines_cell = if is_empty_row {
-            Line::from(Span::styled(
-                lines_summary,
-                Style::default().add_modifier(Modifier::DIM),
-            ))
-        } else {
-            Line::from(Span::styled(
-                lines_summary,
-                Style::default().fg(Color::Blue),
             ))
         }
         .right_aligned();
@@ -1407,21 +1387,7 @@ fn draw_daily_stats_table(
     rows.push(separator_row);
 
     // Add totals row
-    let _total_lines_r = stats
-        .daily_stats
-        .values()
-        .map(|s| s.stats.lines_read)
-        .sum::<u64>();
-    let _total_lines_e = stats
-        .daily_stats
-        .values()
-        .map(|s| s.stats.lines_edited)
-        .sum::<u64>();
-    let _total_lines_a = stats
-        .daily_stats
-        .values()
-        .map(|s| s.stats.lines_added)
-        .sum::<u64>();
+    let total_cost = total_cost_cents as f64 / 100.0;
 
     let totals_row = Row::new(vec![
         // Arrow indicator for totals row when selected
@@ -1469,31 +1435,17 @@ fn draw_daily_stats_table(
         ))
         .right_aligned(),
         Line::from(Span::styled(
-            format_number(total_conversations as u64, format_options),
+            format_number(total_conversations, format_options),
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
         Line::from(Span::styled(
-            format_number(total_tool_calls as u64, format_options),
+            format_number(total_tool_calls, format_options),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
-        /*
-        Line::from(Span::styled(
-            format!(
-                "{}/{}/{}",
-                format_number(total_lines_r, format_options),
-                format_number(total_lines_e, format_options),
-                format_number(total_lines_a, format_options)
-            ),
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .right_aligned(),
-        */
         Line::from(Span::styled(
             all_models_text,
             Style::default().add_modifier(Modifier::DIM),
@@ -1615,17 +1567,17 @@ fn draw_session_stats_table(
     let mut best_reasoning_tokens_i: Option<usize> = None;
     let mut best_tool_calls_i: Option<usize> = None;
 
-    let mut total_cost = 0.0;
-    let mut total_input_tokens = 0u64;
-    let mut total_output_tokens = 0u64;
-    let mut total_cached_tokens = 0u64;
-    let mut total_reasoning_tokens = 0u64;
-    let mut total_tool_calls = 0u64;
+    let mut total_cost_cents: u64 = 0;
+    let mut total_input_tokens: u64 = 0;
+    let mut total_output_tokens: u64 = 0;
+    let mut total_cached_tokens: u64 = 0;
+    let mut total_reasoning_tokens: u64 = 0;
+    let mut total_tool_calls: u64 = 0;
     let mut all_models = HashSet::new();
 
     for (idx, session) in filtered_sessions.iter().enumerate() {
         if best_cost_i
-            .map(|best_idx| session.stats.cost > filtered_sessions[best_idx].stats.cost)
+            .map(|best_idx| session.stats.cost_cents > filtered_sessions[best_idx].stats.cost_cents)
             .unwrap_or(true)
         {
             best_cost_i = Some(idx);
@@ -1674,11 +1626,11 @@ fn draw_session_stats_table(
             best_tool_calls_i = Some(idx);
         }
 
-        total_cost += session.stats.cost;
-        total_input_tokens += session.stats.input_tokens;
-        total_output_tokens += session.stats.output_tokens;
-        total_cached_tokens += session.stats.cached_tokens;
-        total_reasoning_tokens += session.stats.reasoning_tokens;
+        total_cost_cents += session.stats.cost_cents as u64;
+        total_input_tokens += session.stats.input_tokens as u64;
+        total_output_tokens += session.stats.output_tokens as u64;
+        total_cached_tokens += session.stats.cached_tokens as u64;
+        total_reasoning_tokens += session.stats.reasoning_tokens as u64;
         total_tool_calls += session.stats.tool_calls as u64;
 
         for model in &session.models {
@@ -1722,12 +1674,12 @@ fn draw_session_stats_table(
 
             let cost_cell = if best_cost_i == Some(i) {
                 Line::from(Span::styled(
-                    format!("${:.2}", session.stats.cost),
+                    format!("${:.2}", session.stats.cost()),
                     Style::default().fg(Color::Red),
                 ))
             } else {
                 Line::from(Span::styled(
-                    format!("${:.2}", session.stats.cost),
+                    format!("${:.2}", session.stats.cost()),
                     Style::default().fg(Color::Yellow),
                 ))
             }
@@ -1787,12 +1739,12 @@ fn draw_session_stats_table(
 
             let tools_cell = if best_tool_calls_i == Some(i) {
                 Line::from(Span::styled(
-                    format_number(session.stats.tool_calls as u64, format_options),
+                    format_number(session.stats.tool_calls, format_options),
                     Style::default().fg(Color::Red),
                 ))
             } else {
                 Line::from(Span::styled(
-                    format_number(session.stats.tool_calls as u64, format_options),
+                    format_number(session.stats.tool_calls, format_options),
                     Style::default().add_modifier(Modifier::DIM),
                 ))
             }
@@ -1870,6 +1822,7 @@ fn draw_session_stats_table(
             rows.push(separator_row);
         } else {
             // Totals row
+            let total_cost = total_cost_cents as f64 / 100.0;
             let totals_row = Row::new(vec![
                 Line::from(Span::raw("")),
                 Line::from(Span::styled(
@@ -1957,7 +1910,7 @@ fn draw_summary_stats(
     day_filter: Option<&String>,
 ) {
     // Aggregate stats from all tools, optionally filtered to a single day
-    let mut total_cost: f64 = 0.0;
+    let mut total_cost_cents: u64 = 0;
     let mut total_cached: u64 = 0;
     let mut total_input: u64 = 0;
     let mut total_output: u64 = 0;
@@ -1978,15 +1931,15 @@ fn draw_summary_stats(
                 continue;
             }
 
-            total_cost += day_stats.stats.cost;
-            total_cached += day_stats.stats.cached_tokens;
-            total_input += day_stats.stats.input_tokens;
-            total_output += day_stats.stats.output_tokens;
-            total_reasoning += day_stats.stats.reasoning_tokens;
+            total_cost_cents += day_stats.stats.cost_cents as u64;
+            total_cached += day_stats.stats.cached_tokens as u64;
+            total_input += day_stats.stats.input_tokens as u64;
+            total_output += day_stats.stats.output_tokens as u64;
+            total_reasoning += day_stats.stats.reasoning_tokens as u64;
             total_tool_calls += day_stats.stats.tool_calls as u64;
 
             // Collect unique days across all tools that have actual data
-            if day_stats.stats.cost > 0.0
+            if day_stats.stats.cost_cents > 0
                 || day_stats.stats.input_tokens > 0
                 || day_stats.stats.output_tokens > 0
                 || day_stats.stats.reasoning_tokens > 0
@@ -2004,6 +1957,7 @@ fn draw_summary_stats(
     }
 
     let total_tokens = total_cached + total_input + total_output;
+    let total_cost = total_cost_cents as f64 / 100.0;
     let tools_count = filtered_stats.len();
 
     // Define summary rows with labels and values

@@ -1,9 +1,9 @@
-use crate::tui::logic::{accumulate_stats, date_matches_buffer};
+use crate::tui::logic::{accumulate_tui_stats, date_matches_buffer};
 use crate::tui::{
     create_upload_progress_callback, show_upload_error, show_upload_success, update_day_filters,
     update_table_states, update_window_offsets,
 };
-use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats, Stats};
+use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats, Stats, TuiStats};
 use ratatui::widgets::TableState;
 use std::collections::BTreeMap;
 
@@ -22,9 +22,9 @@ fn make_tool_stats(name: &str, has_data: bool) -> AgenticCodingToolStats {
                 ai_messages: 1,
                 conversations: 1,
                 models: BTreeMap::new(),
-                stats: Stats {
+                stats: TuiStats {
                     input_tokens: 10,
-                    ..Stats::default()
+                    ..TuiStats::default()
                 },
             },
         );
@@ -208,8 +208,8 @@ fn test_date_matches_buffer_month_day_year_format() {
 // ============================================================================
 
 #[test]
-fn test_accumulate_stats_basic() {
-    let mut dst = Stats::default();
+fn test_accumulate_tui_stats_basic() {
+    let mut dst = TuiStats::default();
     let src = Stats {
         input_tokens: 100,
         output_tokens: 50,
@@ -217,15 +217,15 @@ fn test_accumulate_stats_basic() {
         ..Stats::default()
     };
 
-    accumulate_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
     assert_eq!(dst.input_tokens, 100);
     assert_eq!(dst.output_tokens, 50);
-    assert_eq!(dst.cost, 0.01);
+    assert_eq!(dst.cost(), 0.01);
 }
 
 #[test]
-fn test_accumulate_stats_multiple_times() {
-    let mut dst = Stats::default();
+fn test_accumulate_tui_stats_multiple_times() {
+    let mut dst = TuiStats::default();
     let src = Stats {
         input_tokens: 100,
         output_tokens: 50,
@@ -233,62 +233,45 @@ fn test_accumulate_stats_multiple_times() {
         ..Stats::default()
     };
 
-    accumulate_stats(&mut dst, &src);
-    accumulate_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
     assert_eq!(dst.input_tokens, 200);
     assert_eq!(dst.output_tokens, 100);
-    assert_eq!(dst.cost, 0.02);
+    assert_eq!(dst.cost(), 0.02);
 }
 
 #[test]
-fn test_accumulate_stats_comprehensive() {
-    let mut dst = Stats::default();
+fn test_accumulate_tui_stats_comprehensive() {
+    let mut dst = TuiStats::default();
     let src = Stats {
         input_tokens: 100,
         output_tokens: 50,
         reasoning_tokens: 25,
-        cache_creation_tokens: 10,
-        cache_read_tokens: 5,
         cached_tokens: 15,
         cost: 0.01,
         tool_calls: 3,
-        terminal_commands: 2,
-        file_searches: 1,
-        files_read: 5,
-        files_edited: 2,
-        lines_added: 100,
-        lines_deleted: 50,
-        bytes_added: 5000,
+        // File operation fields exist in Stats but are not accumulated into TuiStats
         ..Stats::default()
     };
 
-    accumulate_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
     assert_eq!(dst.input_tokens, 100);
     assert_eq!(dst.output_tokens, 50);
     assert_eq!(dst.reasoning_tokens, 25);
-    assert_eq!(dst.cache_creation_tokens, 10);
-    assert_eq!(dst.cache_read_tokens, 5);
     assert_eq!(dst.cached_tokens, 15);
-    assert_eq!(dst.cost, 0.01);
+    assert_eq!(dst.cost(), 0.01);
     assert_eq!(dst.tool_calls, 3);
-    assert_eq!(dst.terminal_commands, 2);
-    assert_eq!(dst.file_searches, 1);
-    assert_eq!(dst.files_read, 5);
-    assert_eq!(dst.files_edited, 2);
-    assert_eq!(dst.lines_added, 100);
-    assert_eq!(dst.lines_deleted, 50);
-    assert_eq!(dst.bytes_added, 5000);
 }
 
 #[test]
-fn test_accumulate_stats_zero_values() {
-    let mut dst = Stats::default();
+fn test_accumulate_tui_stats_zero_values() {
+    let mut dst = TuiStats::default();
     let src = Stats::default();
 
-    accumulate_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
     assert_eq!(dst.input_tokens, 0);
     assert_eq!(dst.output_tokens, 0);
-    assert_eq!(dst.cost, 0.0);
+    assert_eq!(dst.cost(), 0.0);
 }
 
 // ============================================================================
@@ -302,29 +285,29 @@ fn test_date_matches_month_partial_prefix() {
 }
 
 #[test]
-fn test_accumulate_stats_preserves_dst_initial_values() {
-    let mut dst = Stats {
+fn test_accumulate_tui_stats_preserves_dst_initial_values() {
+    let mut dst = TuiStats {
         input_tokens: 50,
         output_tokens: 25,
-        cost: 0.005,
-        ..Stats::default()
+        cost_cents: 1, // 0.01 dollars
+        ..TuiStats::default()
     };
     let src = Stats {
         input_tokens: 50,
         output_tokens: 25,
-        cost: 0.005,
+        cost: 0.01,
         ..Stats::default()
     };
 
-    accumulate_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
     assert_eq!(dst.input_tokens, 100);
     assert_eq!(dst.output_tokens, 50);
-    assert_eq!(dst.cost, 0.01);
+    assert_eq!(dst.cost(), 0.02);
 }
 
 #[test]
-fn test_large_accumulation() {
-    let mut dst = Stats::default();
+fn test_large_tui_stats_accumulation() {
+    let mut dst = TuiStats::default();
     for _ in 0..1000 {
         let src = Stats {
             input_tokens: 100,
@@ -332,12 +315,12 @@ fn test_large_accumulation() {
             cost: 0.01,
             ..Stats::default()
         };
-        accumulate_stats(&mut dst, &src);
+        accumulate_tui_stats(&mut dst, &src);
     }
 
     assert_eq!(dst.input_tokens, 100_000);
     assert_eq!(dst.output_tokens, 50_000);
-    assert!((dst.cost - 10.0).abs() < 0.0001);
+    assert!((dst.cost() - 10.0).abs() < 0.01);
 }
 
 // ============================================================================
@@ -345,32 +328,27 @@ fn test_large_accumulation() {
 // ============================================================================
 
 #[test]
-fn test_accumulated_stats_correctness() {
-    let mut dst = Stats::default();
+fn test_accumulated_tui_stats_correctness() {
+    let mut dst = TuiStats::default();
     let src = Stats {
         input_tokens: 150,
         output_tokens: 75,
         reasoning_tokens: 50,
         cost: 0.025,
         tool_calls: 5,
-        terminal_commands: 2,
-        files_read: 10,
-        lines_added: 250,
+        // File operation fields not tracked in TuiStats
         ..Stats::default()
     };
 
-    accumulate_stats(&mut dst, &src);
-    accumulate_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
 
-    // Verify accumulated stats
+    // Verify accumulated TUI stats (only the 6 display fields)
     assert_eq!(dst.input_tokens, 300);
     assert_eq!(dst.output_tokens, 150);
     assert_eq!(dst.reasoning_tokens, 100);
     assert_eq!(dst.tool_calls, 10);
-    assert_eq!(dst.terminal_commands, 4);
-    assert_eq!(dst.files_read, 20);
-    assert_eq!(dst.lines_added, 500);
-    assert!((dst.cost - 0.05).abs() < 0.0001);
+    assert!((dst.cost() - 0.05).abs() < 0.01);
 }
 
 // ============================================================================
@@ -405,8 +383,8 @@ fn test_date_filter_exclusions() {
 }
 
 #[test]
-fn test_stats_accumulation_with_multiple_analyzers() {
-    let mut dst = Stats::default();
+fn test_tui_stats_accumulation_with_multiple_analyzers() {
+    let mut dst = TuiStats::default();
     let src1 = Stats {
         input_tokens: 100,
         output_tokens: 50,
@@ -422,11 +400,11 @@ fn test_stats_accumulation_with_multiple_analyzers() {
         ..Stats::default()
     };
 
-    accumulate_stats(&mut dst, &src1);
-    accumulate_stats(&mut dst, &src2);
+    accumulate_tui_stats(&mut dst, &src1);
+    accumulate_tui_stats(&mut dst, &src2);
 
     assert_eq!(dst.input_tokens, 300);
     assert_eq!(dst.output_tokens, 150);
     assert_eq!(dst.tool_calls, 6);
-    assert!((dst.cost - 0.03).abs() < 0.0001);
+    assert!((dst.cost() - 0.03).abs() < 0.01);
 }
