@@ -1,5 +1,4 @@
-use crate::types::{ConversationMessage, Stats, TuiStats};
-use chrono::Local;
+use crate::types::{intern_model, ConversationMessage, DayKey, Stats, TuiStats};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -144,30 +143,23 @@ pub fn aggregate_sessions_from_messages(
             .or_insert_with_key(|key| SessionAggregate {
                 session_id: key.clone(),
                 first_timestamp: msg.date,
-                analyzer_name: Arc::clone(&analyzer_name), // cheap Arc clone
+                analyzer_name: Arc::clone(&analyzer_name),
                 stats: TuiStats::default(),
-                models: Vec::new(),
+                models: Vec::with_capacity(2),
                 session_name: None,
-                day_key: msg
-                    .date
-                    .with_timezone(&Local)
-                    .format("%Y-%m-%d")
-                    .to_string(),
+                day_key: DayKey::from_local(&msg.date),
             });
 
         if msg.date < entry.first_timestamp {
             entry.first_timestamp = msg.date;
-            entry.day_key = msg
-                .date
-                .with_timezone(&Local)
-                .format("%Y-%m-%d")
-                .to_string();
+            entry.day_key = DayKey::from_local(&msg.date);
         }
 
         // Only aggregate stats for assistant/model messages and track models
         if let Some(model) = &msg.model {
-            if !entry.models.iter().any(|m| m == model) {
-                entry.models.push(model.clone());
+            let interned = intern_model(model);
+            if !entry.models.contains(&interned) {
+                entry.models.push(interned);
             }
             accumulate_tui_stats(&mut entry.stats, &msg.stats);
         }
@@ -182,6 +174,9 @@ pub fn aggregate_sessions_from_messages(
 
     // Sort oldest sessions first so newest appear at the bottom
     result.sort_by_key(|s| s.first_timestamp);
+
+    // Shrink to fit to release excess capacity
+    result.shrink_to_fit();
 
     result
 }

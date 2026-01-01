@@ -3,7 +3,7 @@ pub mod logic;
 mod tests;
 
 use crate::models::is_model_estimated;
-use crate::types::{AnalyzerStatsView, MultiAnalyzerStatsView, SharedAnalyzerView};
+use crate::types::{AnalyzerStatsView, MultiAnalyzerStatsView, SharedAnalyzerView, resolve_model};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
 use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
 use anyhow::Result;
@@ -1609,12 +1609,12 @@ fn draw_session_stats_table(
         total_reasoning_tokens += session.stats.reasoning_tokens as u64;
         total_tool_calls += session.stats.tool_calls as u64;
 
-        for model in &session.models {
-            all_models.insert(model.clone());
+        for &model in &session.models {
+            all_models.insert(model);
         }
     }
 
-    let mut all_models_vec = all_models.into_iter().collect::<Vec<_>>();
+    let mut all_models_vec: Vec<&str> = all_models.into_iter().map(resolve_model).collect();
     all_models_vec.sort();
     let all_models_text = all_models_vec.join(", ");
 
@@ -1727,7 +1727,8 @@ fn draw_session_stats_table(
             .right_aligned();
 
             // Per-session models column: sorted, deduplicated list of models used in this session
-            let mut models_vec = session.models.clone();
+            let mut models_vec: Vec<&str> =
+                session.models.iter().map(|&s| resolve_model(s)).collect();
             models_vec.sort();
             models_vec.dedup();
             let models_text = models_vec.join(", ");

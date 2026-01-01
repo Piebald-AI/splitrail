@@ -1,12 +1,148 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use lasso::{Spur, ThreadedRodeo};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 use crate::tui::logic::aggregate_sessions_from_messages;
 use crate::utils::aggregate_by_date;
+
+// ============================================================================
+// Model String Interner
+// ============================================================================
+
+/// Global thread-safe string interner for model names.
+/// Model names like "claude-3-5-sonnet" repeat across thousands of sessions.
+/// Interning reduces memory from 24-byte String + heap per occurrence to 4-byte Spur.
+static MODEL_INTERNER: LazyLock<ThreadedRodeo> = LazyLock::new(ThreadedRodeo::default);
+
+/// Intern a model name, returning a cheap 4-byte key.
+#[inline]
+pub fn intern_model(model: &str) -> Spur {
+    MODEL_INTERNER.get_or_intern(model)
+}
+
+/// Resolve an interned model key back to its string.
+#[inline]
+pub fn resolve_model(key: Spur) -> &'static str {
+    MODEL_INTERNER.resolve(&key)
+}
+
+// ============================================================================
+// DayKey - Compact date representation (4 bytes, no heap allocation)
+// ============================================================================
+
+/// Compact representation of a date in "YYYY-MM-DD" format.
+/// Stored as year (u16) + month (u8) + day (u8) = 4 bytes total.
+/// Implements comparison with `&str` for ergonomic filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DayKey {
+    year: u16,
+    month: u8,
+    day: u8,
+}
+
+impl DayKey {
+    /// Create a DayKey directly from a DateTime (in local timezone).
+    #[inline]
+    pub fn from_local<Tz: chrono::TimeZone>(dt: &DateTime<Tz>) -> Self {
+        use chrono::{Datelike, Local};
+        let local = dt.with_timezone(&Local);
+        Self {
+            year: local.year() as u16,
+            month: local.month() as u8,
+            day: local.day() as u8,
+        }
+    }
+
+    /// Parse a date string, returning None if invalid format.
+    #[inline]
+    fn parse(s: &str) -> Option<(u16, u8, u8)> {
+        if s.len() != 10 {
+            return None;
+        }
+        let bytes = s.as_bytes();
+        if bytes[4] != b'-' || bytes[7] != b'-' {
+            return None;
+        }
+        let year = (bytes[0].wrapping_sub(b'0') as u16)
+            .checked_mul(1000)?
+            .checked_add((bytes[1].wrapping_sub(b'0') as u16).checked_mul(100)?)?
+            .checked_add((bytes[2].wrapping_sub(b'0') as u16).checked_mul(10)?)?
+            .checked_add(bytes[3].wrapping_sub(b'0') as u16)?;
+        let month = (bytes[5].wrapping_sub(b'0'))
+            .checked_mul(10)?
+            .checked_add(bytes[6].wrapping_sub(b'0'))?;
+        let day = (bytes[8].wrapping_sub(b'0'))
+            .checked_mul(10)?
+            .checked_add(bytes[9].wrapping_sub(b'0'))?;
+        Some((year, month, day))
+    }
+}
+
+impl Ord for DayKey {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.year, self.month, self.day).cmp(&(other.year, other.month, other.day))
+    }
+}
+
+impl PartialOrd for DayKey {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for DayKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+}
+
+impl PartialEq<str> for DayKey {
+    #[inline]
+    fn eq(&self, other: &str) -> bool {
+        Self::parse(other)
+            .is_some_and(|(y, m, d)| self.year == y && self.month == m && self.day == d)
+    }
+}
+
+impl PartialEq<&str> for DayKey {
+    #[inline]
+    fn eq(&self, other: &&str) -> bool {
+        self == *other
+    }
+}
+
+impl PartialEq<String> for DayKey {
+    #[inline]
+    fn eq(&self, other: &String) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<DayKey> for &str {
+    #[inline]
+    fn eq(&self, other: &DayKey) -> bool {
+        other == *self
+    }
+}
+
+impl PartialEq<DayKey> for String {
+    #[inline]
+    fn eq(&self, other: &DayKey) -> bool {
+        other == self.as_str()
+    }
+}
+
+// ============================================================================
+// SessionAggregate
+// ============================================================================
 
 /// Pre-computed session aggregate for TUI display.
 /// Contains aggregated stats per conversation session.
@@ -18,9 +154,11 @@ pub struct SessionAggregate {
     /// Shared across all sessions from the same analyzer (Arc clone is cheap)
     pub analyzer_name: Arc<str>,
     pub stats: TuiStats,
-    pub models: Vec<String>,
+    /// Interned model names - each Spur is 4 bytes vs 24+ bytes for String
+    pub models: Vec<Spur>,
     pub session_name: Option<String>,
-    pub day_key: String,
+    /// Compact date key - 10 bytes inline, no heap allocation
+    pub day_key: DayKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -450,14 +588,14 @@ impl AnalyzerStatsView {
             {
                 // Merge into existing session
                 existing.stats += new_session.stats;
-                for model in &new_session.models {
-                    if !existing.models.contains(model) {
-                        existing.models.push(model.clone());
+                for &model in &new_session.models {
+                    if !existing.models.contains(&model) {
+                        existing.models.push(model);
                     }
                 }
                 if new_session.first_timestamp < existing.first_timestamp {
                     existing.first_timestamp = new_session.first_timestamp;
-                    existing.day_key = new_session.day_key.clone();
+                    existing.day_key = new_session.day_key;
                 }
                 if existing.session_name.is_none() {
                     existing.session_name = new_session.session_name.clone();
@@ -498,7 +636,7 @@ impl AnalyzerStatsView {
                 .find(|s| s.session_id == old_session.session_id)
             {
                 existing.stats -= old_session.stats; // TuiStats is Copy
-                // Remove models that were in the old session
+                                                     // Remove models that were in the old session
                 for model in &old_session.models {
                     existing.models.retain(|m| m != model);
                 }
