@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::tui::logic::aggregate_sessions_from_messages;
@@ -303,26 +304,30 @@ pub struct AnalyzerStatsView {
     pub analyzer_name: String,
 }
 
+/// Shared view type - Arc<RwLock<...>> allows mutation without cloning.
+pub type SharedAnalyzerView = Arc<RwLock<AnalyzerStatsView>>;
+
 /// Container for TUI display - view-only stats without messages.
-/// Uses Arc to share AnalyzerStatsView across caches and channels without cloning.
+/// Uses Arc<RwLock<...>> to share AnalyzerStatsView across caches and channels.
+/// RwLock enables in-place mutation without cloning during incremental updates.
 #[derive(Debug, Clone)]
 pub struct MultiAnalyzerStatsView {
-    pub analyzer_stats: Vec<Arc<AnalyzerStatsView>>,
+    pub analyzer_stats: Vec<SharedAnalyzerView>,
 }
 
 impl AgenticCodingToolStats {
     /// Convert full stats to lightweight view, consuming self.
     /// Messages are dropped, session_aggregates are pre-computed.
-    /// Returns Arc for efficient sharing across caches.
-    pub fn into_view(self) -> Arc<AnalyzerStatsView> {
+    /// Returns SharedAnalyzerView for efficient sharing and in-place mutation.
+    pub fn into_view(self) -> SharedAnalyzerView {
         let session_aggregates =
             aggregate_sessions_from_messages(&self.messages, &self.analyzer_name);
-        Arc::new(AnalyzerStatsView {
+        Arc::new(RwLock::new(AnalyzerStatsView {
             daily_stats: self.daily_stats,
             session_aggregates,
             num_conversations: self.num_conversations,
             analyzer_name: self.analyzer_name,
-        })
+        }))
     }
 }
 
@@ -533,10 +538,11 @@ mod tests {
         };
 
         let view = stats.into_view();
+        let v = view.read();
 
-        assert_eq!(view.analyzer_name, "Test");
-        assert_eq!(view.num_conversations, 2);
-        assert_eq!(view.session_aggregates.len(), 2);
+        assert_eq!(v.analyzer_name, "Test");
+        assert_eq!(v.num_conversations, 2);
+        assert_eq!(v.session_aggregates.len(), 2);
     }
 
     #[test]
@@ -553,6 +559,6 @@ mod tests {
         let view = multi.into_view();
 
         assert_eq!(view.analyzer_stats.len(), 1);
-        assert_eq!(view.analyzer_stats[0].analyzer_name, "Analyzer1");
+        assert_eq!(view.analyzer_stats[0].read().analyzer_name, "Analyzer1");
     }
 }

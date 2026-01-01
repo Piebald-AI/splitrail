@@ -121,7 +121,6 @@ fn find_analyzer_for_path(
 
 pub struct RealtimeStatsManager {
     registry: AnalyzerRegistry,
-    current_stats: MultiAnalyzerStatsView,
     update_tx: watch::Sender<MultiAnalyzerStatsView>,
     update_rx: watch::Receiver<MultiAnalyzerStatsView>,
     last_upload_time: Option<Instant>,
@@ -139,11 +138,10 @@ impl RealtimeStatsManager {
             .map(|p| p.get())
             .unwrap_or(8);
         let initial_stats = registry.load_all_stats_views_parallel(num_threads)?;
-        let (update_tx, update_rx) = watch::channel(initial_stats.clone());
+        let (update_tx, update_rx) = watch::channel(initial_stats);
 
         Ok(Self {
             registry,
-            current_stats: initial_stats,
             update_tx,
             update_rx,
             last_upload_time: None,
@@ -181,10 +179,8 @@ impl RealtimeStatsManager {
             }
             WatcherEvent::FileDeleted(analyzer_name, path) => {
                 // Remove file from cache and get updated view
-                if let Some(updated_view) =
-                    self.registry.remove_file_from_cache(&analyzer_name, &path)
-                {
-                    self.apply_view_update(&analyzer_name, updated_view).await;
+                if self.registry.remove_file_from_cache(&analyzer_name, &path) {
+                    self.apply_view_update().await;
                 } else {
                     // Fallback to full reload
                     self.reload_analyzer_stats(&analyzer_name).await;
@@ -204,8 +200,10 @@ impl RealtimeStatsManager {
             // Full parse of all files for this analyzer
             match analyzer.get_stats().await {
                 Ok(new_stats) => {
-                    let new_view = new_stats.into_view();
-                    self.apply_view_update(analyzer_name, new_view).await;
+                    // Update the cache with the new view
+                    self.registry
+                        .update_cached_view(analyzer_name, new_stats.into_view());
+                    self.apply_view_update().await;
                 }
                 Err(e) => {
                     eprintln!("Error reloading {analyzer_name} stats: {e}");
@@ -222,8 +220,8 @@ impl RealtimeStatsManager {
             .reload_file_incremental(analyzer_name, path)
             .await
         {
-            Ok(updated_view) => {
-                self.apply_view_update(analyzer_name, updated_view).await;
+            Ok(()) => {
+                self.apply_view_update().await;
             }
             Err(e) => {
                 eprintln!("Error in incremental reload for {analyzer_name}: {e}");
@@ -233,32 +231,16 @@ impl RealtimeStatsManager {
         }
     }
 
-    /// Apply a view update and broadcast to listeners
-    async fn apply_view_update(
-        &mut self,
-        analyzer_name: &str,
-        new_view: Arc<crate::types::AnalyzerStatsView>,
-    ) {
-        // Update the stats for this analyzer - cloning Vec<Arc<_>> is cheap (just Arc pointer copies)
-        let mut updated_views = self.current_stats.analyzer_stats.clone();
-
-        // Find and replace the stats for this analyzer
-        if let Some(pos) = updated_views
-            .iter()
-            .position(|s| s.analyzer_name == analyzer_name)
-        {
-            updated_views[pos] = new_view;
-        } else {
-            // New analyzer data
-            updated_views.push(new_view);
-        }
-
-        self.current_stats = MultiAnalyzerStatsView {
-            analyzer_stats: updated_views,
+    /// Broadcast the current cache state to listeners.
+    /// The view is already updated in place via RwLock; we just rebuild and broadcast.
+    async fn apply_view_update(&mut self) {
+        // Build fresh MultiAnalyzerStatsView from cache - just clones Arc pointers
+        let stats = MultiAnalyzerStatsView {
+            analyzer_stats: self.registry.get_all_cached_views(),
         };
 
-        // Send the update - cloning MultiAnalyzerStatsView is cheap (just Arc pointer copies)
-        let _ = self.update_tx.send(self.current_stats.clone());
+        // Send the update
+        let _ = self.update_tx.send(stats);
 
         // Trigger auto-upload if enabled and debounce time has passed
         self.trigger_auto_upload_if_enabled().await;
@@ -463,7 +445,7 @@ mod tests {
         let initial = manager.get_stats_receiver().borrow().clone();
         assert!(
             initial.analyzer_stats.is_empty()
-                || initial.analyzer_stats[0].analyzer_name == "test-analyzer"
+                || initial.analyzer_stats[0].read().analyzer_name == "test-analyzer"
         );
 
         manager
@@ -477,7 +459,10 @@ mod tests {
         let updated = manager.get_stats_receiver().borrow().clone();
         // After handling FileDeleted, we should still have stats for the analyzer.
         assert!(!updated.analyzer_stats.is_empty());
-        assert_eq!(updated.analyzer_stats[0].analyzer_name, "test-analyzer");
+        assert_eq!(
+            updated.analyzer_stats[0].read().analyzer_name,
+            "test-analyzer"
+        );
 
         // Also exercise the error branch.
         manager

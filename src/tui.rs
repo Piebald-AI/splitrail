@@ -3,7 +3,7 @@ pub mod logic;
 mod tests;
 
 use crate::models::is_model_estimated;
-use crate::types::{AnalyzerStatsView, MultiAnalyzerStatsView};
+use crate::types::{AnalyzerStatsView, MultiAnalyzerStatsView, SharedAnalyzerView};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
 use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
 use anyhow::Result;
@@ -14,7 +14,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{ExecutableCommand, execute};
-use logic::{SessionAggregate, date_matches_buffer, has_data_view};
+use logic::{SessionAggregate, date_matches_buffer, has_data_shared};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -180,11 +180,12 @@ async fn run_app(
     let mut dots_counter = 0; // Counter for dots animation (advance every 5 frames = 500ms)
 
     // Filter analyzer stats to only include those with data - calculate once and update when stats change
-    // Arc<AnalyzerStatsView> derefs to AnalyzerStatsView, so access is transparent
-    let mut filtered_stats: Vec<&Arc<AnalyzerStatsView>> = current_stats
+    // SharedAnalyzerView = Arc<RwLock<AnalyzerStatsView>> - clone is cheap (just Arc pointer)
+    let mut filtered_stats: Vec<SharedAnalyzerView> = current_stats
         .analyzer_stats
         .iter()
-        .filter(|stats| has_data_view(stats))
+        .filter(|stats| has_data_shared(stats))
+        .cloned()
         .collect();
 
     loop {
@@ -205,7 +206,8 @@ async fn run_app(
             filtered_stats = current_stats
                 .analyzer_stats
                 .iter()
-                .filter(|stats| has_data_view(stats))
+                .filter(|stats| has_data_shared(stats))
+                .cloned()
                 .collect();
             update_table_states(&mut table_states, &current_stats, selected_tab);
             update_window_offsets(&mut session_window_offsets, &table_states.len());
@@ -320,12 +322,15 @@ async fn run_app(
                         // Auto-jump to first matching date
                         if let Some(current_stats) = filtered_stats.get(*selected_tab)
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some((index, _)) =
-                                current_stats.daily_stats.iter().enumerate().find(
-                                    |(_, (day, _))| date_matches_buffer(day, &date_jump_buffer),
-                                )
                         {
-                            table_state.select(Some(index));
+                            let stats = current_stats.read();
+                            if let Some((index, _)) =
+                                stats.daily_stats.iter().enumerate().find(|(_, (day, _))| {
+                                    date_matches_buffer(day, &date_jump_buffer)
+                                })
+                            {
+                                table_state.select(Some(index));
+                            }
                         }
                         needs_redraw = true;
                     }
@@ -334,12 +339,15 @@ async fn run_app(
                         // Re-evaluate match after backspace
                         if let Some(current_stats) = filtered_stats.get(*selected_tab)
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some((index, _)) =
-                                current_stats.daily_stats.iter().enumerate().find(
-                                    |(_, (day, _))| date_matches_buffer(day, &date_jump_buffer),
-                                )
                         {
-                            table_state.select(Some(index));
+                            let stats = current_stats.read();
+                            if let Some((index, _)) =
+                                stats.daily_stats.iter().enumerate().find(|(_, (day, _))| {
+                                    date_matches_buffer(day, &date_jump_buffer)
+                                })
+                            {
+                                table_state.select(Some(index));
+                            }
                         }
                         needs_redraw = true;
                     }
@@ -362,6 +370,7 @@ async fn run_app(
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
                             && let Some(view) = filtered_stats.get(*selected_tab)
                         {
+                            let view = view.read();
                             let target_len = match session_day_filters
                                 .get(*selected_tab)
                                 .and_then(|f| f.as_ref())
@@ -389,6 +398,7 @@ async fn run_app(
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
                             && let Some(view) = filtered_stats.get(*selected_tab)
                         {
+                            let view = view.read();
                             let target_len = match session_day_filters
                                 .get(*selected_tab)
                                 .and_then(|f| f.as_ref())
@@ -415,7 +425,8 @@ async fn run_app(
                         match *stats_view_mode {
                             StatsViewMode::Daily => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
-                                    let total_rows = current_stats.daily_stats.len();
+                                    let view = current_stats.read();
+                                    let total_rows = view.daily_stats.len();
                                     if selected < total_rows.saturating_add(1) {
                                         table_state.select(Some(
                                             if selected == total_rows.saturating_sub(1) {
@@ -432,16 +443,17 @@ async fn run_app(
                                 let filtered_len = filtered_stats
                                     .get(*selected_tab)
                                     .map(|view| {
+                                        let v = view.read();
                                         session_day_filters
                                             .get(*selected_tab)
                                             .and_then(|f| f.as_ref())
                                             .map(|day| {
-                                                view.session_aggregates
+                                                v.session_aggregates
                                                     .iter()
                                                     .filter(|s| &s.day_key == day)
                                                     .count()
                                             })
-                                            .unwrap_or_else(|| view.session_aggregates.len())
+                                            .unwrap_or_else(|| v.session_aggregates.len())
                                     })
                                     .unwrap_or(0);
 
@@ -468,8 +480,9 @@ async fn run_app(
                         match *stats_view_mode {
                             StatsViewMode::Daily => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
+                                    let view = current_stats.read();
                                     table_state.select(Some(selected.saturating_sub(
-                                        if selected == current_stats.daily_stats.len() + 1 {
+                                        if selected == view.daily_stats.len() + 1 {
                                             2
                                         } else {
                                             1
@@ -482,16 +495,17 @@ async fn run_app(
                                 let filtered_len = filtered_stats
                                     .get(*selected_tab)
                                     .map(|view| {
+                                        let v = view.read();
                                         session_day_filters
                                             .get(*selected_tab)
                                             .and_then(|f| f.as_ref())
                                             .map(|day| {
-                                                view.session_aggregates
+                                                v.session_aggregates
                                                     .iter()
                                                     .filter(|s| &s.day_key == day)
                                                     .count()
                                             })
-                                            .unwrap_or_else(|| view.session_aggregates.len())
+                                            .unwrap_or_else(|| v.session_aggregates.len())
                                     })
                                     .unwrap_or(0);
 
@@ -519,7 +533,8 @@ async fn run_app(
                         match *stats_view_mode {
                             StatsViewMode::Daily => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
-                                    let total_rows = current_stats.daily_stats.len() + 2;
+                                    let view = current_stats.read();
+                                    let total_rows = view.daily_stats.len() + 2;
                                     table_state.select(Some(total_rows.saturating_sub(1)));
                                     needs_redraw = true;
                                 }
@@ -528,16 +543,17 @@ async fn run_app(
                                 let filtered_len = filtered_stats
                                     .get(*selected_tab)
                                     .map(|view| {
+                                        let v = view.read();
                                         session_day_filters
                                             .get(*selected_tab)
                                             .and_then(|f| f.as_ref())
                                             .map(|day| {
-                                                view.session_aggregates
+                                                v.session_aggregates
                                                     .iter()
                                                     .filter(|s| &s.day_key == day)
                                                     .count()
                                             })
-                                            .unwrap_or_else(|| view.session_aggregates.len())
+                                            .unwrap_or_else(|| v.session_aggregates.len())
                                     })
                                     .unwrap_or(0);
 
@@ -557,7 +573,8 @@ async fn run_app(
                         match *stats_view_mode {
                             StatsViewMode::Daily => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
-                                    let total_rows = current_stats.daily_stats.len() + 2;
+                                    let view = current_stats.read();
+                                    let total_rows = view.daily_stats.len() + 2;
                                     let new_selected =
                                         (selected + 10).min(total_rows.saturating_sub(1));
                                     table_state.select(Some(new_selected));
@@ -568,16 +585,17 @@ async fn run_app(
                                 let filtered_len = filtered_stats
                                     .get(*selected_tab)
                                     .map(|view| {
+                                        let v = view.read();
                                         session_day_filters
                                             .get(*selected_tab)
                                             .and_then(|f| f.as_ref())
                                             .map(|day| {
-                                                view.session_aggregates
+                                                v.session_aggregates
                                                     .iter()
                                                     .filter(|s| &s.day_key == day)
                                                     .count()
                                             })
-                                            .unwrap_or_else(|| view.session_aggregates.len())
+                                            .unwrap_or_else(|| v.session_aggregates.len())
                                     })
                                     .unwrap_or(0);
 
@@ -624,20 +642,22 @@ async fn run_app(
                         if let StatsViewMode::Session = *stats_view_mode
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
                             && let Some(view) = filtered_stats.get(*selected_tab)
-                            && !view.session_aggregates.is_empty()
                         {
-                            let target_len = session_day_filters
-                                .get(*selected_tab)
-                                .and_then(|f| f.as_ref())
-                                .map(|day| {
-                                    view.session_aggregates
-                                        .iter()
-                                        .filter(|s| &s.day_key == day)
-                                        .count()
-                                })
-                                .unwrap_or_else(|| view.session_aggregates.len());
-                            if target_len > 0 {
-                                table_state.select(Some(target_len.saturating_sub(1)));
+                            let v = view.read();
+                            if !v.session_aggregates.is_empty() {
+                                let target_len = session_day_filters
+                                    .get(*selected_tab)
+                                    .and_then(|f| f.as_ref())
+                                    .map(|day| {
+                                        v.session_aggregates
+                                            .iter()
+                                            .filter(|s| &s.day_key == day)
+                                            .count()
+                                    })
+                                    .unwrap_or_else(|| v.session_aggregates.len());
+                                if target_len > 0 {
+                                    table_state.select(Some(target_len.saturating_sub(1)));
+                                }
                             }
                         }
 
@@ -649,20 +669,22 @@ async fn run_app(
                         && let Some(current_stats) = filtered_stats.get(*selected_tab)
                         && let Some(table_state) = table_states.get_mut(*selected_tab)
                         && let Some(selected_idx) = table_state.selected()
-                        && selected_idx < current_stats.daily_stats.len()
                     {
-                        let day_key = if sort_reversed {
-                            current_stats.daily_stats.iter().rev().nth(selected_idx)
-                        } else {
-                            current_stats.daily_stats.iter().nth(selected_idx)
-                        }
-                        .map(|(k, _)| k);
-                        if let Some(day_key) = day_key {
-                            session_day_filters[*selected_tab] = Some(day_key.to_string());
-                            *stats_view_mode = StatsViewMode::Session;
-                            session_window_offsets[*selected_tab] = 0;
-                            table_state.select(Some(0));
-                            needs_redraw = true;
+                        let view = current_stats.read();
+                        if selected_idx < view.daily_stats.len() {
+                            let day_key = if sort_reversed {
+                                view.daily_stats.iter().rev().nth(selected_idx)
+                            } else {
+                                view.daily_stats.iter().nth(selected_idx)
+                            }
+                            .map(|(k, _)| k.clone());
+                            if let Some(day_key) = day_key {
+                                session_day_filters[*selected_tab] = Some(day_key);
+                                *stats_view_mode = StatsViewMode::Session;
+                                session_window_offsets[*selected_tab] = 0;
+                                table_state.select(Some(0));
+                                needs_redraw = true;
+                            }
                         }
                     }
                 }
@@ -684,7 +706,7 @@ async fn run_app(
 
 fn draw_ui(
     frame: &mut Frame,
-    filtered_stats: &[&Arc<AnalyzerStatsView>],
+    filtered_stats: &[SharedAnalyzerView],
     format_options: &NumberFormatOptions,
     ui_state: &mut UiState,
     upload_status: Arc<Mutex<UploadStatus>>,
@@ -789,10 +811,8 @@ fn draw_ui(
         let tab_titles: Vec<Line> = filtered_stats
             .iter()
             .map(|stats| {
-                Line::from(format!(
-                    " {} ({}) ",
-                    stats.analyzer_name, stats.num_conversations
-                ))
+                let s = stats.read();
+                Line::from(format!(" {} ({}) ", s.analyzer_name, s.num_conversations))
             })
             .collect();
 
@@ -809,13 +829,14 @@ fn draw_ui(
         if let Some(current_stats) = filtered_stats.get(ui_state.selected_tab)
             && let Some(current_table_state) = ui_state.table_states.get_mut(ui_state.selected_tab)
         {
+            let view = current_stats.read();
             // Main table
             let has_estimated_models = match ui_state.stats_view_mode {
                 StatsViewMode::Daily => {
                     let (_, has_estimated) = draw_daily_stats_table(
                         frame,
                         chunks[2 + chunk_offset],
-                        current_stats,
+                        &view,
                         format_options,
                         current_table_state,
                         if ui_state.date_jump_active {
@@ -828,18 +849,16 @@ fn draw_ui(
                     has_estimated
                 }
                 StatsViewMode::Session => {
-                    if let Some(view) = filtered_stats.get(ui_state.selected_tab) {
-                        draw_session_stats_table(
-                            frame,
-                            chunks[2 + chunk_offset],
-                            &view.session_aggregates,
-                            format_options,
-                            current_table_state,
-                            &mut ui_state.session_window_offsets[ui_state.selected_tab],
-                            ui_state.session_day_filters[ui_state.selected_tab].as_ref(),
-                            ui_state.sort_reversed,
-                        );
-                    }
+                    draw_session_stats_table(
+                        frame,
+                        chunks[2 + chunk_offset],
+                        &view.session_aggregates,
+                        format_options,
+                        current_table_state,
+                        &mut ui_state.session_window_offsets[ui_state.selected_tab],
+                        ui_state.session_day_filters[ui_state.selected_tab].as_ref(),
+                        ui_state.sort_reversed,
+                    );
                     false // Session view doesn't track estimated models yet
                 }
             };
@@ -1906,7 +1925,7 @@ fn draw_session_stats_table(
 fn draw_summary_stats(
     frame: &mut Frame,
     area: Rect,
-    filtered_stats: &[&Arc<AnalyzerStatsView>],
+    filtered_stats: &[SharedAnalyzerView],
     format_options: &NumberFormatOptions,
     day_filter: Option<&String>,
 ) {
@@ -1919,16 +1938,17 @@ fn draw_summary_stats(
     let mut total_tool_calls: u64 = 0;
     let mut all_days = HashSet::new();
 
-    for stats in filtered_stats {
-        // Filter to specific day if day_filter is set
-        let daily_iter: Box<dyn Iterator<Item = (&String, &crate::types::DailyStats)>> =
-            if let Some(day) = day_filter {
-                Box::new(stats.daily_stats.iter().filter(move |(d, _)| *d == day))
-            } else {
-                Box::new(stats.daily_stats.iter())
-            };
+    for stats_arc in filtered_stats {
+        let stats = stats_arc.read();
+        // Iterate directly - filter inline if day_filter is set
+        for (day, day_stats) in stats.daily_stats.iter() {
+            // Skip if day doesn't match filter
+            if let Some(filter_day) = day_filter
+                && day != filter_day
+            {
+                continue;
+            }
 
-        for (day, day_stats) in daily_iter {
             total_cost += day_stats.stats.cost;
             total_cached += day_stats.stats.cached_tokens;
             total_input += day_stats.stats.input_tokens;
@@ -1946,7 +1966,7 @@ fn draw_summary_stats(
                 || day_stats.ai_messages > 0
                 || day_stats.conversations > 0
             {
-                all_days.insert(day);
+                all_days.insert(day.clone());
             }
         }
     }
@@ -2027,7 +2047,7 @@ fn update_table_states(
     let filtered_count = current_stats
         .analyzer_stats
         .iter()
-        .filter(|stats| has_data_view(stats))
+        .filter(|stats| has_data_shared(stats))
         .count();
 
     // Preserve existing table states when resizing

@@ -148,6 +148,12 @@ pub fn has_data_view(stats: &crate::types::AnalyzerStatsView) -> bool {
         })
 }
 
+/// Check if a SharedAnalyzerView has any data to display.
+/// Acquires a read lock to check the data.
+pub fn has_data_shared(stats: &crate::types::SharedAnalyzerView) -> bool {
+    has_data_view(&stats.read())
+}
+
 /// Aggregate sessions from a slice of messages with a specified analyzer name.
 /// Used when converting AgenticCodingToolStats to AnalyzerStatsView.
 pub fn aggregate_sessions_from_messages(
