@@ -2,10 +2,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::future::join_all;
-use jwalk::WalkDir;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::types::{
@@ -128,7 +128,7 @@ pub fn vscode_extension_has_sources(extension_id: &str, target_filename: &str) -
         })
 }
 
-/// Discover data sources for VSCode extension-based analyzers using jwalk.
+/// Discover data sources for VSCode extension-based analyzers.
 ///
 /// # Arguments
 /// * `extension_id` - The VSCode extension ID (e.g., "saoudrizwan.claude-dev")
@@ -152,7 +152,7 @@ pub fn discover_vscode_extension_sources(
             if return_parent_dir {
                 entry.path().parent().map(|p| p.to_path_buf())
             } else {
-                Some(entry.path())
+                Some(entry.into_path())
             }
         })
         .map(|path| DataSource { path })
@@ -179,11 +179,32 @@ pub trait Analyzer: Send + Sync {
     /// Discover data sources for this analyzer (returns all sources)
     fn discover_data_sources(&self) -> Result<Vec<DataSource>>;
 
-    /// Parse conversations from data sources into normalized messages
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>>;
+    /// Parse a single data source into messages.
+    /// This is the core parsing logic without parallelism decisions.
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>>;
+
+    /// Parse multiple data sources and deduplicate.
+    ///
+    /// Default: parses all sources and deduplicates by `global_hash`.
+    /// Override for shared context loading or different dedup strategy.
+    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let all_messages: Vec<ConversationMessage> = sources
+            .iter()
+            .flat_map(|source| match self.parse_source(source) {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    eprintln!(
+                        "Failed to parse {} source {:?}: {}",
+                        self.display_name(),
+                        source.path,
+                        e
+                    );
+                    Vec::new()
+                }
+            })
+            .collect();
+        crate::utils::deduplicate_by_global_hash(all_messages)
+    }
 
     /// Get directories to watch for file changes.
     /// Returns the root data directories for this analyzer.
@@ -205,11 +226,14 @@ pub trait Analyzer: Send + Sync {
     }
 
     /// Get stats with pre-discovered sources (avoids double discovery).
+    /// Default implementation parses sources sequentially via `parse_sources()`.
+    /// Override for analyzers with complex cross-file logic (e.g., claude_code).
     async fn get_stats_with_sources(
         &self,
         sources: Vec<DataSource>,
     ) -> Result<AgenticCodingToolStats> {
-        let messages = self.parse_conversations(sources).await?;
+        let messages = self.parse_sources(&sources);
+
         let mut daily_stats = crate::utils::aggregate_by_date(&messages);
         daily_stats.retain(|date, _| date != "unknown");
         let num_conversations = daily_stats
@@ -347,9 +371,10 @@ impl AnalyzerRegistry {
         })
     }
 
-    /// Load view-only stats sequentially at startup.
+    /// Load view-only stats using async I/O for concurrent file reads.
+    /// Called once at startup. Uses tokio for concurrent I/O operations.
     /// Populates file contribution cache for true incremental updates.
-    pub async fn load_all_stats_views(&self) -> Result<crate::types::MultiAnalyzerStatsView> {
+    pub async fn load_all_stats_views_async(&self) -> Result<crate::types::MultiAnalyzerStatsView> {
         // Get available analyzers with their sources (single discovery)
         let analyzer_data: Vec<_> = self
             .available_analyzers_with_sources()
@@ -357,15 +382,38 @@ impl AnalyzerRegistry {
             .map(|(a, sources)| (a, a.display_name().to_string(), sources))
             .collect();
 
-        // Run all analyzer parsing sequentially
-        let mut all_stats: Vec<Result<AgenticCodingToolStats>> = Vec::new();
-        for (analyzer, _, sources) in &analyzer_data {
-            all_stats.push(analyzer.get_stats_with_sources(sources.clone()).await);
-        }
+        // Create futures for all analyzers - they'll run concurrently
+        let futures: Vec<_> = analyzer_data
+            .into_iter()
+            .map(|(analyzer, name, sources)| async move {
+                // Parse all sources for this analyzer
+                let messages = analyzer.parse_sources(&sources);
+
+                // Aggregate stats
+                let mut daily_stats = crate::utils::aggregate_by_date(&messages);
+                daily_stats.retain(|date, _| date != "unknown");
+                let num_conversations = daily_stats
+                    .values()
+                    .map(|stats| stats.conversations as u64)
+                    .sum();
+
+                let stats = AgenticCodingToolStats {
+                    daily_stats,
+                    num_conversations,
+                    messages,
+                    analyzer_name: name.clone(),
+                };
+
+                (name, sources, Ok(stats) as Result<AgenticCodingToolStats>)
+            })
+            .collect();
+
+        // Run all analyzers concurrently
+        let all_results = join_all(futures).await;
 
         // Build views from results
         let mut all_views = Vec::new();
-        for ((_, name, sources), result) in analyzer_data.into_iter().zip(all_stats.into_iter()) {
+        for (name, sources, result) in all_results {
             match result {
                 Ok(stats) => {
                     // Populate file contribution cache for incremental updates
@@ -455,7 +503,7 @@ impl AnalyzerRegistry {
         let source = DataSource {
             path: changed_path.to_path_buf(),
         };
-        let new_messages = analyzer.parse_conversations(vec![source]).await?;
+        let new_messages = analyzer.parse_sources(&[source]);
 
         // Compute new contribution
         let new_contribution =
@@ -596,10 +644,7 @@ mod tests {
                 .collect())
         }
 
-        async fn parse_conversations(
-            &self,
-            _sources: Vec<DataSource>,
-        ) -> Result<Vec<ConversationMessage>> {
+        fn parse_source(&self, _source: &DataSource) -> Result<Vec<ConversationMessage>> {
             Ok(Vec::new())
         }
 
@@ -765,10 +810,7 @@ mod tests {
                 .collect())
         }
 
-        async fn parse_conversations(
-            &self,
-            _sources: Vec<DataSource>,
-        ) -> Result<Vec<ConversationMessage>> {
+        fn parse_source(&self, _source: &DataSource) -> Result<Vec<ConversationMessage>> {
             Ok(Vec::new())
         }
 
@@ -889,9 +931,9 @@ mod tests {
 
         // Initial load should preserve registration order
         let initial_views = registry
-            .load_all_stats_views()
+            .load_all_stats_views_async()
             .await
-            .expect("load_all_stats_views");
+            .expect("load_all_stats_views_async");
         let initial_names: Vec<String> = initial_views
             .analyzer_stats
             .iter()

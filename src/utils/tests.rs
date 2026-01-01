@@ -421,7 +421,7 @@ fn test_filter_zero_cost_messages_negative_cost() {
 // =============================================================================
 
 #[test]
-fn test_deduplicate_by_global_hash_parallel() {
+fn test_deduplicate_by_global_hash() {
     let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
 
     let msg1 = ConversationMessage {
@@ -451,7 +451,7 @@ fn test_deduplicate_by_global_hash_parallel() {
     };
 
     let messages = vec![msg1, msg2, msg3];
-    let result = deduplicate_by_global_hash_parallel(messages);
+    let result = deduplicate_by_global_hash(messages);
 
     // Should have 2 unique entries (same_hash and different_hash)
     assert_eq!(result.len(), 2);
@@ -462,7 +462,7 @@ fn test_deduplicate_by_global_hash_parallel() {
 }
 
 #[test]
-fn test_deduplicate_by_local_hash_parallel() {
+fn test_deduplicate_by_local_hash() {
     let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
 
     let msg1 = ConversationMessage {
@@ -492,7 +492,7 @@ fn test_deduplicate_by_local_hash_parallel() {
     };
 
     let messages = vec![msg1, msg2, msg3];
-    let result = deduplicate_by_local_hash_parallel(messages);
+    let result = deduplicate_by_local_hash(messages);
 
     // Should have 2 unique entries
     assert_eq!(result.len(), 2);
@@ -529,7 +529,7 @@ fn test_deduplicate_keeps_messages_without_local_hash() {
     };
 
     let messages = vec![msg_with_hash, msg_no_hash1, msg_no_hash2];
-    let result = deduplicate_by_local_hash_parallel(messages);
+    let result = deduplicate_by_local_hash(messages);
 
     // All 3 should be kept (1 with hash, 2 without hash)
     assert_eq!(result.len(), 3);

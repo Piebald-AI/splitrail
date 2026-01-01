@@ -104,6 +104,7 @@ pub fn format_date_for_display(date: &str) -> String {
     }
 }
 
+// TODO: Don't use strings here, wasteful.
 pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, DailyStats> {
     let mut daily_stats: BTreeMap<String, DailyStats> = BTreeMap::new();
     let mut conversation_start_dates: BTreeMap<String, String> = BTreeMap::new();
@@ -261,36 +262,30 @@ pub fn fast_hash(text: &str) -> String {
     format!("{:016x}", xxh3_64(text.as_bytes()))
 }
 
-/// Parallel deduplication by global_hash using DashMap.
-/// Used by copilot, cline, roo_code, kilo_code analyzers.
-pub fn deduplicate_by_global_hash_parallel(
-    messages: Vec<ConversationMessage>,
-) -> Vec<ConversationMessage> {
-    use dashmap::DashMap;
-    use rayon::iter::{IntoParallelIterator, ParallelIterator};
+/// Sequential deduplication by global_hash using HashSet.
+/// Used for post-init processing (incremental updates, uploads).
+pub fn deduplicate_by_global_hash(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    use std::collections::HashSet;
 
-    let seen: DashMap<String, ()> = DashMap::with_capacity(messages.len() / 2);
+    let mut seen: HashSet<String> = HashSet::with_capacity(messages.len() / 2);
     messages
-        .into_par_iter()
-        .filter(|msg| seen.insert(msg.global_hash.clone(), ()).is_none())
+        .into_iter()
+        .filter(|msg| seen.insert(msg.global_hash.clone()))
         .collect()
 }
 
-/// Parallel deduplication by local_hash using DashMap.
-/// Used by gemini_cli, qwen_code analyzers.
+/// Sequential deduplication by local_hash using HashSet.
 /// Messages without local_hash are always kept.
-pub fn deduplicate_by_local_hash_parallel(
-    messages: Vec<ConversationMessage>,
-) -> Vec<ConversationMessage> {
-    use dashmap::DashMap;
-    use rayon::iter::{IntoParallelIterator, ParallelIterator};
+/// Used for post-init processing (incremental updates, uploads).
+pub fn deduplicate_by_local_hash(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    use std::collections::HashSet;
 
-    let seen: DashMap<String, ()> = DashMap::with_capacity(messages.len() / 2);
+    let mut seen: HashSet<String> = HashSet::with_capacity(messages.len() / 2);
     messages
-        .into_par_iter()
+        .into_iter()
         .filter(|msg| {
             if let Some(local_hash) = &msg.local_hash {
-                seen.insert(local_hash.clone(), ()).is_none()
+                seen.insert(local_hash.clone())
             } else {
                 true // Always keep messages without local_hash
             }

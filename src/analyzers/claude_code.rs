@@ -1,20 +1,18 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{fast_hash, hash_text};
-use jwalk::WalkDir;
+use walkdir::WalkDir;
 
 // Type alias for parse_jsonl_file return type
 type ParseResult = (
@@ -33,12 +31,6 @@ impl ClaudeCodeAnalyzer {
 
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".claude").join("projects"))
-    }
-
-    fn walk_data_dir() -> Option<WalkDir> {
-        Self::data_dir()
-            .filter(|d| d.is_dir())
-            .map(|projects_dir| WalkDir::new(projects_dir).min_depth(2).max_depth(2))
     }
 }
 
@@ -60,109 +52,134 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::walk_data_dir()
+        let sources = Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|projects_dir| {
+                WalkDir::new(projects_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            .map(|e| DataSource { path: e.path() })
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
             .collect();
 
         Ok(sources)
     }
 
-    async fn parse_conversations(
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        let project_hash = extract_and_hash_project_id(&source.path);
+        let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
+        let file = File::open(&source.path)?;
+        let (messages, _, _, _) =
+            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
+        Ok(messages)
+    }
+
+    // Claude Code has complex cross-file deduplication, so we override get_stats_with_sources
+    async fn get_stats_with_sources(
         &self,
         sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        use rayon::iter::{IntoParallelIterator, ParallelIterator};
-
-        // Type for concurrent deduplication entry: (insertion_order, message, seen_fingerprints)
+    ) -> Result<crate::types::AgenticCodingToolStats> {
+        // Type for deduplication entry: (insertion_order, message, seen_fingerprints)
         type TokenFingerprint = (u64, u64, u64, u64, u64);
         type DedupEntry = (usize, ConversationMessage, HashSet<TokenFingerprint>);
 
-        // Concurrent deduplication map and session tracking
-        let dedup_map: DashMap<String, DedupEntry> = DashMap::with_capacity(sources.len() * 50);
-        let insertion_counter = AtomicUsize::new(0);
-        let no_hash_counter = AtomicUsize::new(0);
+        // Deduplication map and session tracking
+        let mut dedup_map: HashMap<String, DedupEntry> = HashMap::with_capacity(sources.len() * 50);
+        let mut insertion_counter: usize = 0;
+        let mut no_hash_counter: usize = 0;
 
-        // Concurrent session name mappings
-        let session_names: DashMap<String, String> = DashMap::new();
-        let conversation_summaries: DashMap<String, String> = DashMap::new();
-        let conversation_fallbacks: DashMap<String, String> = DashMap::new();
-        let conversation_uuids: DashMap<String, Vec<String>> = DashMap::new();
+        // Session name mappings
+        let mut session_names: HashMap<String, String> = HashMap::new();
+        let mut conversation_summaries: HashMap<String, String> = HashMap::new();
+        let mut conversation_fallbacks: HashMap<String, String> = HashMap::new();
+        let mut conversation_uuids: HashMap<String, Vec<String>> = HashMap::new();
 
-        // Parse all files in parallel, deduplicating as we go
-        sources.into_par_iter().for_each(|source| {
+        // Parse all files sequentially, deduplicating as we go
+        for source in sources {
             let project_hash = extract_and_hash_project_id(&source.path);
             let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
 
-            if let Ok(file) = File::open(&source.path)
-                && let Ok((msgs, summaries, uuids, fallback)) =
-                    parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)
-            {
-                // Store summaries
-                for (uuid, name) in summaries {
-                    session_names.insert(uuid, name);
+            let file = match File::open(&source.path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to open Claude Code file {:?}: {}", source.path, e);
+                    continue;
                 }
+            };
 
-                // Store UUIDs for this conversation
-                conversation_uuids.insert(conversation_hash.clone(), uuids);
-
-                // Store fallback
-                if let Some(fb) = fallback {
-                    conversation_fallbacks.insert(conversation_hash.clone(), fb);
-                }
-
-                // Deduplicate messages as we insert
-                for msg in msgs {
-                    if let Some(local_hash) = &msg.local_hash {
-                        let order = insertion_counter.fetch_add(1, Ordering::Relaxed);
-                        let fp = (
-                            msg.stats.input_tokens,
-                            msg.stats.output_tokens,
-                            msg.stats.cache_creation_tokens,
-                            msg.stats.cache_read_tokens,
-                            msg.stats.cached_tokens,
-                        );
-
-                        dedup_map
-                            .entry(local_hash.clone())
-                            .and_modify(|(_, existing, seen_fps)| {
-                                merge_message_into(existing, &msg, seen_fps, fp);
-                            })
-                            .or_insert_with(|| {
-                                let mut fps = HashSet::new();
-                                fps.insert(fp);
-                                (order, msg, fps)
-                            });
-                    } else {
-                        // No local hash, always keep with unique key
-                        let order = insertion_counter.fetch_add(1, Ordering::Relaxed);
-                        let unique_key = format!(
-                            "__no_hash_{}",
-                            no_hash_counter.fetch_add(1, Ordering::Relaxed)
-                        );
-                        let fp = (
-                            msg.stats.input_tokens,
-                            msg.stats.output_tokens,
-                            msg.stats.cache_creation_tokens,
-                            msg.stats.cache_read_tokens,
-                            msg.stats.cached_tokens,
-                        );
-                        let mut fps = HashSet::new();
-                        fps.insert(fp);
-                        dedup_map.insert(unique_key, (order, msg, fps));
+            let (msgs, summaries, uuids, fallback) =
+                match parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        eprintln!("Failed to parse Claude Code file {:?}: {}", source.path, e);
+                        continue;
                     }
+                };
+
+            // Store summaries
+            for (uuid, name) in summaries {
+                session_names.insert(uuid, name);
+            }
+
+            // Store UUIDs for this conversation
+            conversation_uuids.insert(conversation_hash.clone(), uuids);
+
+            // Store fallback
+            if let Some(fb) = fallback {
+                conversation_fallbacks.insert(conversation_hash.clone(), fb);
+            }
+
+            // Deduplicate messages as we insert
+            for msg in msgs {
+                if let Some(local_hash) = &msg.local_hash {
+                    let order = insertion_counter;
+                    insertion_counter += 1;
+                    let fp = (
+                        msg.stats.input_tokens,
+                        msg.stats.output_tokens,
+                        msg.stats.cache_creation_tokens,
+                        msg.stats.cache_read_tokens,
+                        msg.stats.cached_tokens,
+                    );
+
+                    dedup_map
+                        .entry(local_hash.clone())
+                        .and_modify(|(_, existing, seen_fps)| {
+                            merge_message_into(existing, &msg, seen_fps, fp);
+                        })
+                        .or_insert_with(|| {
+                            let mut fps = HashSet::new();
+                            fps.insert(fp);
+                            (order, msg, fps)
+                        });
+                } else {
+                    // No local hash, always keep with unique key
+                    let order = insertion_counter;
+                    insertion_counter += 1;
+                    let unique_key = format!("__no_hash_{}", no_hash_counter);
+                    no_hash_counter += 1;
+                    let fp = (
+                        msg.stats.input_tokens,
+                        msg.stats.output_tokens,
+                        msg.stats.cache_creation_tokens,
+                        msg.stats.cache_read_tokens,
+                        msg.stats.cached_tokens,
+                    );
+                    let mut fps = HashSet::new();
+                    fps.insert(fp);
+                    dedup_map.insert(unique_key, (order, msg, fps));
                 }
             }
-        });
+        }
 
         // Link session names to conversations (after all parsing complete)
-        for entry in conversation_uuids.iter() {
-            let conversation_hash = entry.key();
-            let uuids = entry.value();
-
+        for (conversation_hash, uuids) in &conversation_uuids {
             let mut found_summary = false;
             for uuid in uuids {
                 if let Some(name) = session_names.get(uuid) {
@@ -194,7 +211,22 @@ impl Analyzer for ClaudeCodeAnalyzer {
         // Sort by insertion order for deterministic output
         result.sort_by_key(|(order, _)| *order);
 
-        Ok(result.into_iter().map(|(_, msg)| msg).collect())
+        let messages: Vec<ConversationMessage> = result.into_iter().map(|(_, msg)| msg).collect();
+
+        // Aggregate stats
+        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
+        daily_stats.retain(|date, _| date != "unknown");
+        let num_conversations = daily_stats
+            .values()
+            .map(|stats| stats.conversations as u64)
+            .sum();
+
+        Ok(crate::types::AgenticCodingToolStats {
+            daily_stats,
+            num_conversations,
+            messages,
+            analyzer_name: self.display_name().to_string(),
+        })
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
@@ -218,9 +250,15 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     fn is_available(&self) -> bool {
-        Self::walk_data_dir()
+        Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|projects_dir| {
+                WalkDir::new(projects_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
             .filter_map(|e| e.ok())
             .any(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
     }

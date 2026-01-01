@@ -7,7 +7,6 @@ use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::path::{Path, PathBuf};
@@ -333,29 +332,8 @@ impl Analyzer for RooCodeAnalyzer {
         vscode_extension_has_sources(ROO_CODE_EXTENSION_ID, "ui_messages.json")
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        // Parse all task directories in parallel
-        let all_entries: Vec<ConversationMessage> = sources
-            .into_par_iter()
-            .flat_map(|source| match parse_roo_code_task_directory(&source.path) {
-                Ok(messages) => messages,
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse Roo Code task directory {:?}: {}",
-                        source.path, e
-                    );
-                    Vec::new()
-                }
-            })
-            .collect();
-
-        // Parallel deduplicate by global hash
-        Ok(crate::utils::deduplicate_by_global_hash_parallel(
-            all_entries,
-        ))
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        parse_roo_code_task_directory(&source.path)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

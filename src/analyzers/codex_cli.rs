@@ -1,12 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jwalk::WalkDir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
@@ -24,10 +24,6 @@ impl CodexCliAnalyzer {
 
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".codex").join("sessions"))
-    }
-
-    fn walk_data_dir() -> Option<WalkDir> {
-        Self::data_dir().filter(|d| d.is_dir()).map(WalkDir::new)
     }
 }
 
@@ -49,57 +45,44 @@ impl Analyzer for CodexCliAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::walk_data_dir()
+        let sources = Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|dir| WalkDir::new(dir).into_iter())
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "jsonl")
             })
-            .map(|e| DataSource { path: e.path() })
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
             .collect();
 
         Ok(sources)
     }
 
     fn is_available(&self) -> bool {
-        Self::walk_data_dir()
+        Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|dir| WalkDir::new(dir).into_iter())
             .filter_map(|e| e.ok())
             .any(|e| {
                 e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "jsonl")
             })
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        // Parse all data sources in parallel while properly propagating any
-        // error that occurs while processing an individual file.  Rayon’s
-        // `try_reduce` utility allows us to aggregate `Result` values coming
-        // from each parallel worker without having to fall back to
-        // sequential processing.
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        // parse_codex_cli_jsonl_file returns (messages, model), we only need messages here
+        parse_codex_cli_jsonl_file(&source.path).map(|(msgs, _model)| msgs)
+    }
 
-        use rayon::prelude::*;
-
-        let aggregated: Result<Vec<ConversationMessage>> = sources
-            .into_par_iter()
-            .map(|source| {
-                // parse_codex_cli_jsonl_file returns (messages, model), we only need messages here
-                parse_codex_cli_jsonl_file(&source.path).map(|(msgs, _model)| msgs)
-            })
-            // Start the reduction with an empty vector and extend it with the
-            // entries coming from each successfully-parsed file.
-            .try_reduce(Vec::new, |mut acc, mut entries| {
-                acc.append(&mut entries);
-                Ok(acc)
-            });
-
-        // For Codex CLI, we don't need to deduplicate since each session is separate
-        // but we keep the logic encapsulated for future changes.
-        aggregated
+    // Codex CLI doesn't need deduplication since each session is separate
+    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        sources
+            .iter()
+            .flat_map(|source| self.parse_source(source).unwrap_or_default())
+            .collect()
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

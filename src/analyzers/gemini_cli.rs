@@ -5,11 +5,10 @@ use crate::utils::{deserialize_utc_timestamp, hash_text};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jwalk::WalkDir;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 pub struct GeminiCliAnalyzer;
 
@@ -20,12 +19,6 @@ impl GeminiCliAnalyzer {
 
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".gemini").join("tmp"))
-    }
-
-    fn walk_data_dir() -> Option<WalkDir> {
-        Self::data_dir()
-            .filter(|d| d.is_dir())
-            .map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3))
     }
 }
 
@@ -314,9 +307,10 @@ impl Analyzer for GeminiCliAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::walk_data_dir()
+        let sources = Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3).into_iter())
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_type().is_file()
@@ -326,16 +320,19 @@ impl Analyzer for GeminiCliAnalyzer {
                         .and_then(|p| p.file_name())
                         .is_some_and(|name| name == "chats")
             })
-            .map(|e| DataSource { path: e.path() })
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
             .collect();
 
         Ok(sources)
     }
 
     fn is_available(&self) -> bool {
-        Self::walk_data_dir()
+        Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3).into_iter())
             .filter_map(|e| e.ok())
             .any(|e| {
                 e.file_type().is_file()
@@ -347,30 +344,16 @@ impl Analyzer for GeminiCliAnalyzer {
             })
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        // Parse all session files in parallel
-        let all_entries: Vec<ConversationMessage> = sources
-            .into_par_iter()
-            .filter_map(|source| match parse_json_session_file(&source.path) {
-                Ok(messages) => Some(messages),
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse Gemini session file {}: {e:#}",
-                        source.path.display(),
-                    );
-                    None
-                }
-            })
-            .flat_map(|messages| messages)
-            .collect();
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        parse_json_session_file(&source.path)
+    }
 
-        // Parallel deduplicate by local hash
-        Ok(crate::utils::deduplicate_by_local_hash_parallel(
-            all_entries,
-        ))
+    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let all_messages: Vec<ConversationMessage> = sources
+            .iter()
+            .flat_map(|source| self.parse_source(source).unwrap_or_default())
+            .collect();
+        crate::utils::deduplicate_by_local_hash(all_messages)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

@@ -6,14 +6,13 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use glob::glob;
-use jwalk::WalkDir;
-use rayon::prelude::*;
 use serde::Deserialize;
 use simd_json::OwnedValue;
 use simd_json::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 pub struct OpenCodeAnalyzer;
 
@@ -24,12 +23,6 @@ impl OpenCodeAnalyzer {
 
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".local/share/opencode/storage/message"))
-    }
-
-    fn walk_data_dir() -> Option<WalkDir> {
-        Self::data_dir()
-            .filter(|d| d.is_dir())
-            .map(|message_dir| WalkDir::new(message_dir).min_depth(2).max_depth(2))
     }
 }
 
@@ -445,33 +438,45 @@ impl Analyzer for OpenCodeAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::walk_data_dir()
+        let sources = Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|message_dir| {
+                WalkDir::new(message_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "json")
             })
-            .map(|e| DataSource { path: e.path() })
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
             .collect();
 
         Ok(sources)
     }
 
     fn is_available(&self) -> bool {
-        Self::walk_data_dir()
+        Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|message_dir| {
+                WalkDir::new(message_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
             .filter_map(|e| e.ok())
             .any(|e| {
                 e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "json")
             })
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        // For single-file parsing (incremental updates), load context fresh
         let home_dir = dirs::home_dir().context("Could not find home directory")?;
         let storage_root = home_dir.join(".local/share/opencode/storage");
         let project_root = storage_root.join("project");
@@ -481,34 +486,100 @@ impl Analyzer for OpenCodeAnalyzer {
         let projects = load_projects(&project_root);
         let sessions = load_sessions(&session_root);
 
-        let messages: Vec<ConversationMessage> = sources
-            .into_par_iter()
-            .filter_map(|source| {
-                let path = source.path;
-                let content = match fs::read_to_string(&path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("Failed to read OpenCode message {}: {e}", path.display());
-                        return None;
-                    }
-                };
+        let content = fs::read_to_string(&source.path)?;
+        let mut bytes = content.into_bytes();
+        let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes)?;
 
+        Ok(vec![to_conversation_message(
+            msg, &sessions, &projects, &part_root,
+        )])
+    }
+
+    // Load shared context once, then process all files.
+    // OpenCode doesn't need deduplication - each message file is unique.
+    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let Some(home_dir) = dirs::home_dir() else {
+            eprintln!("Could not find home directory for OpenCode");
+            return Vec::new();
+        };
+
+        let storage_root = home_dir.join(".local/share/opencode/storage");
+        let project_root = storage_root.join("project");
+        let session_root = storage_root.join("session");
+        let part_root = storage_root.join("part");
+
+        // Load shared context once
+        let projects = load_projects(&project_root);
+        let sessions = load_sessions(&session_root);
+
+        // Process all files with shared context
+        sources
+            .iter()
+            .filter_map(|source| {
+                let content = fs::read_to_string(&source.path).ok()?;
                 let mut bytes = content.into_bytes();
-                let msg = match simd_json::from_slice::<OpenCodeMessage>(&mut bytes) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("Failed to parse OpenCode message {}: {e}", path.display());
-                        return None;
-                    }
-                };
+                let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
 
                 Some(to_conversation_message(
                     msg, &sessions, &projects, &part_root,
                 ))
             })
-            .collect();
+            .collect()
+    }
 
-        Ok(messages)
+    // Override get_stats_with_sources to load shared context once for efficiency
+    async fn get_stats_with_sources(
+        &self,
+        sources: Vec<DataSource>,
+    ) -> Result<crate::types::AgenticCodingToolStats> {
+        let home_dir = dirs::home_dir().context("Could not find home directory")?;
+        let storage_root = home_dir.join(".local/share/opencode/storage");
+        let project_root = storage_root.join("project");
+        let session_root = storage_root.join("session");
+        let part_root = storage_root.join("part");
+
+        let projects = load_projects(&project_root);
+        let sessions = load_sessions(&session_root);
+
+        let mut messages = Vec::new();
+        for source in sources {
+            let path = &source.path;
+            let content = match fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to read OpenCode message {}: {e}", path.display());
+                    continue;
+                }
+            };
+
+            let mut bytes = content.into_bytes();
+            let msg = match simd_json::from_slice::<OpenCodeMessage>(&mut bytes) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Failed to parse OpenCode message {}: {e}", path.display());
+                    continue;
+                }
+            };
+
+            messages.push(to_conversation_message(
+                msg, &sessions, &projects, &part_root,
+            ));
+        }
+
+        // Aggregate stats
+        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
+        daily_stats.retain(|date, _| date != "unknown");
+        let num_conversations = daily_stats
+            .values()
+            .map(|stats| stats.conversations as u64)
+            .sum();
+
+        Ok(crate::types::AgenticCodingToolStats {
+            daily_stats,
+            num_conversations,
+            messages,
+            analyzer_name: self.display_name().to_string(),
+        })
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

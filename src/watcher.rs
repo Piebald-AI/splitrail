@@ -132,8 +132,8 @@ pub struct RealtimeStatsManager {
 
 impl RealtimeStatsManager {
     pub async fn new(registry: AnalyzerRegistry) -> Result<Self> {
-        // Initial stats load using a temporary thread pool for parallel parsing.
-        let initial_stats = registry.load_all_stats_views().await?;
+        // Initial stats load using async I/O.
+        let initial_stats = registry.load_all_stats_views_async().await?;
         let (update_tx, update_rx) = watch::channel(initial_stats);
 
         Ok(Self {
@@ -372,10 +372,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn parse_conversations(
-            &self,
-            _sources: Vec<DataSource>,
-        ) -> Result<Vec<ConversationMessage>> {
+        fn parse_source(&self, _source: &DataSource) -> Result<Vec<ConversationMessage>> {
             Ok(self.stats.messages.clone())
         }
 

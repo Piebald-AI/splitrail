@@ -241,30 +241,19 @@ impl Analyzer for PiebaldAnalyzer {
         Ok(Vec::new())
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        let mut all_messages = Vec::new();
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        let conn = open_piebald_db(&source.path)?;
+        let chats = query_chats(&conn)?;
+        let messages = query_messages(&conn)?;
+        Ok(convert_messages(&chats, messages))
+    }
 
-        for source in sources {
-            match open_piebald_db(&source.path) {
-                Ok(conn) => {
-                    let chats = query_chats(&conn)?;
-                    let messages = query_messages(&conn)?;
-                    let converted = convert_messages(&chats, messages);
-                    all_messages.extend(converted);
-                }
-                Err(e) => {
-                    eprintln!("Failed to open Piebald database {:?}: {}", source.path, e);
-                }
-            }
-        }
-
-        // Deduplicate by local hash
-        Ok(crate::utils::deduplicate_by_local_hash_parallel(
-            all_messages,
-        ))
+    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let all_messages: Vec<ConversationMessage> = sources
+            .iter()
+            .flat_map(|source| self.parse_source(source).unwrap_or_default())
+            .collect();
+        crate::utils::deduplicate_by_local_hash(all_messages)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
@@ -299,11 +288,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_parse_conversations_empty_sources() {
+    async fn test_get_stats_empty_sources() {
         let analyzer = PiebaldAnalyzer::new();
-        let result = analyzer.parse_conversations(Vec::new()).await;
+        let result = analyzer.get_stats_with_sources(Vec::new()).await;
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        assert!(result.unwrap().messages.is_empty());
     }
 
     #[test]

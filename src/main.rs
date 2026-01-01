@@ -417,7 +417,7 @@ async fn handle_config_subcommand(config_args: ConfigArgs) {
 }
 
 /// Release unused memory back to the OS after heavy allocations.
-/// Call this after Rayon parallel operations complete to reclaim arena memory.
+/// Call this after heavy allocations (e.g., parsing) to reclaim memory.
 #[cfg(feature = "mimalloc")]
 pub fn release_unused_memory() {
     unsafe extern "C" {

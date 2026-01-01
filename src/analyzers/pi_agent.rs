@@ -4,12 +4,11 @@ use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jwalk::WalkDir;
-use rayon::prelude::*;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 pub struct PiAgentAnalyzer;
 
@@ -20,12 +19,6 @@ impl PiAgentAnalyzer {
 
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".pi").join("agent").join("sessions"))
-    }
-
-    fn walk_data_dir() -> Option<WalkDir> {
-        Self::data_dir()
-            .filter(|d| d.is_dir())
-            .map(|sessions_dir| WalkDir::new(sessions_dir).min_depth(2).max_depth(2))
     }
 }
 
@@ -418,69 +411,55 @@ impl Analyzer for PiAgentAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::walk_data_dir()
+        let sources = Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|sessions_dir| {
+                WalkDir::new(sessions_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            .map(|e| DataSource { path: e.path() })
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
             .collect();
 
         Ok(sources)
     }
 
     fn is_available(&self) -> bool {
-        Self::walk_data_dir()
+        Self::data_dir()
+            .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|w| w.into_iter())
+            .flat_map(|sessions_dir| {
+                WalkDir::new(sessions_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
             .filter_map(|e| e.ok())
             .any(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        let all_entries: Vec<ConversationMessage> = sources
-            .into_par_iter()
-            .filter_map(|source| {
-                let project_hash = extract_and_hash_project_id(&source.path);
-                let conversation_hash = hash_text(&source.path.to_string_lossy());
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        let project_hash = extract_and_hash_project_id(&source.path);
+        let conversation_hash = hash_text(&source.path.to_string_lossy());
 
-                match File::open(&source.path) {
-                    Ok(file) => {
-                        match parse_jsonl_file(
-                            &source.path,
-                            file,
-                            &project_hash,
-                            &conversation_hash,
-                        ) {
-                            Ok((messages, _)) => Some(messages),
-                            Err(e) => {
-                                eprintln!(
-                                    "Failed to parse Pi Agent session {}: {e:#}",
-                                    source.path.display()
-                                );
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to open Pi Agent session {}: {e}",
-                            source.path.display()
-                        );
-                        None
-                    }
-                }
-            })
-            .flat_map(|messages| messages)
+        let file = File::open(&source.path)?;
+        let (messages, _) =
+            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
+        Ok(messages)
+    }
+
+    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let all_messages: Vec<ConversationMessage> = sources
+            .iter()
+            .flat_map(|source| self.parse_source(source).unwrap_or_default())
             .collect();
-
-        // Deduplicate by local hash
-        Ok(crate::utils::deduplicate_by_local_hash_parallel(
-            all_entries,
-        ))
+        crate::utils::deduplicate_by_local_hash(all_messages)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

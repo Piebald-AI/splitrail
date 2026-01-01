@@ -46,11 +46,9 @@ async fn test_gemini_cli_reasoning_tokens() {
 
     let analyzer = GeminiCliAnalyzer::new();
 
-    // We can't easily inject sources into `get_stats` without mocking `glob` or `discover_data_sources`.
-    // But `parse_conversations` takes a list of sources.
-
-    let sources = vec![crate::analyzer::DataSource { path: session_path }];
-    let messages = analyzer.parse_conversations(sources).await.unwrap();
+    // Use parse_sources to parse and deduplicate
+    let source = crate::analyzer::DataSource { path: session_path };
+    let messages = analyzer.parse_sources(&[source]);
 
     assert_eq!(messages.len(), 2);
 

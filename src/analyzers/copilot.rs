@@ -4,12 +4,11 @@ use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jwalk::WalkDir;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::path::{Path, PathBuf};
 use tiktoken_rs::get_bpe_from_model;
+use walkdir::WalkDir;
 
 pub struct CopilotAnalyzer;
 
@@ -45,12 +44,6 @@ impl CopilotAnalyzer {
         }
 
         dirs
-    }
-
-    fn walk_data_dirs() -> impl Iterator<Item = WalkDir> {
-        Self::workspace_storage_dirs()
-            .into_iter()
-            .map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3))
     }
 }
 
@@ -456,8 +449,9 @@ impl Analyzer for CopilotAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::walk_data_dirs()
-            .flat_map(|w| w.into_iter())
+        let sources = Self::workspace_storage_dirs()
+            .into_iter()
+            .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_type().is_file()
@@ -467,15 +461,18 @@ impl Analyzer for CopilotAnalyzer {
                         .and_then(|p| p.file_name())
                         .is_some_and(|name| name == "chatSessions")
             })
-            .map(|e| DataSource { path: e.path() })
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
             .collect();
 
         Ok(sources)
     }
 
     fn is_available(&self) -> bool {
-        Self::walk_data_dirs()
-            .flat_map(|w| w.into_iter())
+        Self::workspace_storage_dirs()
+            .into_iter()
+            .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
             .filter_map(|e| e.ok())
             .any(|e| {
                 e.file_type().is_file()
@@ -487,29 +484,8 @@ impl Analyzer for CopilotAnalyzer {
             })
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        // Parse all session files in parallel
-        let all_entries: Vec<ConversationMessage> = sources
-            .into_par_iter()
-            .flat_map(|source| match parse_copilot_session_file(&source.path) {
-                Ok(messages) => messages,
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse Copilot session file {:?}: {}",
-                        source.path, e
-                    );
-                    Vec::new()
-                }
-            })
-            .collect();
-
-        // Parallel deduplicate by global hash
-        Ok(crate::utils::deduplicate_by_global_hash_parallel(
-            all_entries,
-        ))
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        parse_copilot_session_file(&source.path)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
