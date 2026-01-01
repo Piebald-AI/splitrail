@@ -1,5 +1,5 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -29,7 +29,6 @@ impl CopilotAnalyzer {
         Self
     }
 
-    /// Returns all VSCode workspaceStorage directories where Copilot data may exist.
     fn workspace_storage_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
 
@@ -46,6 +45,12 @@ impl CopilotAnalyzer {
         }
 
         dirs
+    }
+
+    fn walk_data_dirs() -> impl Iterator<Item = WalkDir> {
+        Self::workspace_storage_dirs()
+            .into_iter()
+            .map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3))
     }
 }
 
@@ -451,30 +456,35 @@ impl Analyzer for CopilotAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let mut sources = Vec::new();
-
-        for workspace_storage in Self::workspace_storage_dirs() {
-            // Pattern: */chatSessions/*.json
-            // jwalk walks directories in parallel
-            for entry in WalkDir::new(&workspace_storage)
-                .min_depth(3) // */chatSessions/*.json
-                .max_depth(3)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().is_some_and(|ext| ext == "json")
-                        && e.path()
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .is_some_and(|name| name == "chatSessions")
-                })
-            {
-                sources.push(DataSource { path: entry.path() });
-            }
-        }
+        let sources = Self::walk_data_dirs()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "json")
+                    && e.path()
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|name| name == "chatSessions")
+            })
+            .map(|e| DataSource { path: e.path() })
+            .collect();
 
         Ok(sources)
+    }
+
+    fn is_available(&self) -> bool {
+        Self::walk_data_dirs()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "json")
+                    && e.path()
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|name| name == "chatSessions")
+            })
     }
 
     async fn parse_conversations(
@@ -500,32 +510,6 @@ impl Analyzer for CopilotAnalyzer {
         Ok(crate::utils::deduplicate_by_global_hash_parallel(
             all_entries,
         ))
-    }
-
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        // Remove any "unknown" entries
-        daily_stats.retain(|date, _| date != "unknown");
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: self.display_name().to_string(),
-        })
-    }
-
-    fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
 
 const DEFAULT_FALLBACK_MODEL: &str = "gpt-5";
@@ -22,9 +22,14 @@ impl CodexCliAnalyzer {
         Self
     }
 
-    /// Returns the root directory for Codex CLI session data.
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".codex").join("sessions"))
+    }
+
+    fn walk_data_dir() -> Option<WalkDir> {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .map(WalkDir::new)
     }
 }
 
@@ -46,25 +51,29 @@ impl Analyzer for CodexCliAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let mut sources = Vec::new();
-
-        if let Some(sessions_dir) = Self::data_dir()
-            && sessions_dir.is_dir()
-        {
-            // jwalk walks directories in parallel, recursively
-            for entry in WalkDir::new(&sessions_dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().is_some_and(|ext| ext == "jsonl")
-                })
-            {
-                sources.push(DataSource { path: entry.path() });
-            }
-        }
+        let sources = Self::walk_data_dir()
+            .into_iter()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "jsonl")
+            })
+            .map(|e| DataSource { path: e.path() })
+            .collect();
 
         Ok(sources)
+    }
+
+    fn is_available(&self) -> bool {
+        Self::walk_data_dir()
+            .into_iter()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "jsonl")
+            })
     }
 
     async fn parse_conversations(
@@ -95,29 +104,6 @@ impl Analyzer for CodexCliAnalyzer {
         // For Codex CLI, we don't need to deduplicate since each session is separate
         // but we keep the logic encapsulated for future changes.
         aggregated
-    }
-
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: self.display_name().to_string(),
-        })
-    }
-
-    fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

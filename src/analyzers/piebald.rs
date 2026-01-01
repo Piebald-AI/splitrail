@@ -4,7 +4,7 @@
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -267,27 +267,12 @@ impl Analyzer for PiebaldAnalyzer {
         ))
     }
 
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: self.display_name().to_string(),
-        })
-    }
-
-    fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
+    fn get_watch_directories(&self) -> Vec<PathBuf> {
+        dirs::data_dir()
+            .map(|data_dir| data_dir.join("piebald"))
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .collect()
     }
 }
 

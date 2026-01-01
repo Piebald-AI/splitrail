@@ -316,7 +316,7 @@ impl SplitrailMcpServer {
         let registry = create_analyzer_registry();
         let analyzers: Vec<String> = registry
             .available_analyzers()
-            .iter()
+            .into_iter()
             .map(|a| a.display_name().to_string())
             .collect();
 

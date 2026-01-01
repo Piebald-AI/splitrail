@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{fast_hash, hash_text};
 use jwalk::WalkDir;
 
@@ -31,9 +31,14 @@ impl ClaudeCodeAnalyzer {
         Self
     }
 
-    /// Returns the root directory for Claude Code project data.
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+    }
+
+    fn walk_data_dir() -> Option<WalkDir> {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .map(|projects_dir| WalkDir::new(projects_dir).min_depth(2).max_depth(2))
     }
 }
 
@@ -55,22 +60,13 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let mut sources = Vec::new();
-
-        if let Some(projects_dir) = Self::data_dir()
-            && projects_dir.is_dir()
-        {
-            // jwalk walks directories in parallel
-            for entry in WalkDir::new(&projects_dir)
-                .min_depth(2)
-                .max_depth(2)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            {
-                sources.push(DataSource { path: entry.path() });
-            }
-        }
+        let sources = Self::walk_data_dir()
+            .into_iter()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .map(|e| DataSource { path: e.path() })
+            .collect();
 
         Ok(sources)
     }
@@ -201,37 +197,19 @@ impl Analyzer for ClaudeCodeAnalyzer {
         Ok(result.into_iter().map(|(_, msg)| msg).collect())
     }
 
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        // Remove any remaining "unknown" entries from daily_stats
-        daily_stats.retain(|date, _| date != "unknown");
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: self.display_name().to_string(),
-        })
-    }
-
-    fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
-    }
-
     fn get_watch_directories(&self) -> Vec<PathBuf> {
         Self::data_dir()
             .filter(|d| d.is_dir())
             .into_iter()
             .collect()
+    }
+
+    fn is_available(&self) -> bool {
+        Self::walk_data_dir()
+            .into_iter()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
     }
 }
 

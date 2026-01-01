@@ -176,7 +176,6 @@ impl RealtimeStatsManager {
                         .await;
                 } else {
                     // Fallback to full reload if cache not populated (shouldn't happen normally)
-                    self.registry.invalidate_cache(&analyzer_name);
                     self.reload_analyzer_stats(&analyzer_name).await;
                 }
             }
@@ -188,7 +187,6 @@ impl RealtimeStatsManager {
                     self.apply_view_update(&analyzer_name, updated_view).await;
                 } else {
                     // Fallback to full reload
-                    self.registry.invalidate_cache(&analyzer_name);
                     self.reload_analyzer_stats(&analyzer_name).await;
                 }
             }
@@ -409,6 +407,10 @@ mod tests {
 
         fn is_available(&self) -> bool {
             self.available
+        }
+
+        fn get_watch_directories(&self) -> Vec<PathBuf> {
+            Vec::new()
         }
     }
 

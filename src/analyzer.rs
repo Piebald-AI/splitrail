@@ -106,6 +106,26 @@ pub fn get_vscode_extension_tasks_dirs(extension_id: &str) -> Vec<PathBuf> {
     dirs
 }
 
+fn walk_vscode_extension_tasks(extension_id: &str) -> impl Iterator<Item = WalkDir> {
+    get_vscode_extension_tasks_dirs(extension_id)
+        .into_iter()
+        .map(|tasks_dir| WalkDir::new(tasks_dir).min_depth(2).max_depth(2))
+}
+
+/// Check if any data sources exist for a VSCode extension-based analyzer.
+/// Short-circuits after finding the first match.
+pub fn vscode_extension_has_sources(extension_id: &str, target_filename: &str) -> bool {
+    walk_vscode_extension_tasks(extension_id)
+        .flat_map(|w| w.into_iter())
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_type().is_file()
+                && e.path()
+                    .file_name()
+                    .is_some_and(|name| name == target_filename)
+        })
+}
+
 /// Discover data sources for VSCode extension-based analyzers using jwalk.
 ///
 /// # Arguments
@@ -117,33 +137,24 @@ pub fn discover_vscode_extension_sources(
     target_filename: &str,
     return_parent_dir: bool,
 ) -> Result<Vec<DataSource>> {
-    let mut sources = Vec::new();
-
-    for tasks_dir in get_vscode_extension_tasks_dirs(extension_id) {
-        // Pattern: {task_id}/{target_filename}
-        for entry in WalkDir::new(&tasks_dir)
-            .min_depth(2)
-            .max_depth(2)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type().is_file()
-                    && e.path()
-                        .file_name()
-                        .is_some_and(|name| name == target_filename)
-            })
-        {
-            let path = if return_parent_dir {
+    let sources = walk_vscode_extension_tasks(extension_id)
+        .flat_map(|w| w.into_iter())
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file()
+                && e.path()
+                    .file_name()
+                    .is_some_and(|name| name == target_filename)
+        })
+        .filter_map(|entry| {
+            if return_parent_dir {
                 entry.path().parent().map(|p| p.to_path_buf())
             } else {
                 Some(entry.path())
-            };
-
-            if let Some(p) = path {
-                sources.push(DataSource { path: p });
             }
-        }
-    }
+        })
+        .map(|path| DataSource { path })
+        .collect();
 
     Ok(sources)
 }
@@ -163,7 +174,7 @@ pub trait Analyzer: Send + Sync {
     /// Get glob patterns for discovering data sources
     fn get_data_glob_patterns(&self) -> Vec<String>;
 
-    /// Discover data sources for this analyzer
+    /// Discover data sources for this analyzer (returns all sources)
     fn discover_data_sources(&self) -> Result<Vec<DataSource>>;
 
     /// Parse conversations from data sources into normalized messages
@@ -172,40 +183,50 @@ pub trait Analyzer: Send + Sync {
         sources: Vec<DataSource>,
     ) -> Result<Vec<ConversationMessage>>;
 
-    /// Get complete statistics for this analyzer
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats>;
-
-    /// Check if this analyzer is available on the current system
-    fn is_available(&self) -> bool;
-
     /// Get directories to watch for file changes.
-    ///
-    /// Returns the root data directories for this analyzer. The file watcher will
-    /// recursively watch these directories for new, modified, or deleted files.
-    ///
-    /// This is important for analyzers with nested directory structures (e.g.,
-    /// `sessions/{id}/file.json`) where new subdirectories need to be detected.
-    /// Without this, only existing subdirectories would be watched, missing new
-    /// sessions/projects/tasks.
-    ///
-    /// Default implementation returns empty vec, which falls back to watching
-    /// parent directories of discovered data sources (legacy behavior).
-    fn get_watch_directories(&self) -> Vec<PathBuf> {
-        Vec::new()
+    /// Returns the root data directories for this analyzer.
+    fn get_watch_directories(&self) -> Vec<PathBuf>;
+
+    /// Check if this analyzer is available (has any data).
+    /// Default: checks if discover_data_sources returns at least one source.
+    /// Analyzers can override with optimized versions that stop after finding 1 file.
+    fn is_available(&self) -> bool {
+        self.discover_data_sources()
+            .is_ok_and(|sources| !sources.is_empty())
     }
 
-    /// Get lightweight view for TUI (default: compute full stats, convert to view).
-    /// Individual analyzers can override for efficiency if they can avoid loading messages.
-    async fn get_stats_view(&self) -> Result<crate::types::AnalyzerStatsView> {
-        self.get_stats().await.map(|s| s.into_view())
+    /// Get stats with pre-discovered sources (avoids double discovery).
+    async fn get_stats_with_sources(
+        &self,
+        sources: Vec<DataSource>,
+    ) -> Result<AgenticCodingToolStats> {
+        let messages = self.parse_conversations(sources).await?;
+        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
+        daily_stats.retain(|date, _| date != "unknown");
+        let num_conversations = daily_stats
+            .values()
+            .map(|stats| stats.conversations as u64)
+            .sum();
+
+        Ok(AgenticCodingToolStats {
+            daily_stats,
+            num_conversations,
+            messages,
+            analyzer_name: self.display_name().to_string(),
+        })
+    }
+
+    /// Get complete statistics for this analyzer.
+    /// Default: discovers sources then calls get_stats_with_sources().
+    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+        let sources = self.discover_data_sources()?;
+        self.get_stats_with_sources(sources).await
     }
 }
 
 /// Registry for managing multiple analyzers
 pub struct AnalyzerRegistry {
     analyzers: Vec<Box<dyn Analyzer>>,
-    /// Cached data sources per analyzer (display_name -> sources)
-    data_source_cache: DashMap<String, Vec<DataSource>>,
     /// Per-file contribution cache for true incremental updates.
     /// Key: PathHash (xxh3 of file path), Value: pre-computed aggregate contribution.
     /// Using hash avoids allocations during incremental updates.
@@ -226,7 +247,6 @@ impl AnalyzerRegistry {
     pub fn new() -> Self {
         Self {
             analyzers: Vec::new(),
-            data_source_cache: DashMap::new(),
             file_contribution_cache: DashMap::new(),
             analyzer_views_cache: DashMap::new(),
         }
@@ -237,43 +257,35 @@ impl AnalyzerRegistry {
         self.analyzers.push(Box::new(analyzer));
     }
 
-    /// Get or discover data sources for an analyzer (cached)
-    pub fn get_cached_data_sources(&self, analyzer: &dyn Analyzer) -> Result<Vec<DataSource>> {
-        let name = analyzer.display_name().to_string();
-
-        // Check cache first
-        if let Some(cached) = self.data_source_cache.get(&name) {
-            return Ok(cached.clone());
-        }
-
-        // Discover and cache
-        let sources = analyzer.discover_data_sources()?;
-        self.data_source_cache.insert(name, sources.clone());
-        Ok(sources)
-    }
-
-    /// Invalidate cache for a specific analyzer
-    pub fn invalidate_cache(&self, analyzer_name: &str) {
-        self.data_source_cache.remove(analyzer_name);
-    }
-
-    /// Invalidate all caches
+    /// Invalidate all caches (file contributions and analyzer views)
     pub fn invalidate_all_caches(&self) {
-        self.data_source_cache.clear();
         self.file_contribution_cache.clear();
         self.analyzer_views_cache.clear();
     }
 
-    /// Get available analyzers (those that are present on the system)
-    /// Uses cached data sources to check availability, avoiding redundant glob scans
+    /// Get available analyzers (fast check, no source discovery).
+    /// Returns analyzers that have at least one data source on the system.
     pub fn available_analyzers(&self) -> Vec<&dyn Analyzer> {
         self.analyzers
             .iter()
-            .filter(|a| {
-                self.get_cached_data_sources(a.as_ref())
-                    .is_ok_and(|sources| !sources.is_empty())
-            })
+            .filter(|a| a.is_available())
             .map(|a| a.as_ref())
+            .collect()
+    }
+
+    /// Get available analyzers with their discovered data sources.
+    /// Returns analyzers that have at least one data source on the system.
+    /// Sources are discovered once and returned for callers to use directly.
+    pub fn available_analyzers_with_sources(&self) -> Vec<(&dyn Analyzer, Vec<DataSource>)> {
+        self.analyzers
+            .iter()
+            .filter_map(|a| {
+                let sources = a.discover_data_sources().ok()?;
+                if sources.is_empty() {
+                    return None;
+                }
+                Some((a.as_ref(), sources))
+            })
             .collect()
     }
 
@@ -288,12 +300,15 @@ impl AnalyzerRegistry {
     /// Load stats from all available analyzers in parallel.
     /// Used for uploads - returns full stats with messages.
     pub async fn load_all_stats(&self) -> Result<crate::types::MultiAnalyzerStats> {
-        let available_analyzers = self.available_analyzers();
+        let available = self.available_analyzers_with_sources();
 
         // Create futures for all analyzers - they'll run concurrently
-        let futures: Vec<_> = available_analyzers
+        // Uses get_stats_with_sources() to avoid double discovery
+        let futures: Vec<_> = available
             .into_iter()
-            .map(|analyzer| async move { analyzer.get_stats().await })
+            .map(
+                |(analyzer, sources)| async move { analyzer.get_stats_with_sources(sources).await },
+            )
             .collect();
 
         // Run all analyzers in parallel
@@ -329,19 +344,16 @@ impl AnalyzerRegistry {
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to create thread pool: {}", e))?;
 
-        // Collect analyzer info
-        let available_analyzers = self.available_analyzers();
-        let analyzer_data: Vec<_> = available_analyzers
-            .iter()
-            .map(|a| {
-                let name = a.display_name().to_string();
-                let sources = self.get_cached_data_sources(*a).unwrap_or_default();
-                (name, sources)
-            })
+        // Get available analyzers with their sources (single discovery)
+        let analyzer_data: Vec<_> = self
+            .available_analyzers_with_sources()
+            .into_iter()
+            .map(|(a, sources)| (a, a.display_name().to_string(), sources))
             .collect();
 
         // Run all analyzer parsing inside the temp pool
         // All into_par_iter() calls will use this pool
+        // Uses get_stats_with_sources() to avoid double discovery
         let all_stats: Vec<Result<AgenticCodingToolStats>> = pool.install(|| {
             // Create a runtime for async operations inside the pool
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -349,9 +361,11 @@ impl AnalyzerRegistry {
                 .build()
                 .expect("Failed to create runtime");
 
-            available_analyzers
-                .into_iter()
-                .map(|analyzer| rt.block_on(analyzer.get_stats()))
+            analyzer_data
+                .iter()
+                .map(|(analyzer, _, sources)| {
+                    rt.block_on(analyzer.get_stats_with_sources(sources.clone()))
+                })
                 .collect()
         });
 
@@ -360,7 +374,7 @@ impl AnalyzerRegistry {
 
         // Build views from results
         let mut all_views = Vec::new();
-        for ((name, sources), result) in analyzer_data.into_iter().zip(all_stats.into_iter()) {
+        for ((_, name, sources), result) in analyzer_data.into_iter().zip(all_stats.into_iter()) {
             match result {
                 Ok(stats) => {
                     // Populate file contribution cache for incremental updates
@@ -512,34 +526,14 @@ impl AnalyzerRegistry {
     }
 
     /// Get a mapping of data directories to analyzer names for file watching.
-    ///
-    /// Prefers explicit watch directories from `get_watch_directories()` when available,
-    /// which allows detecting new subdirectories (sessions/projects/tasks).
-    /// Falls back to parent directories of data sources for backward compatibility.
+    /// Uses explicit watch directories from `get_watch_directories()`.
     pub fn get_directory_to_analyzer_mapping(&self) -> std::collections::HashMap<PathBuf, String> {
         let mut dir_to_analyzer = std::collections::HashMap::new();
 
         for analyzer in self.available_analyzers() {
-            let watch_dirs = analyzer.get_watch_directories();
-
-            if !watch_dirs.is_empty() {
-                // Use explicit watch directories (preferred - catches new subdirectories)
-                for dir in watch_dirs {
-                    if dir.exists() {
-                        dir_to_analyzer.insert(dir, analyzer.display_name().to_string());
-                    }
-                }
-            } else {
-                // Fallback: derive from data sources (legacy behavior)
-                if let Ok(sources) = self.get_cached_data_sources(analyzer) {
-                    for source in sources {
-                        if let Some(parent) = source.path.parent()
-                            && parent.exists()
-                        {
-                            dir_to_analyzer
-                                .insert(parent.to_path_buf(), analyzer.display_name().to_string());
-                        }
-                    }
+            for dir in analyzer.get_watch_directories() {
+                if dir.exists() {
+                    dir_to_analyzer.insert(dir, analyzer.display_name().to_string());
                 }
             }
         }
@@ -592,6 +586,18 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn get_stats_with_sources(
+            &self,
+            _sources: Vec<DataSource>,
+        ) -> Result<AgenticCodingToolStats> {
+            if self.fail_stats {
+                anyhow::bail!("stats failed");
+            }
+            self.stats
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no stats"))
+        }
+
         async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
             if self.fail_stats {
                 anyhow::bail!("stats failed");
@@ -603,6 +609,14 @@ mod tests {
 
         fn is_available(&self) -> bool {
             self.available
+        }
+
+        fn get_watch_directories(&self) -> Vec<PathBuf> {
+            // Return parent directories of sources for testing
+            self.sources
+                .iter()
+                .filter_map(|p| p.parent().map(|parent| parent.to_path_buf()))
+                .collect()
         }
     }
 
@@ -799,35 +813,6 @@ mod tests {
         assert!(
             !mapping.contains_key(&session2_dir),
             "Should NOT watch individual session directories when watch_dirs is set"
-        );
-    }
-
-    #[tokio::test]
-    async fn registry_falls_back_to_parent_dirs_when_no_watch_dirs() {
-        use std::fs;
-
-        // Without explicit watch_dirs, should fall back to parent directories
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let base = temp_dir.path().join("data").join("files");
-        fs::create_dir_all(&base).expect("mkdirs");
-        let file_path = base.join("data.json");
-
-        let mut registry = AnalyzerRegistry::new();
-        let analyzer = TestAnalyzerWithWatchDirs {
-            name: "fallback",
-            sources: vec![file_path.clone()],
-            watch_dirs: vec![], // Empty = use legacy behavior
-        };
-
-        registry.register(analyzer);
-
-        let mapping = registry.get_directory_to_analyzer_mapping();
-
-        // Should fall back to parent directory of the source file
-        assert_eq!(
-            mapping.get(&base).map(String::as_str),
-            Some("fallback"),
-            "Should fall back to watching parent directory when watch_dirs is empty"
         );
     }
 

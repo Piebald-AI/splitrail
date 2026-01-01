@@ -1,8 +1,6 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output_cost};
-use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
-};
+use crate::types::{Application, ConversationMessage, FileCategory, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,9 +18,14 @@ impl GeminiCliAnalyzer {
         Self
     }
 
-    /// Returns the root directory for Gemini CLI data.
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".gemini").join("tmp"))
+    }
+
+    fn walk_data_dir() -> Option<WalkDir> {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3))
     }
 }
 
@@ -311,32 +314,37 @@ impl Analyzer for GeminiCliAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let mut sources = Vec::new();
-
-        if let Some(tmp_dir) = Self::data_dir()
-            && tmp_dir.is_dir()
-        {
-            // Pattern: ~/.gemini/tmp/*/chats/*.json
-            // jwalk walks directories in parallel
-            for entry in WalkDir::new(&tmp_dir)
-                .min_depth(3) // */chats/*.json
-                .max_depth(3)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().is_some_and(|ext| ext == "json")
-                        && e.path()
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .is_some_and(|name| name == "chats")
-                })
-            {
-                sources.push(DataSource { path: entry.path() });
-            }
-        }
+        let sources = Self::walk_data_dir()
+            .into_iter()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "json")
+                    && e.path()
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|name| name == "chats")
+            })
+            .map(|e| DataSource { path: e.path() })
+            .collect();
 
         Ok(sources)
+    }
+
+    fn is_available(&self) -> bool {
+        Self::walk_data_dir()
+            .into_iter()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "json")
+                    && e.path()
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|name| name == "chats")
+            })
     }
 
     async fn parse_conversations(
@@ -363,29 +371,6 @@ impl Analyzer for GeminiCliAnalyzer {
         Ok(crate::utils::deduplicate_by_local_hash_parallel(
             all_entries,
         ))
-    }
-
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            analyzer_name: self.display_name().to_string(),
-            daily_stats,
-            messages,
-            num_conversations,
-        })
-    }
-
-    fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

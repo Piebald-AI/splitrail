@@ -1,5 +1,5 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,9 +18,14 @@ impl PiAgentAnalyzer {
         Self
     }
 
-    /// Returns the root directory for Pi Agent session data.
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".pi").join("agent").join("sessions"))
+    }
+
+    fn walk_data_dir() -> Option<WalkDir> {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .map(|sessions_dir| WalkDir::new(sessions_dir).min_depth(2).max_depth(2))
     }
 }
 
@@ -413,24 +418,23 @@ impl Analyzer for PiAgentAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let mut sources = Vec::new();
-
-        if let Some(sessions_dir) = Self::data_dir()
-            && sessions_dir.is_dir()
-        {
-            // Pattern: ~/.pi/agent/sessions/*/*.jsonl
-            for entry in WalkDir::new(&sessions_dir)
-                .min_depth(2)
-                .max_depth(2)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            {
-                sources.push(DataSource { path: entry.path() });
-            }
-        }
+        let sources = Self::walk_data_dir()
+            .into_iter()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .map(|e| DataSource { path: e.path() })
+            .collect();
 
         Ok(sources)
+    }
+
+    fn is_available(&self) -> bool {
+        Self::walk_data_dir()
+            .into_iter()
+            .flat_map(|w| w.into_iter())
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
     }
 
     async fn parse_conversations(
@@ -477,29 +481,6 @@ impl Analyzer for PiAgentAnalyzer {
         Ok(crate::utils::deduplicate_by_local_hash_parallel(
             all_entries,
         ))
-    }
-
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            analyzer_name: self.display_name().to_string(),
-            daily_stats,
-            messages,
-            num_conversations,
-        })
-    }
-
-    fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

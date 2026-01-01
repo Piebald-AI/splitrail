@@ -1,7 +1,8 @@
 use crate::analyzer::{
     Analyzer, DataSource, discover_vscode_extension_sources, get_vscode_extension_tasks_dirs,
+    vscode_extension_has_sources,
 };
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -304,6 +305,10 @@ impl Analyzer for ClineAnalyzer {
         discover_vscode_extension_sources(CLINE_EXTENSION_ID, "ui_messages.json", true)
     }
 
+    fn is_available(&self) -> bool {
+        vscode_extension_has_sources(CLINE_EXTENSION_ID, "ui_messages.json")
+    }
+
     async fn parse_conversations(
         &self,
         sources: Vec<DataSource>,
@@ -327,32 +332,6 @@ impl Analyzer for ClineAnalyzer {
         Ok(crate::utils::deduplicate_by_global_hash_parallel(
             all_entries,
         ))
-    }
-
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        // Remove any "unknown" entries
-        daily_stats.retain(|date, _| date != "unknown");
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: self.display_name().to_string(),
-        })
-    }
-
-    fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
