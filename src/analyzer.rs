@@ -347,19 +347,9 @@ impl AnalyzerRegistry {
         })
     }
 
-    /// Load view-only stats using a temporary thread pool. Ran once at startup.
-    /// The pool is dropped after loading, releasing all thread-local memory.
+    /// Load view-only stats sequentially at startup.
     /// Populates file contribution cache for true incremental updates.
-    pub fn load_all_stats_views_parallel(
-        &self,
-        num_threads: usize,
-    ) -> Result<crate::types::MultiAnalyzerStatsView> {
-        // Create the temporary pool
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to create thread pool: {}", e))?;
-
+    pub async fn load_all_stats_views(&self) -> Result<crate::types::MultiAnalyzerStatsView> {
         // Get available analyzers with their sources (single discovery)
         let analyzer_data: Vec<_> = self
             .available_analyzers_with_sources()
@@ -367,26 +357,11 @@ impl AnalyzerRegistry {
             .map(|(a, sources)| (a, a.display_name().to_string(), sources))
             .collect();
 
-        // Run all analyzer parsing inside the temp pool
-        // All into_par_iter() calls will use this pool
-        // Uses get_stats_with_sources() to avoid double discovery
-        let all_stats: Vec<Result<AgenticCodingToolStats>> = pool.install(|| {
-            // Create a runtime for async operations inside the pool
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to create runtime");
-
-            analyzer_data
-                .iter()
-                .map(|(analyzer, _, sources)| {
-                    rt.block_on(analyzer.get_stats_with_sources(sources.clone()))
-                })
-                .collect()
-        });
-
-        // Pool is dropped here, releasing all thread memory
-        drop(pool);
+        // Run all analyzer parsing sequentially
+        let mut all_stats: Vec<Result<AgenticCodingToolStats>> = Vec::new();
+        for (analyzer, _, sources) in &analyzer_data {
+            all_stats.push(analyzer.get_stats_with_sources(sources.clone()).await);
+        }
 
         // Build views from results
         let mut all_views = Vec::new();
@@ -914,8 +889,9 @@ mod tests {
 
         // Initial load should preserve registration order
         let initial_views = registry
-            .load_all_stats_views_parallel(1)
-            .expect("load_all_stats_views_parallel");
+            .load_all_stats_views()
+            .await
+            .expect("load_all_stats_views");
         let initial_names: Vec<String> = initial_views
             .analyzer_stats
             .iter()

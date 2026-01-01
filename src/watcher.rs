@@ -133,11 +133,7 @@ pub struct RealtimeStatsManager {
 impl RealtimeStatsManager {
     pub async fn new(registry: AnalyzerRegistry) -> Result<Self> {
         // Initial stats load using a temporary thread pool for parallel parsing.
-        // The pool is dropped after loading, releasing thread-local memory.
-        let num_threads = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(8);
-        let initial_stats = registry.load_all_stats_views_parallel(num_threads)?;
+        let initial_stats = registry.load_all_stats_views().await?;
         let (update_tx, update_rx) = watch::channel(initial_stats);
 
         Ok(Self {
