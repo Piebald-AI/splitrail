@@ -274,6 +274,11 @@ impl Analyzer for PiebaldAnalyzer {
             .into_iter()
             .collect()
     }
+
+    fn is_valid_data_path(&self, path: &std::path::Path) -> bool {
+        // Must be the app.db file
+        path.is_file() && path.file_name().is_some_and(|n| n == "app.db")
+    }
 }
 
 #[cfg(test)]

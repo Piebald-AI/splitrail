@@ -361,6 +361,10 @@ impl Analyzer for RooCodeAnalyzer {
     fn get_watch_directories(&self) -> Vec<PathBuf> {
         get_vscode_extension_tasks_dirs(ROO_CODE_EXTENSION_ID)
     }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        path.is_file() && path.file_name().is_some_and(|n| n == "ui_messages.json")
+    }
 }
 
 #[cfg(test)]

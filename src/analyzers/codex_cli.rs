@@ -108,6 +108,11 @@ impl Analyzer for CodexCliAnalyzer {
             .into_iter()
             .collect()
     }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        // Must be a .jsonl file under sessions directory
+        path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl")
+    }
 }
 
 // CODEX CLI JSONL FILES SCHEMA - NEW WRAPPER FORMAT

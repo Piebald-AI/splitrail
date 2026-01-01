@@ -372,4 +372,14 @@ impl Analyzer for QwenCodeAnalyzer {
             .into_iter()
             .collect()
     }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        // Must be a .json file in a "chats" directory
+        path.is_file()
+            && path.extension().is_some_and(|ext| ext == "json")
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|name| name == "chats")
+    }
 }

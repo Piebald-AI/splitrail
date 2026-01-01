@@ -489,4 +489,17 @@ impl Analyzer for PiAgentAnalyzer {
             .into_iter()
             .collect()
     }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        // Must be a .jsonl file at depth 2 from sessions dir
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "jsonl") {
+            return false;
+        }
+        if let Some(data_dir) = Self::data_dir()
+            && let Ok(relative) = path.strip_prefix(&data_dir)
+        {
+            return relative.components().count() == 2;
+        }
+        false
+    }
 }

@@ -189,6 +189,13 @@ pub trait Analyzer: Send + Sync {
     /// Returns the root data directories for this analyzer.
     fn get_watch_directories(&self) -> Vec<PathBuf>;
 
+    /// Check if a path is a valid data source for this analyzer.
+    /// Used by file watcher to filter events before processing.
+    /// Default: returns true for files, false for directories.
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+
     /// Check if this analyzer is available (has any data).
     /// Default: checks if discover_data_sources returns at least one source.
     /// Analyzers can override with optimized versions that stop after finding 1 file.
@@ -441,6 +448,11 @@ impl AnalyzerRegistry {
         let analyzer = self
             .get_analyzer_by_display_name(analyzer_name)
             .ok_or_else(|| anyhow::anyhow!("Analyzer not found: {}", analyzer_name))?;
+
+        // Skip invalid paths (directories, wrong file types, etc.)
+        if !analyzer.is_valid_data_path(changed_path) {
+            return Ok(());
+        }
 
         // Hash the path for cache lookup (no allocation)
         let path_hash = PathHash::new(changed_path);

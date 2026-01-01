@@ -517,6 +517,20 @@ impl Analyzer for OpenCodeAnalyzer {
             .into_iter()
             .collect()
     }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        // Must be a file with .json extension
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
+            return false;
+        }
+        // Must be at depth 2 from data_dir (session_id/message_id.json)
+        if let Some(data_dir) = Self::data_dir()
+            && let Ok(relative) = path.strip_prefix(&data_dir)
+        {
+            return relative.components().count() == 2;
+        }
+        false
+    }
 }
 
 #[cfg(test)]
