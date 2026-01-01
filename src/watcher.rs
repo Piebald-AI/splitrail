@@ -286,8 +286,8 @@ impl RealtimeStatsManager {
         }
 
         // For upload, we need full stats (with messages)
-        // Uses sync parsing (no threadpool for incremental uploads)
-        let full_stats = match self.registry.load_all_stats_parallel() {
+        // Uses scoped threadpool that is dropped after parsing
+        let full_stats = match self.registry.load_all_stats_parallel_scoped() {
             Ok(stats) => stats,
             Err(_) => {
                 if let Ok(mut in_progress) = self.upload_in_progress.lock() {

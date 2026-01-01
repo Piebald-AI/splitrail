@@ -335,6 +335,17 @@ impl AnalyzerRegistry {
             .map(|a| a.as_ref())
     }
 
+    /// Load stats from all available analyzers in parallel using a scoped threadpool.
+    /// Creates a temporary rayon threadpool that is dropped after use, releasing memory.
+    /// Use this when you need full stats but aren't already inside a rayon context.
+    pub fn load_all_stats_parallel_scoped(&self) -> Result<crate::types::MultiAnalyzerStats> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to create rayon threadpool");
+        pool.install(|| self.load_all_stats_parallel())
+        // Pool is dropped here, releasing threads
+    }
+
     /// Load stats from all available analyzers in parallel.
     /// Used for uploads - returns full stats with messages.
     /// Must be called within a rayon threadpool context for parallelism.

@@ -247,8 +247,8 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
             let registry_for_upload = create_analyzer_registry();
             let upload_status_clone = upload_status.clone();
             tokio::spawn(async move {
-                if let Ok(full_stats) = registry_for_upload.load_all_stats_parallel() {
-                    // Release memory from parallel parsing back to OS
+                if let Ok(full_stats) = registry_for_upload.load_all_stats_parallel_scoped() {
+                    // Scoped threadpool already released, also release allocator memory
                     release_unused_memory();
                     upload::perform_background_upload(
                         full_stats,
