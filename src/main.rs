@@ -367,10 +367,10 @@ async fn run_stats(args: StatsArgs) -> Result<()> {
     }
 
     if args.pretty {
-        let json = serde_json::to_string_pretty(&stats)?;
+        let json = simd_json::to_string_pretty(&stats)?;
         println!("{json}");
     } else {
-        let json = serde_json::to_string(&stats)?;
+        let json = simd_json::to_string(&stats)?;
         println!("{json}");
     }
 

@@ -55,6 +55,48 @@ Run one command to instantly review all of your CLI coding agent usage.  Upload 
 ### [Splitrail Cloud](https://splitrail.dev)
 <img width="750" alt="Screenshot of Splitrail Cloud" src="https://raw.githubusercontent.com/Piebald-AI/splitrail/main/screenshots/cloud.png" />
 
+## MCP Server
+
+Splitrail can run as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, allowing AI assistants to query your usage statistics programmatically.
+
+```bash
+splitrail mcp
+```
+
+### Available Tools
+
+- `get_daily_stats` - Query usage statistics with date filtering
+- `get_model_usage` - Analyze model usage distribution
+- `get_cost_breakdown` - Get cost breakdown over a date range
+- `get_file_operations` - Get file operation statistics
+- `compare_tools` - Compare usage across different AI coding tools
+- `list_analyzers` - List available analyzers
+
+### Resources
+
+- `splitrail://summary` - Daily summaries across all dates
+- `splitrail://models` - Model usage breakdown
+
+## Configuration
+
+Splitrail stores its configuration at `~/.splitrail.toml`:
+
+```toml
+[server]
+url = "https://splitrail.dev"
+api_token = "your-api-token"
+
+[upload]
+auto_upload = false
+upload_today_only = false
+
+[formatting]
+number_comma = false
+number_human = false
+locale = "en"
+decimal_places = 2
+```
+
 ## Development
 
 ### Windows
