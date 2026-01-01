@@ -12,6 +12,7 @@ use analyzers::{
 mod analyzer;
 mod analyzers;
 mod config;
+pub mod debug_log;
 mod mcp;
 mod models;
 mod reqwest_simd_json;
@@ -119,6 +120,7 @@ enum ConfigSubcommands {
 
 #[tokio::main]
 async fn main() {
+    debug_log::init();
     let cli = Cli::parse();
 
     // Load config file to get defaults

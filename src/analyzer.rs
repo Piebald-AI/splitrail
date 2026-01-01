@@ -499,7 +499,9 @@ impl AnalyzerRegistry {
 
         // Acquire write lock and mutate in place - NO CLONING!
         {
+            crate::debug_log::lock_acquiring("WRITE", analyzer_name);
             let mut view = shared_view.write();
+            crate::debug_log::lock_acquired("WRITE", analyzer_name);
 
             // Subtract old contribution (if any)
             if let Some(old) = old_contribution {
@@ -508,6 +510,7 @@ impl AnalyzerRegistry {
 
             // Add new contribution
             view.add_contribution(&new_contribution);
+            crate::debug_log::lock_released("WRITE", analyzer_name);
         } // Write lock released here
 
         Ok(())
@@ -522,7 +525,10 @@ impl AnalyzerRegistry {
         if let Some((_, old)) = self.file_contribution_cache.remove(&path_hash) {
             // Update the cached view in place using write lock - NO CLONING!
             if let Some(shared_view) = self.analyzer_views_cache.get(analyzer_name) {
+                crate::debug_log::lock_acquiring("WRITE", analyzer_name);
                 shared_view.write().subtract_contribution(&old);
+                crate::debug_log::lock_acquired("WRITE", analyzer_name);
+                crate::debug_log::lock_released("WRITE", analyzer_name);
             }
             true
         } else {
