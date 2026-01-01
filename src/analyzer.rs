@@ -243,6 +243,9 @@ pub struct AnalyzerRegistry {
     /// Cached analyzer views for incremental updates.
     /// Key: analyzer display name, Value: shared view with RwLock for in-place mutation.
     analyzer_views_cache: DashMap<String, SharedAnalyzerView>,
+    /// Tracks the order in which analyzers were registered to maintain stable tab ordering.
+    /// Contains display names in registration order.
+    analyzer_order: parking_lot::RwLock<Vec<String>>,
 }
 
 impl Default for AnalyzerRegistry {
@@ -258,12 +261,16 @@ impl AnalyzerRegistry {
             analyzers: Vec::new(),
             file_contribution_cache: DashMap::new(),
             analyzer_views_cache: DashMap::new(),
+            analyzer_order: parking_lot::RwLock::new(Vec::new()),
         }
     }
 
     /// Register an analyzer
     pub fn register<A: Analyzer + 'static>(&mut self, analyzer: A) {
+        let name = analyzer.display_name().to_string();
         self.analyzers.push(Box::new(analyzer));
+        // Track registration order for stable tab ordering in TUI
+        self.analyzer_order.write().push(name);
     }
 
     /// Invalidate all caches (file contributions and analyzer views)
@@ -537,10 +544,12 @@ impl AnalyzerRegistry {
 
     /// Get all cached views as a Vec, for building MultiAnalyzerStatsView.
     /// Returns SharedAnalyzerView clones (cheap Arc pointer copies).
+    /// Views are returned in registration order for stable tab ordering in TUI.
     pub fn get_all_cached_views(&self) -> Vec<SharedAnalyzerView> {
-        self.analyzer_views_cache
+        let order = self.analyzer_order.read();
+        order
             .iter()
-            .map(|entry| entry.value().clone())
+            .filter_map(|name| self.analyzer_views_cache.get(name).map(|v| v.clone()))
             .collect()
     }
 
@@ -876,5 +885,63 @@ mod tests {
 
         assert!(result1.is_ok());
         assert!(result2.is_ok());
+    }
+
+    /// Test that analyzer tab order remains stable across initial load and updates.
+    /// Regression test for bug where DashMap iteration order caused tabs to jump.
+    #[tokio::test]
+    async fn test_analyzer_order_stable_across_updates() {
+        let mut registry = AnalyzerRegistry::new();
+        let expected_order = vec!["analyzer-a", "analyzer-b", "analyzer-c"];
+
+        // Register analyzers in a specific order
+        for name in &expected_order {
+            registry.register(TestAnalyzer {
+                name,
+                available: true,
+                stats: Some(sample_stats(name)),
+                sources: vec![PathBuf::from(format!("/fake/{}.jsonl", name))],
+                fail_stats: false,
+            });
+        }
+
+        // Initial load should preserve registration order
+        let initial_views = registry
+            .load_all_stats_views_parallel(1)
+            .expect("load_all_stats_views_parallel");
+        let initial_names: Vec<_> = initial_views
+            .analyzer_stats
+            .iter()
+            .map(|v| v.read().analyzer_name.clone())
+            .collect();
+        assert_eq!(initial_names, expected_order, "Initial load order mismatch");
+
+        // get_all_cached_views() should return same order (used by watcher updates)
+        let cached_names: Vec<_> = registry
+            .get_all_cached_views()
+            .iter()
+            .map(|v| v.read().analyzer_name.clone())
+            .collect();
+        assert_eq!(cached_names, expected_order, "Cached views order mismatch");
+
+        // Order stable after incremental file update
+        let _ = registry
+            .reload_file_incremental("analyzer-b", &PathBuf::from("/fake/analyzer-b.jsonl"))
+            .await;
+        let after_update: Vec<_> = registry
+            .get_all_cached_views()
+            .iter()
+            .map(|v| v.read().analyzer_name.clone())
+            .collect();
+        assert_eq!(after_update, expected_order, "Order changed after update");
+
+        // Order stable after file removal
+        let _ = registry.remove_file_from_cache("analyzer-c", &PathBuf::from("/fake/analyzer-c.jsonl"));
+        let after_removal: Vec<_> = registry
+            .get_all_cached_views()
+            .iter()
+            .map(|v| v.read().analyzer_name.clone())
+            .collect();
+        assert_eq!(after_removal, expected_order, "Order changed after removal");
     }
 }
