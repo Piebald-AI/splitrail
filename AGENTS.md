@@ -36,11 +36,4 @@ cargo fmt --all --quiet
 
 # Additional Context
 
-Read these files when working on specific areas:
-
-- **Adding a new analyzer?** Read `.agents/NEW_ANALYZER.md`
-- **Working on the MCP server?** Read `.agents/MCP.md`
-- **Updating model pricing?** Read `.agents/PRICING.md`
-- **Working with core types?** Read `.agents/TYPES.md`
-- **Working on TUI or file watching?** Read `.agents/TUI.md`
-- **Optimizing performance?** Read `.agents/PERFORMANCE.md`
+Skills provide task-specific guidance. Use the `skill` tool to load one when needed - available skills are listed in its description.
