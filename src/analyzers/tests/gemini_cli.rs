@@ -46,9 +46,9 @@ async fn test_gemini_cli_reasoning_tokens() {
 
     let analyzer = GeminiCliAnalyzer::new();
 
-    // Use parse_sources to parse and deduplicate
+    // Use parse_sources_parallel to parse and deduplicate
     let source = crate::analyzer::DataSource { path: session_path };
-    let messages = analyzer.parse_sources(&[source]);
+    let messages = analyzer.parse_sources_parallel(&[source]);
 
     assert_eq!(messages.len(), 2);
 

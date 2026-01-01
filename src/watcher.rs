@@ -131,9 +131,11 @@ pub struct RealtimeStatsManager {
 }
 
 impl RealtimeStatsManager {
-    pub async fn new(registry: AnalyzerRegistry) -> Result<Self> {
-        // Initial stats load using async I/O.
-        let initial_stats = registry.load_all_stats_views_async().await?;
+    /// Create a new stats manager with parallel file loading.
+    /// Must be called within a rayon threadpool context for parallelism.
+    pub fn new(registry: AnalyzerRegistry) -> Result<Self> {
+        // Initial stats load using rayon parallel I/O.
+        let initial_stats = registry.load_all_stats_views_parallel()?;
         let (update_tx, update_rx) = watch::channel(initial_stats);
 
         Ok(Self {
@@ -193,8 +195,8 @@ impl RealtimeStatsManager {
     /// Helper to reload stats for a specific analyzer and broadcast updates (fallback)
     async fn reload_analyzer_stats(&mut self, analyzer_name: &str) {
         if let Some(analyzer) = self.registry.get_analyzer_by_display_name(analyzer_name) {
-            // Full parse of all files for this analyzer
-            match analyzer.get_stats().await {
+            // Full parse of all files for this analyzer (sync, no threadpool for incremental)
+            match analyzer.get_stats() {
                 Ok(new_stats) => {
                     // Update the cache with the new view
                     self.registry
@@ -210,12 +212,8 @@ impl RealtimeStatsManager {
 
     /// Helper to reload stats for a single file change using true incremental update
     async fn reload_single_file_incremental(&mut self, analyzer_name: &str, path: &Path) {
-        // True incremental update - subtract old, add new
-        match self
-            .registry
-            .reload_file_incremental(analyzer_name, path)
-            .await
-        {
+        // True incremental update - subtract old, add new (sync, no threadpool for single file)
+        match self.registry.reload_file_incremental(analyzer_name, path) {
             Ok(()) => {
                 self.apply_view_update().await;
             }
@@ -288,7 +286,8 @@ impl RealtimeStatsManager {
         }
 
         // For upload, we need full stats (with messages)
-        let full_stats = match self.registry.load_all_stats().await {
+        // Uses sync parsing (no threadpool for incremental uploads)
+        let full_stats = match self.registry.load_all_stats_parallel() {
             Ok(stats) => stats,
             Err(_) => {
                 if let Ok(mut in_progress) = self.upload_in_progress.lock() {
@@ -376,7 +375,7 @@ mod tests {
             Ok(self.stats.messages.clone())
         }
 
-        async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+        fn get_stats(&self) -> Result<AgenticCodingToolStats> {
             Ok(self.stats.clone())
         }
 
@@ -433,7 +432,7 @@ mod tests {
             available: true,
         });
 
-        let mut manager = RealtimeStatsManager::new(registry).await.expect("manager");
+        let mut manager = RealtimeStatsManager::new(registry).expect("manager");
 
         let initial = manager.get_stats_receiver().borrow().clone();
         assert!(
@@ -499,7 +498,7 @@ mod tests {
             available: true,
         });
 
-        let mut manager = RealtimeStatsManager::new(registry).await.expect("manager");
+        let mut manager = RealtimeStatsManager::new(registry).expect("manager");
 
         // Handle FileDeleted event
         manager
@@ -527,7 +526,7 @@ mod tests {
             available: true,
         });
 
-        let mut manager = RealtimeStatsManager::new(registry).await.expect("manager");
+        let mut manager = RealtimeStatsManager::new(registry).expect("manager");
 
         // Handle FileChanged event
         manager
@@ -553,7 +552,7 @@ mod tests {
             available: true,
         });
 
-        let manager = RealtimeStatsManager::new(registry).await.expect("manager");
+        let manager = RealtimeStatsManager::new(registry).expect("manager");
 
         // persist_cache should not panic even if cache is empty
         manager.persist_cache();

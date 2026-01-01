@@ -22,6 +22,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
 lasso = { version = "0.7", features = ["multi-threaded"] }
 futures = "0.3"
+rayon = "1.10"
 dashmap = "6"
 num-format = "0.4"
 ratatui = "0.30.0"

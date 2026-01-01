@@ -4,6 +4,7 @@ use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
@@ -454,9 +455,9 @@ impl Analyzer for PiAgentAnalyzer {
         Ok(messages)
     }
 
-    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
         let all_messages: Vec<ConversationMessage> = sources
-            .iter()
+            .par_iter()
             .flat_map(|source| self.parse_source(source).unwrap_or_default())
             .collect();
         crate::utils::deduplicate_by_local_hash(all_messages)

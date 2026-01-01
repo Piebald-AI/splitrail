@@ -209,12 +209,21 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         }
     };
 
-    // Create real-time stats manager
-    let mut stats_manager = match watcher::RealtimeStatsManager::new(registry).await {
-        Ok(manager) => manager,
-        Err(e) => {
-            eprintln!("Error loading analyzer stats: {e}");
-            std::process::exit(1);
+    // Create real-time stats manager using temporary rayon threadpool for parallel loading
+    let mut stats_manager = {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to create rayon threadpool");
+
+        let result = pool.install(|| watcher::RealtimeStatsManager::new(registry));
+
+        // Pool is dropped here, releasing threads
+        match result {
+            Ok(manager) => manager,
+            Err(e) => {
+                eprintln!("Error loading analyzer stats: {e}");
+                std::process::exit(1);
+            }
         }
     };
 
@@ -234,11 +243,11 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let config = config::Config::load().unwrap_or(None).unwrap_or_default();
     if config.upload.auto_upload {
         if config.is_configured() {
-            // For initial auto-upload, load full stats separately
+            // For initial auto-upload, load full stats separately (sync, no threadpool for background task)
             let registry_for_upload = create_analyzer_registry();
             let upload_status_clone = upload_status.clone();
             tokio::spawn(async move {
-                if let Ok(full_stats) = registry_for_upload.load_all_stats().await {
+                if let Ok(full_stats) = registry_for_upload.load_all_stats_parallel() {
                     // Release memory from parallel parsing back to OS
                     release_unused_memory();
                     upload::perform_background_upload(
@@ -281,7 +290,15 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
 
 async fn run_upload(args: UploadArgs) -> Result<()> {
     let registry = create_analyzer_registry();
-    let stats = registry.load_all_stats().await?;
+
+    // Load stats using temporary rayon threadpool for parallel parsing
+    let stats = {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to create rayon threadpool");
+        pool.install(|| registry.load_all_stats_parallel())?
+        // Pool is dropped here, releasing threads
+    };
 
     // Release memory from parallel parsing back to OS
     release_unused_memory();
@@ -371,7 +388,15 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
 
 async fn run_stats(args: StatsArgs) -> Result<()> {
     let registry = create_analyzer_registry();
-    let mut stats = registry.load_all_stats().await?;
+
+    // Load stats using temporary rayon threadpool for parallel parsing
+    let mut stats = {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to create rayon threadpool");
+        pool.install(|| registry.load_all_stats_parallel())?
+        // Pool is dropped here, releasing threads
+    };
 
     // Release memory from parallel parsing back to OS
     release_unused_memory();

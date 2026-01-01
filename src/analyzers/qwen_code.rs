@@ -5,6 +5,7 @@ use crate::utils::{deserialize_utc_timestamp, hash_text};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::path::{Path, PathBuf};
@@ -341,9 +342,9 @@ impl Analyzer for QwenCodeAnalyzer {
         parse_json_session_file(&source.path)
     }
 
-    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
         let all_messages: Vec<ConversationMessage> = sources
-            .iter()
+            .par_iter()
             .flat_map(|source| self.parse_source(source).unwrap_or_default())
             .collect();
         crate::utils::deduplicate_by_local_hash(all_messages)

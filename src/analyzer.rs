@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use futures::future::join_all;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -183,13 +183,14 @@ pub trait Analyzer: Send + Sync {
     /// This is the core parsing logic without parallelism decisions.
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>>;
 
-    /// Parse multiple data sources and deduplicate.
+    /// Parse multiple data sources in parallel and deduplicate.
     ///
-    /// Default: parses all sources and deduplicates by `global_hash`.
+    /// Default: parses all sources in parallel using rayon and deduplicates by `global_hash`.
     /// Override for shared context loading or different dedup strategy.
-    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+    /// Must be called within a rayon threadpool context for parallelism.
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
         let all_messages: Vec<ConversationMessage> = sources
-            .iter()
+            .par_iter()
             .flat_map(|source| match self.parse_source(source) {
                 Ok(msgs) => msgs,
                 Err(e) => {
@@ -226,13 +227,10 @@ pub trait Analyzer: Send + Sync {
     }
 
     /// Get stats with pre-discovered sources (avoids double discovery).
-    /// Default implementation parses sources sequentially via `parse_sources()`.
+    /// Default implementation parses sources in parallel via `parse_sources_parallel()`.
     /// Override for analyzers with complex cross-file logic (e.g., claude_code).
-    async fn get_stats_with_sources(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<AgenticCodingToolStats> {
-        let messages = self.parse_sources(&sources);
+    fn get_stats_with_sources(&self, sources: Vec<DataSource>) -> Result<AgenticCodingToolStats> {
+        let messages = self.parse_sources_parallel(&sources);
 
         let mut daily_stats = crate::utils::aggregate_by_date(&messages);
         daily_stats.retain(|date, _| date != "unknown");
@@ -251,9 +249,9 @@ pub trait Analyzer: Send + Sync {
 
     /// Get complete statistics for this analyzer.
     /// Default: discovers sources then calls get_stats_with_sources().
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+    fn get_stats(&self) -> Result<AgenticCodingToolStats> {
         let sources = self.discover_data_sources()?;
-        self.get_stats_with_sources(sources).await
+        self.get_stats_with_sources(sources)
     }
 }
 
@@ -339,20 +337,15 @@ impl AnalyzerRegistry {
 
     /// Load stats from all available analyzers in parallel.
     /// Used for uploads - returns full stats with messages.
-    pub async fn load_all_stats(&self) -> Result<crate::types::MultiAnalyzerStats> {
+    /// Must be called within a rayon threadpool context for parallelism.
+    pub fn load_all_stats_parallel(&self) -> Result<crate::types::MultiAnalyzerStats> {
         let available = self.available_analyzers_with_sources();
 
-        // Create futures for all analyzers - they'll run concurrently
-        // Uses get_stats_with_sources() to avoid double discovery
-        let futures: Vec<_> = available
-            .into_iter()
-            .map(
-                |(analyzer, sources)| async move { analyzer.get_stats_with_sources(sources).await },
-            )
+        // Parse all analyzers in parallel using rayon
+        let results: Vec<_> = available
+            .into_par_iter()
+            .map(|(analyzer, sources)| analyzer.get_stats_with_sources(sources))
             .collect();
-
-        // Run all analyzers in parallel
-        let results = join_all(futures).await;
 
         let mut all_stats = Vec::new();
         for result in results {
@@ -371,10 +364,11 @@ impl AnalyzerRegistry {
         })
     }
 
-    /// Load view-only stats using async I/O for concurrent file reads.
-    /// Called once at startup. Uses tokio for concurrent I/O operations.
+    /// Load view-only stats using rayon for parallel file reads.
+    /// Called once at startup. Uses rayon threadpool for parallel I/O operations.
     /// Populates file contribution cache for true incremental updates.
-    pub async fn load_all_stats_views_async(&self) -> Result<crate::types::MultiAnalyzerStatsView> {
+    /// Must be called within a rayon threadpool context for parallelism.
+    pub fn load_all_stats_views_parallel(&self) -> Result<crate::types::MultiAnalyzerStatsView> {
         // Get available analyzers with their sources (single discovery)
         let analyzer_data: Vec<_> = self
             .available_analyzers_with_sources()
@@ -382,12 +376,12 @@ impl AnalyzerRegistry {
             .map(|(a, sources)| (a, a.display_name().to_string(), sources))
             .collect();
 
-        // Create futures for all analyzers - they'll run concurrently
-        let futures: Vec<_> = analyzer_data
-            .into_iter()
-            .map(|(analyzer, name, sources)| async move {
-                // Parse all sources for this analyzer
-                let messages = analyzer.parse_sources(&sources);
+        // Parse all analyzers in parallel using rayon
+        let all_results: Vec<_> = analyzer_data
+            .into_par_iter()
+            .map(|(analyzer, name, sources)| {
+                // Parse all sources for this analyzer in parallel
+                let messages = analyzer.parse_sources_parallel(&sources);
 
                 // Aggregate stats
                 let mut daily_stats = crate::utils::aggregate_by_date(&messages);
@@ -407,9 +401,6 @@ impl AnalyzerRegistry {
                 (name, sources, Ok(stats) as Result<AgenticCodingToolStats>)
             })
             .collect();
-
-        // Run all analyzers concurrently
-        let all_results = join_all(futures).await;
 
         // Build views from results
         let mut all_views = Vec::new();
@@ -473,7 +464,8 @@ impl AnalyzerRegistry {
     /// Reload stats for a single file change using true incremental update.
     /// O(1) update - only reparses the changed file, subtracts old contribution,
     /// adds new contribution. No cloning needed thanks to RwLock.
-    pub async fn reload_file_incremental(
+    /// Uses sequential parsing (no threadpool) since it's just one file.
+    pub fn reload_file_incremental(
         &self,
         analyzer_name: &str,
         changed_path: &std::path::Path,
@@ -499,11 +491,22 @@ impl AnalyzerRegistry {
             .get(&path_hash)
             .map(|r| r.clone());
 
-        // Parse just the changed file
+        // Parse just the changed file (sequential, no threadpool needed for single file)
         let source = DataSource {
             path: changed_path.to_path_buf(),
         };
-        let new_messages = analyzer.parse_sources(&[source]);
+        let new_messages = match analyzer.parse_source(&source) {
+            Ok(msgs) => crate::utils::deduplicate_by_global_hash(msgs),
+            Err(e) => {
+                eprintln!(
+                    "Failed to parse {} source {:?}: {}",
+                    analyzer.display_name(),
+                    source.path,
+                    e
+                );
+                Vec::new()
+            }
+        };
 
         // Compute new contribution
         let new_contribution =
@@ -648,7 +651,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn get_stats_with_sources(
+        fn get_stats_with_sources(
             &self,
             _sources: Vec<DataSource>,
         ) -> Result<AgenticCodingToolStats> {
@@ -660,7 +663,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("no stats"))
         }
 
-        async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+        fn get_stats(&self) -> Result<AgenticCodingToolStats> {
             if self.fail_stats {
                 anyhow::bail!("stats failed");
             }
@@ -752,7 +755,7 @@ mod tests {
             .expect("analyzer 'ok'");
         assert_eq!(by_name.display_name(), "ok");
 
-        let stats = registry.load_all_stats().await.expect("load stats");
+        let stats = registry.load_all_stats_parallel().expect("load stats");
         // Only the successful analyzer should contribute stats.
         assert_eq!(stats.analyzer_stats.len(), 1);
         assert_eq!(stats.analyzer_stats[0].analyzer_name, "ok");
@@ -814,7 +817,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+        fn get_stats(&self) -> Result<AgenticCodingToolStats> {
             Ok(AgenticCodingToolStats {
                 daily_stats: BTreeMap::new(),
                 num_conversations: 0,
@@ -931,9 +934,8 @@ mod tests {
 
         // Initial load should preserve registration order
         let initial_views = registry
-            .load_all_stats_views_async()
-            .await
-            .expect("load_all_stats_views_async");
+            .load_all_stats_views_parallel()
+            .expect("load_all_stats_views_parallel");
         let initial_names: Vec<String> = initial_views
             .analyzer_stats
             .iter()
@@ -958,8 +960,7 @@ mod tests {
 
         // Order stable after incremental file update
         let _ = registry
-            .reload_file_incremental("analyzer-b", &PathBuf::from("/fake/analyzer-b.jsonl"))
-            .await;
+            .reload_file_incremental("analyzer-b", &PathBuf::from("/fake/analyzer-b.jsonl"));
         let after_update: Vec<String> = registry
             .get_all_cached_views()
             .iter()

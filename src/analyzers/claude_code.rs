@@ -81,7 +81,7 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     // Claude Code has complex cross-file deduplication, so we override get_stats_with_sources
-    async fn get_stats_with_sources(
+    fn get_stats_with_sources(
         &self,
         sources: Vec<DataSource>,
     ) -> Result<crate::types::AgenticCodingToolStats> {

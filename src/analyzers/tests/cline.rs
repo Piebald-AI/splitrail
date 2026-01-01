@@ -26,7 +26,7 @@ fn test_cline_discover_data_sources_no_panic() {
 #[tokio::test]
 async fn test_cline_get_stats_empty_sources() {
     let analyzer = ClineAnalyzer::new();
-    let result = analyzer.get_stats_with_sources(vec![]).await;
+    let result = analyzer.get_stats_with_sources(vec![]);
     assert!(result.is_ok());
     assert!(result.unwrap().messages.is_empty());
 }

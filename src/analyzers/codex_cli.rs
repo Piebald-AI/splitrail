@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
@@ -78,9 +79,9 @@ impl Analyzer for CodexCliAnalyzer {
     }
 
     // Codex CLI doesn't need deduplication since each session is separate
-    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
         sources
-            .iter()
+            .par_iter()
             .flat_map(|source| self.parse_source(source).unwrap_or_default())
             .collect()
     }

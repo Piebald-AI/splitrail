@@ -26,7 +26,7 @@ fn test_roo_code_discover_data_sources_no_panic() {
 #[tokio::test]
 async fn test_roo_code_get_stats_empty_sources() {
     let analyzer = RooCodeAnalyzer::new();
-    let result = analyzer.get_stats_with_sources(vec![]).await;
+    let result = analyzer.get_stats_with_sources(vec![]);
     assert!(result.is_ok());
     assert!(result.unwrap().messages.is_empty());
 }

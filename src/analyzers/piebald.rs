@@ -9,6 +9,7 @@ use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -248,9 +249,9 @@ impl Analyzer for PiebaldAnalyzer {
         Ok(convert_messages(&chats, messages))
     }
 
-    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
         let all_messages: Vec<ConversationMessage> = sources
-            .iter()
+            .par_iter()
             .flat_map(|source| self.parse_source(source).unwrap_or_default())
             .collect();
         crate::utils::deduplicate_by_local_hash(all_messages)
@@ -287,10 +288,10 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_get_stats_empty_sources() {
+    #[test]
+    fn test_get_stats_empty_sources() {
         let analyzer = PiebaldAnalyzer::new();
-        let result = analyzer.get_stats_with_sources(Vec::new()).await;
+        let result = analyzer.get_stats_with_sources(Vec::new());
         assert!(result.is_ok());
         assert!(result.unwrap().messages.is_empty());
     }

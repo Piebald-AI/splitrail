@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use glob::glob;
+use rayon::prelude::*;
 use serde::Deserialize;
 use simd_json::OwnedValue;
 use simd_json::prelude::*;
@@ -495,9 +496,9 @@ impl Analyzer for OpenCodeAnalyzer {
         )])
     }
 
-    // Load shared context once, then process all files.
+    // Load shared context once, then process all files in parallel.
     // OpenCode doesn't need deduplication - each message file is unique.
-    fn parse_sources(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
         let Some(home_dir) = dirs::home_dir() else {
             eprintln!("Could not find home directory for OpenCode");
             return Vec::new();
@@ -512,14 +513,13 @@ impl Analyzer for OpenCodeAnalyzer {
         let projects = load_projects(&project_root);
         let sessions = load_sessions(&session_root);
 
-        // Process all files with shared context
+        // Read, parse, and convert all files in parallel
         sources
-            .iter()
+            .par_iter()
             .filter_map(|source| {
                 let content = fs::read_to_string(&source.path).ok()?;
                 let mut bytes = content.into_bytes();
                 let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
-
                 Some(to_conversation_message(
                     msg, &sessions, &projects, &part_root,
                 ))
@@ -528,7 +528,7 @@ impl Analyzer for OpenCodeAnalyzer {
     }
 
     // Override get_stats_with_sources to load shared context once for efficiency
-    async fn get_stats_with_sources(
+    fn get_stats_with_sources(
         &self,
         sources: Vec<DataSource>,
     ) -> Result<crate::types::AgenticCodingToolStats> {
@@ -541,30 +541,18 @@ impl Analyzer for OpenCodeAnalyzer {
         let projects = load_projects(&project_root);
         let sessions = load_sessions(&session_root);
 
-        let mut messages = Vec::new();
-        for source in sources {
-            let path = &source.path;
-            let content = match fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Failed to read OpenCode message {}: {e}", path.display());
-                    continue;
-                }
-            };
-
-            let mut bytes = content.into_bytes();
-            let msg = match simd_json::from_slice::<OpenCodeMessage>(&mut bytes) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("Failed to parse OpenCode message {}: {e}", path.display());
-                    continue;
-                }
-            };
-
-            messages.push(to_conversation_message(
-                msg, &sessions, &projects, &part_root,
-            ));
-        }
+        // Parse all files in parallel
+        let messages: Vec<ConversationMessage> = sources
+            .par_iter()
+            .filter_map(|source| {
+                let content = fs::read_to_string(&source.path).ok()?;
+                let mut bytes = content.into_bytes();
+                let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
+                Some(to_conversation_message(
+                    msg, &sessions, &projects, &part_root,
+                ))
+            })
+            .collect();
 
         // Aggregate stats
         let mut daily_stats = crate::utils::aggregate_by_date(&messages);

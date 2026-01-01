@@ -38,11 +38,10 @@ impl SplitrailMcpServer {
     }
 
     /// Load stats from all analyzers (reuses existing infrastructure)
-    async fn load_stats(&self) -> Result<MultiAnalyzerStats, McpError> {
+    fn load_stats(&self) -> Result<MultiAnalyzerStats, McpError> {
         let registry = create_analyzer_registry();
         registry
-            .load_all_stats()
-            .await
+            .load_all_stats_parallel()
             .map_err(|e| McpError::internal_error(format!("Failed to load stats: {}", e), None))
     }
 
@@ -84,7 +83,7 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<GetDailyStatsRequest>,
     ) -> Result<Json<DailyStatsResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
         let daily_stats = Self::get_daily_stats_for_analyzer(&stats, req.analyzer.as_deref());
 
         let mut results: Vec<DailySummary> = if let Some(date) = req.date {
@@ -120,7 +119,7 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<GetModelUsageRequest>,
     ) -> Result<Json<ModelUsageResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
         let daily_stats = Self::get_daily_stats_for_analyzer(&stats, req.analyzer.as_deref());
 
         let mut model_counts: HashMap<String, u32> = HashMap::new();
@@ -163,7 +162,7 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<GetCostBreakdownRequest>,
     ) -> Result<Json<CostBreakdownResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
         let daily_stats = Self::get_daily_stats_for_analyzer(&stats, req.analyzer.as_deref());
 
         let daily_costs: Vec<DailyCost> = daily_stats
@@ -209,7 +208,7 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<GetFileOpsRequest>,
     ) -> Result<Json<FileOpsResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
 
         // Collect messages, optionally filtered by analyzer
         let messages: Vec<_> = if let Some(ref analyzer_name) = req.analyzer {
@@ -274,7 +273,7 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<CompareToolsRequest>,
     ) -> Result<Json<ToolComparisonResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
 
         let tools: Vec<ToolSummary> = stats
             .analyzer_stats
@@ -400,7 +399,7 @@ impl ServerHandler for SplitrailMcpServer {
     ) -> Result<ReadResourceResult, McpError> {
         match uri.as_str() {
             resource_uris::DAILY_SUMMARY => {
-                let stats = self.load_stats().await?;
+                let stats = self.load_stats()?;
                 let all_messages: Vec<_> = stats
                     .analyzer_stats
                     .iter()
@@ -429,7 +428,7 @@ impl ServerHandler for SplitrailMcpServer {
                 })
             }
             resource_uris::MODEL_BREAKDOWN => {
-                let stats = self.load_stats().await?;
+                let stats = self.load_stats()?;
                 let mut model_counts: HashMap<String, u32> = HashMap::new();
 
                 for analyzer_stats in &stats.analyzer_stats {
