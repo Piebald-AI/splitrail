@@ -447,7 +447,7 @@ mod tests {
         let initial = manager.get_stats_receiver().borrow().clone();
         assert!(
             initial.analyzer_stats.is_empty()
-                || initial.analyzer_stats[0].read().analyzer_name == "test-analyzer"
+                || &*initial.analyzer_stats[0].read().analyzer_name == "test-analyzer"
         );
 
         manager
@@ -462,7 +462,7 @@ mod tests {
         // After handling FileDeleted, we should still have stats for the analyzer.
         assert!(!updated.analyzer_stats.is_empty());
         assert_eq!(
-            updated.analyzer_stats[0].read().analyzer_name,
+            &*updated.analyzer_stats[0].read().analyzer_name,
             "test-analyzer"
         );
 

@@ -5,8 +5,8 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -54,11 +54,11 @@ pub fn log(category: &str, action: &str, detail: &str) {
         elapsed, thread_id, category, action, detail
     );
 
-    if let Some(file_mutex) = LOG_FILE.get() {
-        if let Ok(mut file) = file_mutex.lock() {
-            let _ = file.write_all(msg.as_bytes());
-            let _ = file.flush();
-        }
+    if let Some(file_mutex) = LOG_FILE.get()
+        && let Ok(mut file) = file_mutex.lock()
+    {
+        let _ = file.write_all(msg.as_bytes());
+        let _ = file.flush();
     }
 }
 

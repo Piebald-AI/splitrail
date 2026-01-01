@@ -115,8 +115,12 @@ pub fn run_tui(
         crate::debug_log::log("WATCHER", "STARTED", "watcher task running");
         while let Some(event) = watcher_rx.recv().await {
             let event_desc = match &event {
-                WatcherEvent::FileChanged(name, path) => format!("FileChanged({}, {:?})", name, path),
-                WatcherEvent::FileDeleted(name, path) => format!("FileDeleted({}, {:?})", name, path),
+                WatcherEvent::FileChanged(name, path) => {
+                    format!("FileChanged({}, {:?})", name, path)
+                }
+                WatcherEvent::FileDeleted(name, path) => {
+                    format!("FileDeleted({}, {:?})", name, path)
+                }
                 WatcherEvent::Error(e) => format!("Error({:?})", e),
             };
             crate::debug_log::log("WATCHER", "EVENT_START", &event_desc);
@@ -846,7 +850,8 @@ fn draw_ui(
             crate::debug_log::lock_acquiring("READ-draw_ui", "current_tab");
             let view = current_stats.read();
             crate::debug_log::lock_acquired("READ-draw_ui", &view.analyzer_name);
-            let _log_guard = crate::debug_log::LogOnDrop::new("READ-draw_ui", view.analyzer_name.clone());
+            let _log_guard =
+                crate::debug_log::LogOnDrop::new("READ-draw_ui", view.analyzer_name.to_string());
             // Main table
             let has_estimated_models = match ui_state.stats_view_mode {
                 StatsViewMode::Daily => {

@@ -420,6 +420,9 @@ impl AnalyzerRegistry {
         sources: &[DataSource],
         messages: &[ConversationMessage],
     ) {
+        // Create Arc<str> once, shared across all file contributions
+        let analyzer_name: Arc<str> = Arc::from(analyzer_name);
+
         // Create a map of conversation_hash -> PathHash
         let conv_hash_to_path_hash: HashMap<String, PathHash> = sources
             .iter()
@@ -439,7 +442,7 @@ impl AnalyzerRegistry {
 
         // Compute and cache contribution for each file
         for (path_hash, msgs) in file_messages {
-            let contribution = FileContribution::from_messages(&msgs, analyzer_name);
+            let contribution = FileContribution::from_messages(&msgs, Arc::clone(&analyzer_name));
             self.file_contribution_cache.insert(path_hash, contribution);
         }
     }
@@ -461,6 +464,9 @@ impl AnalyzerRegistry {
             return Ok(());
         }
 
+        // Create Arc<str> once for this update
+        let analyzer_name_arc: Arc<str> = Arc::from(analyzer_name);
+
         // Hash the path for cache lookup (no allocation)
         let path_hash = PathHash::new(changed_path);
 
@@ -477,7 +483,8 @@ impl AnalyzerRegistry {
         let new_messages = analyzer.parse_conversations(vec![source]).await?;
 
         // Compute new contribution
-        let new_contribution = FileContribution::from_messages(&new_messages, analyzer_name);
+        let new_contribution =
+            FileContribution::from_messages(&new_messages, Arc::clone(&analyzer_name_arc));
 
         // Update the contribution cache (key is just a u64, no allocation)
         self.file_contribution_cache
@@ -492,7 +499,7 @@ impl AnalyzerRegistry {
                     daily_stats: BTreeMap::new(),
                     session_aggregates: Vec::new(),
                     num_conversations: 0,
-                    analyzer_name: analyzer_name.to_string(),
+                    analyzer_name: Arc::clone(&analyzer_name_arc),
                 }))
             })
             .clone();
@@ -915,39 +922,50 @@ mod tests {
         let initial_views = registry
             .load_all_stats_views_parallel(1)
             .expect("load_all_stats_views_parallel");
-        let initial_names: Vec<_> = initial_views
+        let initial_names: Vec<String> = initial_views
             .analyzer_stats
             .iter()
-            .map(|v| v.read().analyzer_name.clone())
+            .map(|v| v.read().analyzer_name.to_string())
             .collect();
-        assert_eq!(initial_names, expected_order, "Initial load order mismatch");
+        let expected_strings: Vec<String> = expected_order.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            initial_names, expected_strings,
+            "Initial load order mismatch"
+        );
 
         // get_all_cached_views() should return same order (used by watcher updates)
-        let cached_names: Vec<_> = registry
+        let cached_names: Vec<String> = registry
             .get_all_cached_views()
             .iter()
-            .map(|v| v.read().analyzer_name.clone())
+            .map(|v| v.read().analyzer_name.to_string())
             .collect();
-        assert_eq!(cached_names, expected_order, "Cached views order mismatch");
+        assert_eq!(
+            cached_names, expected_strings,
+            "Cached views order mismatch"
+        );
 
         // Order stable after incremental file update
         let _ = registry
             .reload_file_incremental("analyzer-b", &PathBuf::from("/fake/analyzer-b.jsonl"))
             .await;
-        let after_update: Vec<_> = registry
+        let after_update: Vec<String> = registry
             .get_all_cached_views()
             .iter()
-            .map(|v| v.read().analyzer_name.clone())
+            .map(|v| v.read().analyzer_name.to_string())
             .collect();
-        assert_eq!(after_update, expected_order, "Order changed after update");
+        assert_eq!(after_update, expected_strings, "Order changed after update");
 
         // Order stable after file removal
-        let _ = registry.remove_file_from_cache("analyzer-c", &PathBuf::from("/fake/analyzer-c.jsonl"));
-        let after_removal: Vec<_> = registry
+        let _ =
+            registry.remove_file_from_cache("analyzer-c", &PathBuf::from("/fake/analyzer-c.jsonl"));
+        let after_removal: Vec<String> = registry
             .get_all_cached_views()
             .iter()
-            .map(|v| v.read().analyzer_name.clone())
+            .map(|v| v.read().analyzer_name.to_string())
             .collect();
-        assert_eq!(after_removal, expected_order, "Order changed after removal");
+        assert_eq!(
+            after_removal, expected_strings,
+            "Order changed after removal"
+        );
     }
 }

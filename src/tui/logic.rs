@@ -1,6 +1,7 @@
 use crate::types::{ConversationMessage, Stats};
 use chrono::Local;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 // Re-export SessionAggregate from types
 pub use crate::types::SessionAggregate;
@@ -163,20 +164,25 @@ pub fn has_data_shared(stats: &crate::types::SharedAnalyzerView) -> bool {
 
 /// Aggregate sessions from a slice of messages with a specified analyzer name.
 /// Used when converting AgenticCodingToolStats to AnalyzerStatsView.
+///
+/// Takes `Arc<str>` for analyzer_name to avoid allocating a new String per session.
+/// The Arc is cloned (cheap pointer copy) into each SessionAggregate.
 pub fn aggregate_sessions_from_messages(
     messages: &[ConversationMessage],
-    analyzer_name: &str,
+    analyzer_name: Arc<str>,
 ) -> Vec<SessionAggregate> {
     let mut sessions: BTreeMap<String, SessionAggregate> = BTreeMap::new();
 
     for msg in messages {
-        let session_key = msg.conversation_hash.clone();
+        // Use or_insert_with_key to avoid redundant cloning:
+        // - Pass owned key to entry() (1 clone of conversation_hash)
+        // - Clone key only when inserting a new session (via closure's &key)
         let entry = sessions
-            .entry(session_key.clone())
-            .or_insert_with(|| SessionAggregate {
-                session_id: session_key.clone(),
+            .entry(msg.conversation_hash.clone())
+            .or_insert_with_key(|key| SessionAggregate {
+                session_id: key.clone(),
                 first_timestamp: msg.date,
-                analyzer_name: analyzer_name.to_string(),
+                analyzer_name: Arc::clone(&analyzer_name), // cheap Arc clone
                 stats: Stats::default(),
                 models: Vec::new(),
                 session_name: None,
@@ -229,7 +235,7 @@ mod tests {
             daily_stats: BTreeMap::new(),
             session_aggregates: vec![],
             num_conversations: 1,
-            analyzer_name: "Test".into(),
+            analyzer_name: Arc::from("Test"),
         };
 
         assert!(has_data_view(&view));
@@ -241,7 +247,7 @@ mod tests {
             daily_stats: BTreeMap::new(),
             session_aggregates: vec![],
             num_conversations: 0,
-            analyzer_name: "Test".into(),
+            analyzer_name: Arc::from("Test"),
         };
 
         assert!(!has_data_view(&view));

@@ -10,11 +10,13 @@ use crate::utils::aggregate_by_date;
 
 /// Pre-computed session aggregate for TUI display.
 /// Contains aggregated stats per conversation session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Note: Not serialized - view-only type for TUI. Uses `Arc<str>` for memory efficiency.
+#[derive(Debug, Clone)]
 pub struct SessionAggregate {
     pub session_id: String,
     pub first_timestamp: DateTime<Utc>,
-    pub analyzer_name: String,
+    /// Shared across all sessions from the same analyzer (Arc clone is cheap)
+    pub analyzer_name: Arc<str>,
     pub stats: Stats,
     pub models: Vec<String>,
     pub session_name: Option<String>,
@@ -296,12 +298,14 @@ pub struct MultiAnalyzerStats {
 
 /// Lightweight view for TUI - NO raw messages, only pre-computed aggregates.
 /// Saves a lot of memory by not storing each message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Note: Not serialized - view-only type for TUI. Uses `Arc<str>` for memory efficiency.
+#[derive(Debug, Clone)]
 pub struct AnalyzerStatsView {
     pub daily_stats: BTreeMap<String, DailyStats>,
     pub session_aggregates: Vec<SessionAggregate>,
     pub num_conversations: u64,
-    pub analyzer_name: String,
+    /// Shared analyzer name - same Arc used by all SessionAggregates
+    pub analyzer_name: Arc<str>,
 }
 
 /// Shared view type - Arc<RwLock<...>> allows mutation without cloning.
@@ -320,20 +324,23 @@ impl AgenticCodingToolStats {
     /// Messages are dropped, session_aggregates are pre-computed.
     /// Returns SharedAnalyzerView for efficient sharing and in-place mutation.
     pub fn into_view(self) -> SharedAnalyzerView {
+        // Convert analyzer_name to Arc<str> once, shared across all sessions
+        let analyzer_name: Arc<str> = Arc::from(self.analyzer_name);
         let session_aggregates =
-            aggregate_sessions_from_messages(&self.messages, &self.analyzer_name);
+            aggregate_sessions_from_messages(&self.messages, Arc::clone(&analyzer_name));
         Arc::new(RwLock::new(AnalyzerStatsView {
             daily_stats: self.daily_stats,
             session_aggregates,
             num_conversations: self.num_conversations,
-            analyzer_name: self.analyzer_name,
+            analyzer_name,
         }))
     }
 }
 
 impl FileContribution {
     /// Compute a FileContribution from parsed messages.
-    pub fn from_messages(messages: &[ConversationMessage], analyzer_name: &str) -> Self {
+    /// Takes `Arc<str>` for analyzer_name to avoid allocating a new String per session.
+    pub fn from_messages(messages: &[ConversationMessage], analyzer_name: Arc<str>) -> Self {
         let session_aggregates = aggregate_sessions_from_messages(messages, analyzer_name);
         let mut daily_stats = aggregate_by_date(messages);
         daily_stats.retain(|date, _| date != "unknown");
@@ -540,7 +547,7 @@ mod tests {
         let view = stats.into_view();
         let v = view.read();
 
-        assert_eq!(v.analyzer_name, "Test");
+        assert_eq!(&*v.analyzer_name, "Test");
         assert_eq!(v.num_conversations, 2);
         assert_eq!(v.session_aggregates.len(), 2);
     }
@@ -559,6 +566,6 @@ mod tests {
         let view = multi.into_view();
 
         assert_eq!(view.analyzer_stats.len(), 1);
-        assert_eq!(view.analyzer_stats[0].read().analyzer_name, "Analyzer1");
+        assert_eq!(&*view.analyzer_stats[0].read().analyzer_name, "Analyzer1");
     }
 }
