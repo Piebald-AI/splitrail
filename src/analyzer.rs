@@ -4,12 +4,25 @@ use dashmap::DashMap;
 use futures::future::join_all;
 use jwalk::WalkDir;
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, FileContribution,
 };
 use crate::utils::hash_text;
+
+/// Newtype wrapper for xxh3 path hashes, used as cache keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PathHash(u64);
+
+impl PathHash {
+    /// Hash a path using xxh3 for cache key lookup.
+    #[inline]
+    fn new(path: &Path) -> Self {
+        Self(xxh3_64(path.as_os_str().as_encoded_bytes()))
+    }
+}
 
 /// VSCode GUI forks that might have extensions installed
 const VSCODE_GUI_FORKS: &[&str] = &[
@@ -194,9 +207,9 @@ pub struct AnalyzerRegistry {
     /// Cached data sources per analyzer (display_name -> sources)
     data_source_cache: DashMap<String, Vec<DataSource>>,
     /// Per-file contribution cache for true incremental updates.
-    /// Key: file path, Value: pre-computed aggregate contribution from that file.
-    /// Much smaller than storing raw messages (~1KB vs ~100KB per file).
-    file_contribution_cache: DashMap<PathBuf, FileContribution>,
+    /// Key: PathHash (xxh3 of file path), Value: pre-computed aggregate contribution.
+    /// Using hash avoids allocations during incremental updates.
+    file_contribution_cache: DashMap<PathHash, FileContribution>,
     /// Cached analyzer views for incremental updates.
     /// Key: analyzer display name, Value: current aggregated view.
     analyzer_views_cache: DashMap<String, AnalyzerStatsView>,
@@ -377,27 +390,27 @@ impl AnalyzerRegistry {
         sources: &[DataSource],
         messages: &[ConversationMessage],
     ) {
-        // Create a map of conversation_hash -> file_path
-        let hash_to_path: HashMap<String, PathBuf> = sources
+        // Create a map of conversation_hash -> PathHash
+        let conv_hash_to_path_hash: HashMap<String, PathHash> = sources
             .iter()
-            .map(|s| (hash_text(&s.path.to_string_lossy()), s.path.clone()))
+            .map(|s| (hash_text(&s.path.to_string_lossy()), PathHash::new(&s.path)))
             .collect();
 
-        // Group messages by their source file
-        let mut file_messages: HashMap<PathBuf, Vec<ConversationMessage>> = HashMap::new();
+        // Group messages by their source file's hash
+        let mut file_messages: HashMap<PathHash, Vec<ConversationMessage>> = HashMap::new();
         for msg in messages {
-            if let Some(path) = hash_to_path.get(&msg.conversation_hash) {
+            if let Some(&path_hash) = conv_hash_to_path_hash.get(&msg.conversation_hash) {
                 file_messages
-                    .entry(path.clone())
+                    .entry(path_hash)
                     .or_default()
                     .push(msg.clone());
             }
         }
 
         // Compute and cache contribution for each file
-        for (path, msgs) in file_messages {
+        for (path_hash, msgs) in file_messages {
             let contribution = FileContribution::from_messages(&msgs, analyzer_name);
-            self.file_contribution_cache.insert(path, contribution);
+            self.file_contribution_cache.insert(path_hash, contribution);
         }
     }
 
@@ -413,10 +426,13 @@ impl AnalyzerRegistry {
             .get_analyzer_by_display_name(analyzer_name)
             .ok_or_else(|| anyhow::anyhow!("Analyzer not found: {}", analyzer_name))?;
 
+        // Hash the path for cache lookup (no allocation)
+        let path_hash = PathHash::new(changed_path);
+
         // Get the old contribution (if any)
         let old_contribution = self
             .file_contribution_cache
-            .get(changed_path)
+            .get(&path_hash)
             .map(|r| r.clone());
 
         // Parse just the changed file
@@ -428,9 +444,9 @@ impl AnalyzerRegistry {
         // Compute new contribution
         let new_contribution = FileContribution::from_messages(&new_messages, analyzer_name);
 
-        // Update the contribution cache
+        // Update the contribution cache (key is just a u64, no allocation)
         self.file_contribution_cache
-            .insert(changed_path.to_path_buf(), new_contribution.clone());
+            .insert(path_hash, new_contribution.clone());
 
         // Get or create the cached view for this analyzer
         let mut view = self
@@ -466,8 +482,9 @@ impl AnalyzerRegistry {
         analyzer_name: &str,
         path: &std::path::Path,
     ) -> Option<AnalyzerStatsView> {
-        // Get the old contribution
-        let old_contribution = self.file_contribution_cache.remove(path);
+        // Hash the path for lookup (no allocation)
+        let path_hash = PathHash::new(path);
+        let old_contribution = self.file_contribution_cache.remove(&path_hash);
 
         if let Some((_, old)) = old_contribution {
             // Update the cached view
