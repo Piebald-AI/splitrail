@@ -3,7 +3,7 @@ use crate::tui::{
     create_upload_progress_callback, show_upload_error, show_upload_success, update_day_filters,
     update_table_states, update_window_offsets,
 };
-use crate::types::{AgenticCodingToolStats, MultiAnalyzerStats, Stats, TuiStats};
+use crate::types::{AgenticCodingToolStats, DayKey, MultiAnalyzerStats, Stats, TuiStats};
 use ratatui::widgets::TableState;
 use std::collections::BTreeMap;
 
@@ -17,7 +17,7 @@ fn make_tool_stats(name: &str, has_data: bool) -> AgenticCodingToolStats {
         daily_stats.insert(
             "2025-01-01".to_string(),
             crate::types::DailyStats {
-                date: "2025-01-01".to_string(),
+                date: DayKey::from_str("2025-01-01").unwrap(),
                 user_messages: 0,
                 ai_messages: 1,
                 conversations: 1,
@@ -75,21 +75,22 @@ fn test_update_table_states_filters_and_preserves_selection() {
 #[test]
 fn test_update_window_offsets_and_day_filters_resize() {
     let mut offsets = vec![5usize];
-    let mut filters: Vec<Option<String>> = vec![Some("2025-01-01".to_string())];
+    let day = DayKey::from_str("2025-01-01").unwrap();
+    let mut filters: Vec<Option<DayKey>> = vec![Some(day)];
 
     let count_two = 2usize;
     update_window_offsets(&mut offsets, &count_two);
     update_day_filters(&mut filters, &count_two);
 
     assert_eq!(offsets, vec![5, 0]);
-    assert_eq!(filters, vec![Some("2025-01-01".to_string()), None]);
+    assert_eq!(filters, vec![Some(day), None]);
 
     let count_one = 1usize;
     update_window_offsets(&mut offsets, &count_one);
     update_day_filters(&mut filters, &count_one);
 
     assert_eq!(offsets, vec![5]);
-    assert_eq!(filters, vec![Some("2025-01-01".to_string())]);
+    assert_eq!(filters, vec![Some(day)]);
 }
 
 // ============================================================================

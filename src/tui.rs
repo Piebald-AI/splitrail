@@ -3,7 +3,7 @@ pub mod logic;
 mod tests;
 
 use crate::models::is_model_estimated;
-use crate::types::{AnalyzerStatsView, MultiAnalyzerStatsView, SharedAnalyzerView, resolve_model};
+use crate::types::{AnalyzerStatsView, DayKey, MultiAnalyzerStatsView, SharedAnalyzerView, resolve_model};
 use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
 use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
 use anyhow::Result;
@@ -85,7 +85,7 @@ struct UiState<'a> {
     selected_tab: usize,
     stats_view_mode: StatsViewMode,
     session_window_offsets: &'a mut [usize],
-    session_day_filters: &'a mut [Option<String>],
+    session_day_filters: &'a mut [Option<DayKey>],
     date_jump_active: bool,
     date_jump_buffer: &'a str,
     sort_reversed: bool,
@@ -156,7 +156,7 @@ async fn run_app(
 ) -> Result<()> {
     let mut table_states: Vec<TableState> = Vec::new();
     let mut session_window_offsets: Vec<usize> = Vec::new();
-    let mut session_day_filters: Vec<Option<String>> = Vec::new();
+    let mut session_day_filters: Vec<Option<DayKey>> = Vec::new();
     let mut date_jump_active = false;
     let mut date_jump_buffer = String::new();
     let mut sort_reversed = false;
@@ -677,7 +677,7 @@ async fn run_app(
                             } else {
                                 view.daily_stats.iter().nth(selected_idx)
                             }
-                            .map(|(k, _)| k.clone());
+                            .and_then(|(k, _)| DayKey::from_str(k));
                             if let Some(day_key) = day_key {
                                 session_day_filters[*selected_tab] = Some(day_key);
                                 *stats_view_mode = StatsViewMode::Session;
@@ -857,7 +857,7 @@ fn draw_ui(
                             format_options,
                             current_table_state,
                             &mut ui_state.session_window_offsets[ui_state.selected_tab],
-                            ui_state.session_day_filters[ui_state.selected_tab].as_ref(),
+                            ui_state.session_day_filters[ui_state.selected_tab],
                             ui_state.sort_reversed,
                         );
                         false // Session view doesn't track estimated models yet
@@ -873,7 +873,8 @@ fn draw_ui(
                     StatsViewMode::Session => ui_state
                         .session_day_filters
                         .get(ui_state.selected_tab)
-                        .and_then(|f| f.as_ref()),
+                        .copied()
+                        .flatten(),
                     StatsViewMode::Daily => None,
                 };
                 draw_summary_stats(
@@ -1468,7 +1469,7 @@ fn draw_session_stats_table(
     format_options: &NumberFormatOptions,
     table_state: &mut TableState,
     window_offset: &mut usize,
-    day_filter: Option<&String>,
+    day_filter: Option<DayKey>,
     sort_reversed: bool,
 ) {
     let header = Row::new(vec![
@@ -1488,7 +1489,7 @@ fn draw_session_stats_table(
 
     let filtered_sessions: Vec<&SessionAggregate> = {
         let mut sessions: Vec<_> = match day_filter {
-            Some(day) => sessions.iter().filter(|s| &s.day_key == day).collect(),
+            Some(day) => sessions.iter().filter(|s| s.day_key == day).collect(),
             None => sessions.iter().collect(),
         };
         if sort_reversed {
@@ -1884,7 +1885,7 @@ fn draw_summary_stats(
     area: Rect,
     filtered_stats: &[SharedAnalyzerView],
     format_options: &NumberFormatOptions,
-    day_filter: Option<&String>,
+    day_filter: Option<DayKey>,
 ) {
     // Aggregate stats from all tools, optionally filtered to a single day
     let mut total_cost_cents: u64 = 0;
@@ -1901,7 +1902,7 @@ fn draw_summary_stats(
         for (day, day_stats) in stats.daily_stats.iter() {
             // Skip if day doesn't match filter
             if let Some(filter_day) = day_filter
-                && day != filter_day
+                && DayKey::from_str(day) != Some(filter_day)
             {
                 continue;
             }
@@ -1983,7 +1984,10 @@ fn draw_summary_stats(
 
     // Show "Totals" or "Totals for <date>" depending on filter
     let title = if let Some(day) = day_filter {
-        format!("Totals for {}", crate::utils::format_date_for_display(day))
+        format!(
+            "Totals for {}",
+            crate::utils::format_date_for_display(&day.to_string())
+        )
     } else {
         "Totals".to_string()
     };
@@ -2044,16 +2048,11 @@ fn update_window_offsets(window_offsets: &mut Vec<usize>, filtered_count: &usize
     }
 }
 
-fn update_day_filters(filters: &mut Vec<Option<String>>, filtered_count: &usize) {
-    let old = filters.clone();
-    filters.clear();
-
-    for i in 0..*filtered_count {
-        if i < old.len() {
-            filters.push(old[i].clone());
-        } else {
-            filters.push(None);
-        }
+fn update_day_filters(filters: &mut Vec<Option<DayKey>>, filtered_count: &usize) {
+    let old_len = filters.len();
+    filters.resize(*filtered_count, None);
+    if *filtered_count < old_len {
+        filters.truncate(*filtered_count);
     }
 }
 

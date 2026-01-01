@@ -38,8 +38,7 @@ pub fn resolve_model(key: Spur) -> &'static str {
 
 /// Compact representation of a date in "YYYY-MM-DD" format.
 /// Stored as year (u16) + month (u8) + day (u8) = 4 bytes total.
-/// Implements comparison with `&str` for ergonomic filtering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct DayKey {
     year: u16,
     month: u8,
@@ -57,6 +56,12 @@ impl DayKey {
             month: local.month() as u8,
             day: local.day() as u8,
         }
+    }
+
+    /// Create a DayKey from a "YYYY-MM-DD" string.
+    #[inline]
+    pub fn from_str(s: &str) -> Option<Self> {
+        Self::parse(s).map(|(year, month, day)| Self { year, month, day })
     }
 
     /// Parse a date string, returning None if invalid format.
@@ -84,6 +89,19 @@ impl DayKey {
     }
 }
 
+impl Serialize for DayKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for DayKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::from_str(&s).ok_or_else(|| serde::de::Error::custom("invalid date format"))
+    }
+}
+
 impl Ord for DayKey {
     #[inline]
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -101,42 +119,6 @@ impl PartialOrd for DayKey {
 impl fmt::Display for DayKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
-    }
-}
-
-impl PartialEq<str> for DayKey {
-    #[inline]
-    fn eq(&self, other: &str) -> bool {
-        Self::parse(other)
-            .is_some_and(|(y, m, d)| self.year == y && self.month == m && self.day == d)
-    }
-}
-
-impl PartialEq<&str> for DayKey {
-    #[inline]
-    fn eq(&self, other: &&str) -> bool {
-        self == *other
-    }
-}
-
-impl PartialEq<String> for DayKey {
-    #[inline]
-    fn eq(&self, other: &String) -> bool {
-        self == other.as_str()
-    }
-}
-
-impl PartialEq<DayKey> for &str {
-    #[inline]
-    fn eq(&self, other: &DayKey) -> bool {
-        other == *self
-    }
-}
-
-impl PartialEq<DayKey> for String {
-    #[inline]
-    fn eq(&self, other: &DayKey) -> bool {
-        other == self.as_str()
     }
 }
 
@@ -212,7 +194,7 @@ pub struct ConversationMessage {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyStats {
-    pub date: String,
+    pub date: DayKey,
     pub user_messages: u32,
     pub ai_messages: u32,
     pub conversations: u32,
@@ -574,7 +556,7 @@ impl AnalyzerStatsView {
                 .daily_stats
                 .entry(date.clone())
                 .or_insert_with(|| DailyStats {
-                    date: date.clone(),
+                    date: DayKey::from_str(date).unwrap_or_default(),
                     ..Default::default()
                 }) += day_stats;
         }
