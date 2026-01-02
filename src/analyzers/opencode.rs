@@ -497,8 +497,11 @@ impl Analyzer for OpenCodeAnalyzer {
     }
 
     // Load shared context once, then process all files in parallel.
-    // OpenCode doesn't need deduplication - each message file is unique.
-    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+    // Returns messages grouped by source path for file contribution caching.
+    fn parse_sources_parallel_with_paths(
+        &self,
+        sources: &[DataSource],
+    ) -> Vec<(PathBuf, Vec<ConversationMessage>)> {
         let Some(home_dir) = dirs::home_dir() else {
             eprintln!("Could not find home directory for OpenCode");
             return Vec::new();
@@ -514,16 +517,25 @@ impl Analyzer for OpenCodeAnalyzer {
         let sessions = load_sessions(&session_root);
 
         // Read, parse, and convert all files in parallel
+        // Each source file produces exactly one message
         sources
             .par_iter()
             .filter_map(|source| {
                 let content = fs::read_to_string(&source.path).ok()?;
                 let mut bytes = content.into_bytes();
                 let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
-                Some(to_conversation_message(
-                    msg, &sessions, &projects, &part_root,
-                ))
+                let conversation_msg =
+                    to_conversation_message(msg, &sessions, &projects, &part_root);
+                Some((source.path.clone(), vec![conversation_msg]))
             })
+            .collect()
+    }
+
+    // OpenCode doesn't need deduplication - each message file is unique.
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        self.parse_sources_parallel_with_paths(sources)
+            .into_iter()
+            .flat_map(|(_, msgs)| msgs)
             .collect()
     }
 

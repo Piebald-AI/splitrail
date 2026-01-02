@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
@@ -12,7 +12,6 @@ use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, FileContribution,
     SharedAnalyzerView,
 };
-use crate::utils::hash_text;
 
 /// Newtype wrapper for xxh3 path hashes, used as cache keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -183,16 +182,21 @@ pub trait Analyzer: Send + Sync {
     /// This is the core parsing logic without parallelism decisions.
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>>;
 
-    /// Parse multiple data sources in parallel and deduplicate.
+    /// Parse multiple data sources in parallel, returning messages grouped by source path.
     ///
-    /// Default: parses all sources in parallel using rayon and deduplicates by `global_hash`.
-    /// Override for shared context loading or different dedup strategy.
+    /// Default: parses all sources in parallel using rayon.
+    /// Override for shared context loading (e.g., OpenCode loads session data once).
     /// Must be called within a rayon threadpool context for parallelism.
-    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
-        let all_messages: Vec<ConversationMessage> = sources
+    ///
+    /// Note: Messages are NOT deduplicated - caller should deduplicate if needed.
+    fn parse_sources_parallel_with_paths(
+        &self,
+        sources: &[DataSource],
+    ) -> Vec<(PathBuf, Vec<ConversationMessage>)> {
+        sources
             .par_iter()
-            .flat_map(|source| match self.parse_source(source) {
-                Ok(msgs) => msgs,
+            .filter_map(|source| match self.parse_source(source) {
+                Ok(msgs) => Some((source.path.clone(), msgs)),
                 Err(e) => {
                     eprintln!(
                         "Failed to parse {} source {:?}: {}",
@@ -200,9 +204,22 @@ pub trait Analyzer: Send + Sync {
                         source.path,
                         e
                     );
-                    Vec::new()
+                    None
                 }
             })
+            .collect()
+    }
+
+    /// Parse multiple data sources in parallel and deduplicate.
+    ///
+    /// Default: calls `parse_sources_parallel_with_paths` and deduplicates by `global_hash`.
+    /// Override for different dedup strategy (e.g., Piebald uses local_hash).
+    /// Must be called within a rayon threadpool context for parallelism.
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let all_messages: Vec<ConversationMessage> = self
+            .parse_sources_parallel_with_paths(sources)
+            .into_iter()
+            .flat_map(|(_, msgs)| msgs)
             .collect();
         crate::utils::deduplicate_by_global_hash(all_messages)
     }
@@ -396,8 +413,28 @@ impl AnalyzerRegistry {
         let all_results: Vec<_> = analyzer_data
             .into_par_iter()
             .map(|(analyzer, name, sources)| {
-                // Parse all sources for this analyzer in parallel
-                let messages = analyzer.parse_sources_parallel(&sources);
+                let analyzer_name_arc: Arc<str> = Arc::from(name.as_str());
+
+                // Parse sources with path association preserved.
+                // This uses parse_sources_parallel_with_paths which analyzers can override
+                // for custom parallel logic (e.g., OpenCode loads shared context once).
+                let grouped = analyzer.parse_sources_parallel_with_paths(&sources);
+
+                // Compute contributions per source in parallel and collect messages
+                let (contributions, all_messages): (Vec<_>, Vec<_>) = grouped
+                    .into_par_iter()
+                    .map(|(path, msgs)| {
+                        let path_hash = PathHash::new(&path);
+                        let contribution =
+                            FileContribution::from_messages(&msgs, Arc::clone(&analyzer_name_arc));
+                        ((path_hash, contribution), msgs)
+                    })
+                    .unzip();
+
+                let all_messages: Vec<_> = all_messages.into_iter().flatten().collect();
+
+                // Deduplicate messages across sources
+                let messages = crate::utils::deduplicate_by_global_hash(all_messages);
 
                 // Aggregate stats
                 let mut daily_stats = crate::utils::aggregate_by_date(&messages);
@@ -414,17 +451,23 @@ impl AnalyzerRegistry {
                     analyzer_name: name.clone(),
                 };
 
-                (name, sources, Ok(stats) as Result<AgenticCodingToolStats>)
+                (
+                    name,
+                    contributions,
+                    Ok(stats) as Result<AgenticCodingToolStats>,
+                )
             })
             .collect();
 
-        // Build views from results
+        // Build views from results and cache contributions
         let mut all_views = Vec::new();
-        for (name, sources, result) in all_results {
+        for (name, contributions, result) in all_results {
             match result {
                 Ok(stats) => {
-                    // Populate file contribution cache for incremental updates
-                    self.populate_file_contribution_cache(&name, &sources, &stats.messages);
+                    // Cache file contributions for incremental updates
+                    for (path_hash, contribution) in contributions {
+                        self.file_contribution_cache.insert(path_hash, contribution);
+                    }
                     // Convert to view (drops messages)
                     let view = stats.into_view();
                     // Cache the view for incremental updates
@@ -440,41 +483,6 @@ impl AnalyzerRegistry {
         Ok(crate::types::MultiAnalyzerStatsView {
             analyzer_stats: all_views,
         })
-    }
-
-    /// Populate the file contribution cache from parsed messages.
-    /// Groups messages by their source file, computes per-file aggregates.
-    fn populate_file_contribution_cache(
-        &self,
-        analyzer_name: &str,
-        sources: &[DataSource],
-        messages: &[ConversationMessage],
-    ) {
-        // Create Arc<str> once, shared across all file contributions
-        let analyzer_name: Arc<str> = Arc::from(analyzer_name);
-
-        // Create a map of conversation_hash -> PathHash
-        let conv_hash_to_path_hash: HashMap<String, PathHash> = sources
-            .iter()
-            .map(|s| (hash_text(&s.path.to_string_lossy()), PathHash::new(&s.path)))
-            .collect();
-
-        // Group messages by their source file's hash
-        let mut file_messages: HashMap<PathHash, Vec<ConversationMessage>> = HashMap::new();
-        for msg in messages {
-            if let Some(&path_hash) = conv_hash_to_path_hash.get(&msg.conversation_hash) {
-                file_messages
-                    .entry(path_hash)
-                    .or_default()
-                    .push(msg.clone());
-            }
-        }
-
-        // Compute and cache contribution for each file
-        for (path_hash, msgs) in file_messages {
-            let contribution = FileContribution::from_messages(&msgs, Arc::clone(&analyzer_name));
-            self.file_contribution_cache.insert(path_hash, contribution);
-        }
     }
 
     /// Reload stats for a single file change using true incremental update.
