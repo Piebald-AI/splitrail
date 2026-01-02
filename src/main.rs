@@ -445,14 +445,11 @@ async fn handle_config_subcommand(config_args: ConfigArgs) {
 /// Call this after heavy allocations (e.g., parsing) to reclaim memory.
 #[cfg(feature = "mimalloc")]
 pub fn release_unused_memory() {
-    unsafe extern "C" {
-        fn mi_collect(force: bool);
-    }
     // SAFETY: mi_collect is a safe FFI call that triggers garbage collection
     // and returns unused memory to the OS. The `force` parameter (true) ensures
     // aggressive collection.
     unsafe {
-        mi_collect(true);
+        libmimalloc_sys::mi_collect(true);
     }
 }
 
