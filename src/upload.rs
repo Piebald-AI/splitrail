@@ -313,9 +313,12 @@ pub async fn perform_background_upload_messages<F>(
             return Some(Ok(())); // Nothing to upload
         }
 
-        let result =
-            upload_message_stats(&messages, &mut config, make_progress_callback(upload_status.clone()))
-                .await;
+        let result = upload_message_stats(
+            &messages,
+            &mut config,
+            make_progress_callback(upload_status.clone()),
+        )
+        .await;
 
         // Call on_success callback if upload succeeded
         if result.is_ok()
