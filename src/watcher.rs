@@ -314,6 +314,7 @@ impl RealtimeStatsManager {
 mod tests {
     use super::*;
     use crate::analyzer::{Analyzer, DataSource};
+    use crate::contribution_cache::ContributionStrategy;
     use crate::types::{
         AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats,
     };
@@ -383,6 +384,10 @@ mod tests {
 
         fn get_watch_directories(&self) -> Vec<PathBuf> {
             Vec::new()
+        }
+
+        fn contribution_strategy(&self) -> ContributionStrategy {
+            ContributionStrategy::SingleSession
         }
     }
 

@@ -6,24 +6,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
-use xxhash_rust::xxh3::xxh3_64;
 
-use crate::types::{
-    AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, FileContribution,
-    SharedAnalyzerView,
+use crate::contribution_cache::{
+    ContributionCache, ContributionStrategy, MultiSessionContribution, PathHash,
+    RemovedContribution, SingleMessageContribution, SingleSessionContribution,
 };
-
-/// Newtype wrapper for xxh3 path hashes, used as cache keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PathHash(u64);
-
-impl PathHash {
-    /// Hash a path using xxh3 for cache key lookup.
-    #[inline]
-    fn new(path: &Path) -> Self {
-        Self(xxh3_64(path.as_os_str().as_encoded_bytes()))
-    }
-}
+use crate::types::{
+    AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, SharedAnalyzerView,
+};
 
 /// VSCode GUI forks that might have extensions installed
 const VSCODE_GUI_FORKS: &[&str] = &[
@@ -243,6 +233,12 @@ pub trait Analyzer: Send + Sync {
             .is_ok_and(|sources| !sources.is_empty())
     }
 
+    /// Returns the contribution caching strategy for this analyzer.
+    /// - `SingleMessage`: 1 file = 1 message (~40 bytes/file) - e.g., OpenCode
+    /// - `SingleSession`: 1 file = 1 session (~72 bytes/file) - e.g., Claude Code, Cline
+    /// - `MultiSession`: 1 file = many sessions (~100+ bytes/file) - e.g., Piebald
+    fn contribution_strategy(&self) -> ContributionStrategy;
+
     /// Get stats with pre-discovered sources (avoids double discovery).
     /// Default implementation parses sources in parallel via `parse_sources_parallel()`.
     /// Override for analyzers with complex cross-file logic (e.g., claude_code).
@@ -275,10 +271,9 @@ pub trait Analyzer: Send + Sync {
 /// Registry for managing multiple analyzers
 pub struct AnalyzerRegistry {
     analyzers: Vec<Box<dyn Analyzer>>,
-    /// Per-file contribution cache for true incremental updates.
-    /// Key: PathHash (xxh3 of file path), Value: pre-computed aggregate contribution.
-    /// Using hash avoids allocations during incremental updates.
-    file_contribution_cache: DashMap<PathHash, FileContribution>,
+    /// Unified contribution cache for incremental updates.
+    /// Strategy-specific storage: SingleMessage (~40B), SingleSession (~72B), MultiSession (~100+B).
+    contribution_cache: ContributionCache,
     /// Cached analyzer views for incremental updates.
     /// Key: analyzer display name, Value: shared view with RwLock for in-place mutation.
     analyzer_views_cache: DashMap<String, SharedAnalyzerView>,
@@ -302,7 +297,7 @@ impl AnalyzerRegistry {
     pub fn new() -> Self {
         Self {
             analyzers: Vec::new(),
-            file_contribution_cache: DashMap::new(),
+            contribution_cache: ContributionCache::new(),
             analyzer_views_cache: DashMap::new(),
             analyzer_order: parking_lot::RwLock::new(Vec::new()),
             dirty_files_for_upload: Arc::new(DashMap::new()),
@@ -319,7 +314,7 @@ impl AnalyzerRegistry {
 
     /// Invalidate all caches (file contributions and analyzer views)
     pub fn invalidate_all_caches(&self) {
-        self.file_contribution_cache.clear();
+        self.contribution_cache.clear();
         self.analyzer_views_cache.clear();
     }
 
@@ -402,34 +397,81 @@ impl AnalyzerRegistry {
     /// Populates file contribution cache for true incremental updates.
     /// Must be called within a rayon threadpool context for parallelism.
     pub fn load_all_stats_views_parallel(&self) -> Result<crate::types::MultiAnalyzerStatsView> {
+        // Contribution cache variants based on analyzer strategy
+        enum CachedContributions {
+            SingleMessage(Vec<(PathHash, SingleMessageContribution)>),
+            SingleSession(Vec<(PathHash, SingleSessionContribution)>),
+            MultiSession(Vec<(PathHash, MultiSessionContribution)>),
+        }
+
         // Get available analyzers with their sources (single discovery)
         let analyzer_data: Vec<_> = self
             .available_analyzers_with_sources()
             .into_iter()
-            .map(|(a, sources)| (a, a.display_name().to_string(), sources))
+            .map(|(a, sources)| {
+                let strategy = a.contribution_strategy();
+                (a, a.display_name().to_string(), sources, strategy)
+            })
             .collect();
 
         // Parse all analyzers in parallel using rayon
         let all_results: Vec<_> = analyzer_data
             .into_par_iter()
-            .map(|(analyzer, name, sources)| {
+            .map(|(analyzer, name, sources, strategy)| {
                 let analyzer_name_arc: Arc<str> = Arc::from(name.as_str());
 
                 // Parse sources with path association preserved.
-                // This uses parse_sources_parallel_with_paths which analyzers can override
-                // for custom parallel logic (e.g., OpenCode loads shared context once).
                 let grouped = analyzer.parse_sources_parallel_with_paths(&sources);
 
-                // Compute contributions per source in parallel and collect messages
-                let (contributions, all_messages): (Vec<_>, Vec<_>) = grouped
-                    .into_par_iter()
-                    .map(|(path, msgs)| {
-                        let path_hash = PathHash::new(&path);
-                        let contribution =
-                            FileContribution::from_messages(&msgs, Arc::clone(&analyzer_name_arc));
-                        ((path_hash, contribution), msgs)
-                    })
-                    .unzip();
+                // Compute contributions per source based on strategy
+                let (contributions, all_messages): (CachedContributions, Vec<Vec<_>>) =
+                    match strategy {
+                        ContributionStrategy::SingleMessage => {
+                            let (contribs, msgs): (Vec<_>, Vec<_>) = grouped
+                                .into_par_iter()
+                                .map(|(path, msgs)| {
+                                    let path_hash = PathHash::new(&path);
+                                    let contribution = msgs
+                                        .first()
+                                        .map(SingleMessageContribution::from_message)
+                                        .unwrap_or_else(|| SingleMessageContribution {
+                                            stats: Default::default(),
+                                            date: Default::default(),
+                                            model: None,
+                                            session_hash: 0,
+                                        });
+                                    ((path_hash, contribution), msgs)
+                                })
+                                .unzip();
+                            (CachedContributions::SingleMessage(contribs), msgs)
+                        }
+                        ContributionStrategy::SingleSession => {
+                            let (contribs, msgs): (Vec<_>, Vec<_>) = grouped
+                                .into_par_iter()
+                                .map(|(path, msgs)| {
+                                    let path_hash = PathHash::new(&path);
+                                    let contribution =
+                                        SingleSessionContribution::from_messages(&msgs);
+                                    ((path_hash, contribution), msgs)
+                                })
+                                .unzip();
+                            (CachedContributions::SingleSession(contribs), msgs)
+                        }
+                        ContributionStrategy::MultiSession => {
+                            let (contribs, msgs): (Vec<_>, Vec<_>) = grouped
+                                .into_par_iter()
+                                .map(|(path, msgs)| {
+                                    let path_hash = PathHash::new(&path);
+                                    let contribution = MultiSessionContribution::from_messages(
+                                        &msgs,
+                                        Arc::clone(&analyzer_name_arc),
+                                    );
+                                    ((path_hash, contribution), msgs)
+                                })
+                                .unzip();
+                            (CachedContributions::MultiSession(contribs), msgs)
+                        }
+                    };
 
                 let all_messages: Vec<_> = all_messages.into_iter().flatten().collect();
 
@@ -464,9 +506,26 @@ impl AnalyzerRegistry {
         for (name, contributions, result) in all_results {
             match result {
                 Ok(stats) => {
-                    // Cache file contributions for incremental updates
-                    for (path_hash, contribution) in contributions {
-                        self.file_contribution_cache.insert(path_hash, contribution);
+                    // Cache file contributions based on type
+                    match contributions {
+                        CachedContributions::SingleMessage(contribs) => {
+                            for (path_hash, contribution) in contribs {
+                                self.contribution_cache
+                                    .insert_single_message(path_hash, contribution);
+                            }
+                        }
+                        CachedContributions::SingleSession(contribs) => {
+                            for (path_hash, contribution) in contribs {
+                                self.contribution_cache
+                                    .insert_single_session(path_hash, contribution);
+                            }
+                        }
+                        CachedContributions::MultiSession(contribs) => {
+                            for (path_hash, contribution) in contribs {
+                                self.contribution_cache
+                                    .insert_multi_session(path_hash, contribution);
+                            }
+                        }
                     }
                     // Convert to view (drops messages)
                     let view = stats.into_view();
@@ -479,6 +538,9 @@ impl AnalyzerRegistry {
                 }
             }
         }
+
+        // Shrink caches after bulk insertion
+        self.contribution_cache.shrink_to_fit();
 
         Ok(crate::types::MultiAnalyzerStatsView {
             analyzer_stats: all_views,
@@ -512,11 +574,8 @@ impl AnalyzerRegistry {
         // Hash the path for cache lookup (no allocation)
         let path_hash = PathHash::new(changed_path);
 
-        // Get the old contribution (if any)
-        let old_contribution = self
-            .file_contribution_cache
-            .get(&path_hash)
-            .map(|r| r.clone());
+        // Get contribution strategy for this analyzer
+        let strategy = analyzer.contribution_strategy();
 
         // Parse just the changed file (sequential, no threadpool needed for single file)
         let source = DataSource {
@@ -535,14 +594,6 @@ impl AnalyzerRegistry {
             }
         };
 
-        // Compute new contribution
-        let new_contribution =
-            FileContribution::from_messages(&new_messages, Arc::clone(&analyzer_name_arc));
-
-        // Update the contribution cache (key is just a u64, no allocation)
-        self.file_contribution_cache
-            .insert(path_hash, new_contribution.clone());
-
         // Get or create the cached view for this analyzer
         let shared_view = self
             .analyzer_views_cache
@@ -557,18 +608,61 @@ impl AnalyzerRegistry {
             })
             .clone();
 
-        // Acquire write lock and mutate in place - NO CLONING!
-        {
-            let mut view = shared_view.write();
+        match strategy {
+            ContributionStrategy::SingleMessage => {
+                let old_contribution = self.contribution_cache.get_single_message(&path_hash);
 
-            // Subtract old contribution (if any)
-            if let Some(old) = old_contribution {
-                view.subtract_contribution(&old);
+                let new_contribution = new_messages
+                    .first()
+                    .map(SingleMessageContribution::from_message)
+                    .unwrap_or_else(|| SingleMessageContribution {
+                        stats: Default::default(),
+                        date: Default::default(),
+                        model: None,
+                        session_hash: 0,
+                    });
+
+                self.contribution_cache
+                    .insert_single_message(path_hash, new_contribution);
+
+                let mut view = shared_view.write();
+                if let Some(old) = old_contribution {
+                    view.subtract_single_message_contribution(&old);
+                }
+                view.add_single_message_contribution(&new_contribution);
             }
+            ContributionStrategy::SingleSession => {
+                let old_contribution = self.contribution_cache.get_single_session(&path_hash);
 
-            // Add new contribution
-            view.add_contribution(&new_contribution);
-        } // Write lock released here
+                let new_contribution = SingleSessionContribution::from_messages(&new_messages);
+
+                self.contribution_cache
+                    .insert_single_session(path_hash, new_contribution.clone());
+
+                let mut view = shared_view.write();
+                if let Some(old) = old_contribution {
+                    view.subtract_single_session_contribution(&old);
+                }
+                view.add_single_session_contribution(&new_contribution);
+            }
+            ContributionStrategy::MultiSession => {
+                let old_contribution = self.contribution_cache.get_multi_session(&path_hash);
+
+                let new_contribution = MultiSessionContribution::from_messages(
+                    &new_messages,
+                    Arc::clone(&analyzer_name_arc),
+                );
+
+                self.contribution_cache
+                    .insert_multi_session(path_hash, new_contribution.clone());
+
+                let mut view = shared_view.write();
+                if let Some(old) = old_contribution {
+                    view.subtract_multi_session_contribution(&old);
+                }
+                view.add_multi_session_contribution(&new_contribution);
+            }
+        }
 
         Ok(())
     }
@@ -577,13 +671,23 @@ impl AnalyzerRegistry {
     /// Returns true if the file was found and removed.
     /// Also marks the file as dirty for upload if it was in the cache.
     pub fn remove_file_from_cache(&self, analyzer_name: &str, path: &std::path::Path) -> bool {
-        // Hash the path for lookup (no allocation)
         let path_hash = PathHash::new(path);
 
-        if let Some((_, old)) = self.file_contribution_cache.remove(&path_hash) {
-            // Update the cached view in place using write lock - NO CLONING!
+        // Try to remove from any cache and update view accordingly
+        if let Some(removed) = self.contribution_cache.remove_any(&path_hash) {
             if let Some(shared_view) = self.analyzer_views_cache.get(analyzer_name) {
-                shared_view.write().subtract_contribution(&old);
+                let mut view = shared_view.write();
+                match removed {
+                    RemovedContribution::SingleMessage(old) => {
+                        view.subtract_single_message_contribution(&old);
+                    }
+                    RemovedContribution::SingleSession(old) => {
+                        view.subtract_single_session_contribution(&old);
+                    }
+                    RemovedContribution::MultiSession(old) => {
+                        view.subtract_multi_session_contribution(&old);
+                    }
+                }
             }
             true
         } else {
@@ -760,6 +864,10 @@ mod tests {
                 .filter_map(|p| p.parent().map(|parent| parent.to_path_buf()))
                 .collect()
         }
+
+        fn contribution_strategy(&self) -> ContributionStrategy {
+            ContributionStrategy::SingleSession
+        }
     }
 
     fn sample_stats(name: &str) -> AgenticCodingToolStats {
@@ -909,6 +1017,10 @@ mod tests {
 
         fn get_watch_directories(&self) -> Vec<PathBuf> {
             self.watch_dirs.clone()
+        }
+
+        fn contribution_strategy(&self) -> ContributionStrategy {
+            ContributionStrategy::SingleSession
         }
     }
 

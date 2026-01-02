@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::models::calculate_total_cost;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
@@ -96,6 +97,10 @@ impl Analyzer for CodexCliAnalyzer {
     fn is_valid_data_path(&self, path: &Path) -> bool {
         // Must be a .jsonl file under sessions directory
         path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl")
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }
 

@@ -9,6 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::models::calculate_total_cost;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{fast_hash, hash_text};
@@ -261,6 +262,10 @@ impl Analyzer for ClaudeCodeAnalyzer {
             })
             .filter_map(|e| e.ok())
             .any(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }
 

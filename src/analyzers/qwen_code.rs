@@ -1,4 +1,5 @@
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output_cost};
 use crate::types::{Application, ConversationMessage, FileCategory, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text};
@@ -365,5 +366,9 @@ impl Analyzer for QwenCodeAnalyzer {
                 .parent()
                 .and_then(|p| p.file_name())
                 .is_some_and(|name| name == "chats")
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }

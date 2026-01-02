@@ -2,6 +2,7 @@ use crate::analyzer::{
     Analyzer, DataSource, discover_vscode_extension_sources, get_vscode_extension_tasks_dirs,
     vscode_extension_has_sources,
 };
+use crate::contribution_cache::ContributionStrategy;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
@@ -313,6 +314,10 @@ impl Analyzer for KiloCodeAnalyzer {
 
     fn is_valid_data_path(&self, path: &Path) -> bool {
         path.is_file() && path.file_name().is_some_and(|n| n == "ui_messages.json")
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }
 

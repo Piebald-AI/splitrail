@@ -10,7 +10,6 @@ use std::sync::LazyLock;
 use tinyvec::TinyVec;
 
 use crate::tui::logic::aggregate_sessions_from_messages;
-use crate::utils::aggregate_by_date;
 
 // ============================================================================
 // Model String Interner
@@ -292,19 +291,6 @@ impl std::ops::SubAssign<&DailyStats> for DailyStats {
         }
         self.stats -= rhs.stats;
     }
-}
-
-/// Cached contribution from a single file for incremental updates.
-/// Stores pre-computed aggregates so we can subtract old and add new
-/// without reparsing all files.
-#[derive(Debug, Clone, Default)]
-pub struct FileContribution {
-    /// Session aggregates from this file (usually 1 per file)
-    pub session_aggregates: Vec<SessionAggregate>,
-    /// Daily stats from this file keyed by date
-    pub daily_stats: BTreeMap<String, DailyStats>,
-    /// Number of conversations in this file
-    pub conversation_count: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -591,107 +577,6 @@ impl AgenticCodingToolStats {
     }
 }
 
-impl FileContribution {
-    /// Compute a FileContribution from parsed messages.
-    /// Takes `Arc<str>` for analyzer_name to avoid allocating a new String per session.
-    pub fn from_messages(messages: &[ConversationMessage], analyzer_name: Arc<str>) -> Self {
-        let session_aggregates = aggregate_sessions_from_messages(messages, analyzer_name);
-        let mut daily_stats = aggregate_by_date(messages);
-        daily_stats.retain(|date, _| date != "unknown");
-
-        // Count unique conversations
-        let conversation_count = session_aggregates.len() as u64;
-
-        Self {
-            session_aggregates,
-            daily_stats,
-            conversation_count,
-        }
-    }
-}
-
-impl AnalyzerStatsView {
-    /// Add a file's contribution to this view (for incremental updates).
-    pub fn add_contribution(&mut self, contrib: &FileContribution) {
-        // Add daily stats
-        for (date, day_stats) in &contrib.daily_stats {
-            *self
-                .daily_stats
-                .entry(date.clone())
-                .or_insert_with(|| DailyStats {
-                    date: CompactDate::from_str(date).unwrap_or_default(),
-                    ..Default::default()
-                }) += day_stats;
-        }
-
-        // Add session aggregates - merge if same session_id exists, otherwise append
-        for new_session in &contrib.session_aggregates {
-            if let Some(existing) = self
-                .session_aggregates
-                .iter_mut()
-                .find(|s| s.session_id == new_session.session_id)
-            {
-                // Merge into existing session
-                existing.stats += new_session.stats;
-                for &(model, count) in new_session.models.iter() {
-                    existing.models.increment(model, count);
-                }
-                if new_session.first_timestamp < existing.first_timestamp {
-                    existing.first_timestamp = new_session.first_timestamp;
-                    existing.date = new_session.date;
-                }
-                if existing.session_name.is_none() {
-                    existing.session_name = new_session.session_name.clone();
-                }
-            } else {
-                // New session
-                self.session_aggregates.push(new_session.clone());
-            }
-        }
-
-        self.num_conversations += contrib.conversation_count;
-
-        // Keep sessions sorted by timestamp
-        self.session_aggregates.sort_by_key(|s| s.first_timestamp);
-    }
-
-    /// Subtract a file's contribution from this view (for incremental updates).
-    pub fn subtract_contribution(&mut self, contrib: &FileContribution) {
-        // Subtract daily stats
-        for (date, day_stats) in &contrib.daily_stats {
-            if let Some(existing) = self.daily_stats.get_mut(date) {
-                *existing -= day_stats;
-                // Remove if empty
-                if existing.user_messages == 0
-                    && existing.ai_messages == 0
-                    && existing.conversations == 0
-                {
-                    self.daily_stats.remove(date);
-                }
-            }
-        }
-
-        // Subtract session stats (arithmetic, not removal) to handle partial updates correctly
-        for old_session in &contrib.session_aggregates {
-            if let Some(existing) = self
-                .session_aggregates
-                .iter_mut()
-                .find(|s| s.session_id == old_session.session_id)
-            {
-                existing.stats -= old_session.stats; // TuiStats is Copy
-                // Subtract model reference counts
-                for &(model, count) in old_session.models.iter() {
-                    existing.models.decrement(model, count);
-                }
-            }
-        }
-
-        self.num_conversations = self
-            .num_conversations
-            .saturating_sub(contrib.conversation_count);
-    }
-}
-
 impl MultiAnalyzerStats {
     /// Convert to view type, consuming self and dropping all messages.
     pub fn into_view(self) -> MultiAnalyzerStatsView {
@@ -855,8 +740,12 @@ mod tests {
         assert_eq!(stats.models.get("claude"), None);
     }
 
-    fn make_session_contrib(session_id: &str, model: &str, count: u32) -> FileContribution {
-        FileContribution {
+    fn make_session_contrib(
+        session_id: &str,
+        model: &str,
+        count: u32,
+    ) -> crate::contribution_cache::MultiSessionContribution {
+        crate::contribution_cache::MultiSessionContribution {
             session_aggregates: vec![SessionAggregate {
                 session_id: session_id.into(),
                 first_timestamp: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
@@ -889,25 +778,33 @@ mod tests {
         let mut view = empty_view();
         let model_key = intern_model("claude-3-5-sonnet");
 
-        view.add_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 1));
+        view.add_multi_session_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 1));
         assert_eq!(
             get_model_count(&view.session_aggregates[0].models, model_key),
             Some(1)
         );
 
-        view.add_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 2));
+        view.add_multi_session_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 2));
         assert_eq!(
             get_model_count(&view.session_aggregates[0].models, model_key),
             Some(3)
         );
 
-        view.subtract_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 1));
+        view.subtract_multi_session_contribution(&make_session_contrib(
+            "s1",
+            "claude-3-5-sonnet",
+            1,
+        ));
         assert_eq!(
             get_model_count(&view.session_aggregates[0].models, model_key),
             Some(2)
         );
 
-        view.subtract_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 2));
+        view.subtract_multi_session_contribution(&make_session_contrib(
+            "s1",
+            "claude-3-5-sonnet",
+            2,
+        ));
         assert_eq!(
             get_model_count(&view.session_aggregates[0].models, model_key),
             None
@@ -920,14 +817,14 @@ mod tests {
         let mut view = empty_view();
         let model_key = intern_model("gpt-4");
 
-        view.add_contribution(&make_session_contrib("s1", "gpt-4", 1)); // file1
-        view.add_contribution(&make_session_contrib("s1", "gpt-4", 1)); // file2
+        view.add_multi_session_contribution(&make_session_contrib("s1", "gpt-4", 1)); // file1
+        view.add_multi_session_contribution(&make_session_contrib("s1", "gpt-4", 1)); // file2
         assert_eq!(
             get_model_count(&view.session_aggregates[0].models, model_key),
             Some(2)
         );
 
-        view.subtract_contribution(&make_session_contrib("s1", "gpt-4", 1)); // remove file1
+        view.subtract_multi_session_contribution(&make_session_contrib("s1", "gpt-4", 1)); // remove file1
         assert_eq!(
             get_model_count(&view.session_aggregates[0].models, model_key),
             Some(1)
@@ -943,7 +840,7 @@ mod tests {
             .models
             .increment(intern_model("claude"), 2);
 
-        view.add_contribution(&contrib);
+        view.add_multi_session_contribution(&contrib);
         assert_eq!(
             get_model_count(&view.session_aggregates[0].models, intern_model("gpt-4")),
             Some(1)
@@ -953,7 +850,7 @@ mod tests {
             Some(2)
         );
 
-        view.subtract_contribution(&make_session_contrib("s1", "gpt-4", 1));
+        view.subtract_multi_session_contribution(&make_session_contrib("s1", "gpt-4", 1));
         assert_eq!(
             get_model_count(&view.session_aggregates[0].models, intern_model("gpt-4")),
             None

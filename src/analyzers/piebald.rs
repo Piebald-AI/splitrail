@@ -3,6 +3,7 @@
 //! <https://piebald.ai>
 
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::models::calculate_total_cost;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
@@ -268,6 +269,11 @@ impl Analyzer for PiebaldAnalyzer {
     fn is_valid_data_path(&self, path: &std::path::Path) -> bool {
         // Must be the app.db file
         path.is_file() && path.file_name().is_some_and(|n| n == "app.db")
+    }
+
+    // Piebald uses SQLite database containing all sessions
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::MultiSession
     }
 }
 

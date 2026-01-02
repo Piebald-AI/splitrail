@@ -13,6 +13,7 @@ use analyzers::{
 mod analyzer;
 mod analyzers;
 mod config;
+mod contribution_cache;
 mod mcp;
 mod models;
 mod reqwest_simd_json;

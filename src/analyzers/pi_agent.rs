@@ -1,4 +1,5 @@
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::Result;
@@ -481,5 +482,9 @@ impl Analyzer for PiAgentAnalyzer {
             return relative.components().count() == 2;
         }
         false
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }

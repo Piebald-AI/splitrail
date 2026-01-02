@@ -1,4 +1,5 @@
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
@@ -500,6 +501,10 @@ impl Analyzer for CopilotAnalyzer {
                 .parent()
                 .and_then(|p| p.file_name())
                 .is_some_and(|name| name == "chatSessions")
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }
 

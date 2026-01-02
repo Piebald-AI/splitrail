@@ -1,4 +1,5 @@
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::models::calculate_total_cost;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
@@ -601,6 +602,11 @@ impl Analyzer for OpenCodeAnalyzer {
             return relative.components().count() == 2;
         }
         false
+    }
+
+    // Each OpenCode message file contains exactly one message
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleMessage
     }
 }
 
