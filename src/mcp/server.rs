@@ -45,6 +45,43 @@ impl SplitrailMcpServer {
             .map_err(|e| McpError::internal_error(format!("Failed to load stats: {}", e), None))
     }
 
+    /// Compute file operation stats grouped by date from raw messages.
+    /// This is computed on-demand since DailyStats only contains TUI-relevant fields.
+    fn compute_file_ops_by_date(
+        stats: &MultiAnalyzerStats,
+        analyzer: Option<&str>,
+    ) -> HashMap<String, DateFileOps> {
+        let messages: Vec<_> = if let Some(analyzer_name) = analyzer {
+            stats
+                .analyzer_stats
+                .iter()
+                .filter(|a| a.analyzer_name.eq_ignore_ascii_case(analyzer_name))
+                .flat_map(|a| a.messages.iter())
+                .collect()
+        } else {
+            stats
+                .analyzer_stats
+                .iter()
+                .flat_map(|a| a.messages.iter())
+                .collect()
+        };
+
+        let mut file_ops_by_date: HashMap<String, DateFileOps> = HashMap::new();
+        for msg in messages {
+            let date = msg
+                .date
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string();
+            let entry = file_ops_by_date.entry(date).or_default();
+            entry.files_read += msg.stats.files_read;
+            entry.files_edited += msg.stats.files_edited;
+            entry.files_added += msg.stats.files_added;
+            entry.terminal_commands += msg.stats.terminal_commands;
+        }
+        file_ops_by_date
+    }
+
     /// Get daily stats for a specific analyzer or combined across all
     fn get_daily_stats_for_analyzer(
         stats: &MultiAnalyzerStats,
@@ -85,18 +122,22 @@ impl SplitrailMcpServer {
     ) -> Result<Json<DailyStatsResponse>, String> {
         let stats = self.load_stats().map_err(|e| e.to_string())?;
         let daily_stats = Self::get_daily_stats_for_analyzer(&stats, req.analyzer.as_deref());
+        let file_ops_by_date = Self::compute_file_ops_by_date(&stats, req.analyzer.as_deref());
 
-        let mut results: Vec<DailySummary> = if let Some(date) = req.date {
+        let mut results: Vec<DailySummary> = if let Some(ref date) = req.date {
             // Filter by specific date
-            daily_stats
-                .get(&date)
-                .map(|ds| vec![DailySummary::from((date.as_str(), ds))])
-                .unwrap_or_default()
+            daily_stats.get(date).map_or_else(Vec::new, |ds| {
+                let file_ops = file_ops_by_date.get(date).cloned().unwrap_or_default();
+                vec![DailySummary::new(date.as_str(), ds, &file_ops)]
+            })
         } else {
             // All dates
             daily_stats
                 .iter()
-                .map(|(date, ds)| DailySummary::from((date.as_str(), ds)))
+                .map(|(date, ds)| {
+                    let file_ops = file_ops_by_date.get(date).cloned().unwrap_or_default();
+                    DailySummary::new(date.as_str(), ds, &file_ops)
+                })
                 .collect()
         };
 

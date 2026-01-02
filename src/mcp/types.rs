@@ -101,8 +101,21 @@ pub struct DailyStatsResponse {
     pub results: Vec<DailySummary>,
 }
 
-impl From<(&str, &DailyStats)> for DailySummary {
-    fn from((date, ds): (&str, &DailyStats)) -> Self {
+/// File operation stats computed on-demand from raw messages.
+/// Used to supplement DailyStats (which only contains TUI-relevant fields).
+#[derive(Debug, Clone, Default)]
+pub struct DateFileOps {
+    pub files_read: u64,
+    pub files_edited: u64,
+    pub files_added: u64,
+    pub terminal_commands: u64,
+}
+
+impl DailySummary {
+    /// Create a DailySummary from DailyStats and file operation stats.
+    /// File ops are computed separately from raw messages since DailyStats
+    /// only contains TUI-relevant fields.
+    pub fn new(date: &str, ds: &DailyStats, file_ops: &DateFileOps) -> Self {
         Self {
             date: date.to_string(),
             user_messages: ds.user_messages,
@@ -113,11 +126,10 @@ impl From<(&str, &DailyStats)> for DailySummary {
             output_tokens: ds.stats.output_tokens as u64,
             cache_read_tokens: ds.stats.cached_tokens as u64,
             tool_calls: ds.stats.tool_calls,
-            // File operation stats not in TuiStats (not displayed in UI)
-            files_read: 0,
-            files_edited: 0,
-            files_added: 0,
-            terminal_commands: 0,
+            files_read: file_ops.files_read,
+            files_edited: file_ops.files_edited,
+            files_added: file_ops.files_added,
+            terminal_commands: file_ops.terminal_commands,
             models: ds.models.clone(),
         }
     }

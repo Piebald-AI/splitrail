@@ -191,6 +191,10 @@ pub struct ConversationMessage {
     pub session_name: Option<String>,
 }
 
+/// Daily statistics for TUI display.
+/// Note: This struct only contains fields displayed in the TUI. File operation stats
+/// (files_read, files_edited, etc.) are not included here - they are computed on-demand
+/// from raw messages when needed (e.g., in the MCP server).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyStats {
     pub date: CompactDate,
