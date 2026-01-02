@@ -7,6 +7,7 @@ use lasso::{Spur, ThreadedRodeo};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
+use tinyvec::TinyVec;
 
 use crate::tui::logic::aggregate_sessions_from_messages;
 use crate::utils::aggregate_by_date;
@@ -123,6 +124,63 @@ impl fmt::Display for CompactDate {
 }
 
 // ============================================================================
+// ModelCounts - Compact reference-counted model tracking
+// ============================================================================
+
+/// Compact model reference counts with inline storage for up to 3 models.
+/// Provides a map-like interface over a TinyVec for memory efficiency.
+/// Spills to heap if more than 3 models are added.
+#[derive(Debug, Clone, Default)]
+pub struct ModelCounts(TinyVec<[(Spur, u32); 3]>);
+
+impl ModelCounts {
+    /// Create an empty ModelCounts.
+    #[inline]
+    pub fn new() -> Self {
+        Self(TinyVec::new())
+    }
+
+    /// Increment the count for a model, inserting with count if not present.
+    #[inline]
+    pub fn increment(&mut self, key: Spur, count: u32) {
+        if let Some((_, c)) = self.0.iter_mut().find(|(k, _)| *k == key) {
+            *c += count;
+        } else {
+            self.0.push((key, count));
+        }
+    }
+
+    /// Decrement the count for a model, removing it if count reaches zero.
+    #[inline]
+    pub fn decrement(&mut self, key: Spur, count: u32) {
+        if let Some((_, c)) = self.0.iter_mut().find(|(k, _)| *k == key) {
+            *c = c.saturating_sub(count);
+        }
+        self.0.retain(|(_, c)| *c > 0);
+    }
+
+    /// Get the count for a model, returning None if not present.
+    #[inline]
+    pub fn get(&self, key: Spur) -> Option<u32> {
+        self.0.iter().find(|(k, _)| *k == key).map(|(_, c)| *c)
+    }
+
+    /// Iterate over (model, count) pairs.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &(Spur, u32)> {
+        self.0.iter()
+    }
+
+    /// Create with a single model entry.
+    #[inline]
+    pub fn from_single(key: Spur, count: u32) -> Self {
+        let mut s = Self::new();
+        s.0.push((key, count));
+        s
+    }
+}
+
+// ============================================================================
 // SessionAggregate
 // ============================================================================
 
@@ -137,9 +195,8 @@ pub struct SessionAggregate {
     pub analyzer_name: Arc<str>,
     pub stats: TuiStats,
     /// Reference-counted model names for correct incremental update subtraction.
-    /// Uses BTreeMap<Spur, count> since multiple files can contribute the same model.
-    /// Interned model names - each Spur is 4 bytes vs 24+ bytes for String
-    pub models: BTreeMap<Spur, u32>,
+    /// Inline storage for up to 3 models; interned keys are 4 bytes each.
+    pub models: ModelCounts,
     pub session_name: Option<String>,
     pub date: CompactDate,
 }
@@ -576,8 +633,8 @@ impl AnalyzerStatsView {
             {
                 // Merge into existing session
                 existing.stats += new_session.stats;
-                for (&model, &count) in &new_session.models {
-                    *existing.models.entry(model).or_insert(0) += count;
+                for &(model, count) in new_session.models.iter() {
+                    existing.models.increment(model, count);
                 }
                 if new_session.first_timestamp < existing.first_timestamp {
                     existing.first_timestamp = new_session.first_timestamp;
@@ -622,14 +679,9 @@ impl AnalyzerStatsView {
                 .find(|s| s.session_id == old_session.session_id)
             {
                 existing.stats -= old_session.stats; // TuiStats is Copy
-                                                     // Subtract model reference counts
-                for (&model, &count) in &old_session.models {
-                    if let Some(existing_count) = existing.models.get_mut(&model) {
-                        *existing_count = existing_count.saturating_sub(count);
-                        if *existing_count == 0 {
-                            existing.models.remove(&model);
-                        }
-                    }
+                // Subtract model reference counts
+                for &(model, count) in old_session.models.iter() {
+                    existing.models.decrement(model, count);
                 }
             }
         }
@@ -810,7 +862,7 @@ mod tests {
                 first_timestamp: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
                 analyzer_name: Arc::from("Test"),
                 stats: TuiStats::default(),
-                models: [(intern_model(model), count)].into_iter().collect(),
+                models: ModelCounts::from_single(intern_model(model), count),
                 session_name: None,
                 date: CompactDate::default(),
             }],
@@ -827,22 +879,39 @@ mod tests {
         }
     }
 
+    /// Helper to get model count
+    fn get_model_count(models: &ModelCounts, key: Spur) -> Option<u32> {
+        models.get(key)
+    }
+
     #[test]
     fn session_model_ref_counting() {
         let mut view = empty_view();
         let model_key = intern_model("claude-3-5-sonnet");
 
         view.add_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 1));
-        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&1));
+        assert_eq!(
+            get_model_count(&view.session_aggregates[0].models, model_key),
+            Some(1)
+        );
 
         view.add_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 2));
-        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&3));
+        assert_eq!(
+            get_model_count(&view.session_aggregates[0].models, model_key),
+            Some(3)
+        );
 
         view.subtract_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 1));
-        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&2));
+        assert_eq!(
+            get_model_count(&view.session_aggregates[0].models, model_key),
+            Some(2)
+        );
 
         view.subtract_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 2));
-        assert_eq!(view.session_aggregates[0].models.get(&model_key), None);
+        assert_eq!(
+            get_model_count(&view.session_aggregates[0].models, model_key),
+            None
+        );
     }
 
     #[test]
@@ -853,10 +922,16 @@ mod tests {
 
         view.add_contribution(&make_session_contrib("s1", "gpt-4", 1)); // file1
         view.add_contribution(&make_session_contrib("s1", "gpt-4", 1)); // file2
-        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&2));
+        assert_eq!(
+            get_model_count(&view.session_aggregates[0].models, model_key),
+            Some(2)
+        );
 
         view.subtract_contribution(&make_session_contrib("s1", "gpt-4", 1)); // remove file1
-        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&1));
+        assert_eq!(
+            get_model_count(&view.session_aggregates[0].models, model_key),
+            Some(1)
+        );
         // file2 remains
     }
 
@@ -866,34 +941,26 @@ mod tests {
         let mut contrib = make_session_contrib("s1", "gpt-4", 1);
         contrib.session_aggregates[0]
             .models
-            .insert(intern_model("claude"), 2);
+            .increment(intern_model("claude"), 2);
 
         view.add_contribution(&contrib);
         assert_eq!(
-            view.session_aggregates[0]
-                .models
-                .get(&intern_model("gpt-4")),
-            Some(&1)
+            get_model_count(&view.session_aggregates[0].models, intern_model("gpt-4")),
+            Some(1)
         );
         assert_eq!(
-            view.session_aggregates[0]
-                .models
-                .get(&intern_model("claude")),
-            Some(&2)
+            get_model_count(&view.session_aggregates[0].models, intern_model("claude")),
+            Some(2)
         );
 
         view.subtract_contribution(&make_session_contrib("s1", "gpt-4", 1));
         assert_eq!(
-            view.session_aggregates[0]
-                .models
-                .get(&intern_model("gpt-4")),
+            get_model_count(&view.session_aggregates[0].models, intern_model("gpt-4")),
             None
         );
         assert_eq!(
-            view.session_aggregates[0]
-                .models
-                .get(&intern_model("claude")),
-            Some(&2)
+            get_model_count(&view.session_aggregates[0].models, intern_model("claude")),
+            Some(2)
         );
     }
 }

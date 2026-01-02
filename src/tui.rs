@@ -1605,7 +1605,7 @@ fn draw_session_stats_table(
         total_reasoning_tokens += session.stats.reasoning_tokens as u64;
         total_tool_calls += session.stats.tool_calls as u64;
 
-        for &model in session.models.keys() {
+        for &(model, _) in session.models.iter() {
             all_models.insert(model);
         }
     }
@@ -1723,8 +1723,11 @@ fn draw_session_stats_table(
             .right_aligned();
 
             // Per-session models column: sorted, deduplicated list of models used in this session
-            let mut models_vec: Vec<&str> =
-                session.models.keys().map(|&s| resolve_model(s)).collect();
+            let mut models_vec: Vec<&str> = session
+                .models
+                .iter()
+                .map(|(s, _)| resolve_model(*s))
+                .collect();
             models_vec.sort();
             models_vec.dedup();
             let models_text = models_vec.join(", ");
