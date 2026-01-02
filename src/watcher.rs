@@ -1,10 +1,11 @@
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use notify_types::event::{Event, EventKind};
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -248,13 +249,9 @@ impl RealtimeStatsManager {
         };
 
         // Check if an upload is already in progress
-        if let Ok(in_progress) = self.upload_in_progress.lock()
-            && *in_progress
-        {
+        if *self.upload_in_progress.lock() {
             // Mark that we have pending changes to upload
-            if let Ok(mut pending) = self.pending_upload.lock() {
-                *pending = true;
-            }
+            *self.pending_upload.lock() = true;
             return;
         }
 
@@ -265,25 +262,14 @@ impl RealtimeStatsManager {
             && now.duration_since(last_time) < self.upload_debounce
         {
             // Mark that we have pending changes to upload
-            if let Ok(mut pending) = self.pending_upload.lock() {
-                *pending = true;
-            }
+            *self.pending_upload.lock() = true;
             return;
         }
 
         self.last_upload_time = Some(now);
 
-        // Check if an upload is already in progress
-        if let Ok(mut in_progress) = self.upload_in_progress.lock() {
-            if *in_progress {
-                // Mark that we have pending changes to upload
-                if let Ok(mut pending) = self.pending_upload.lock() {
-                    *pending = true;
-                }
-                return;
-            }
-            *in_progress = true;
-        }
+        // Mark upload as in progress
+        *self.upload_in_progress.lock() = true;
 
         // For incremental upload, load only changed/new messages
         // This avoids loading all historical data into memory
@@ -293,18 +279,14 @@ impl RealtimeStatsManager {
         {
             Ok(msgs) => msgs,
             Err(_) => {
-                if let Ok(mut in_progress) = self.upload_in_progress.lock() {
-                    *in_progress = false;
-                }
+                *self.upload_in_progress.lock() = false;
                 return;
             }
         };
 
         if messages.is_empty() {
             // Nothing to upload
-            if let Ok(mut in_progress) = self.upload_in_progress.lock() {
-                *in_progress = false;
-            }
+            *self.upload_in_progress.lock() = false;
             return;
         }
 
@@ -323,9 +305,7 @@ impl RealtimeStatsManager {
             .await;
 
             // Mark upload as complete
-            if let Ok(mut in_progress) = upload_in_progress.lock() {
-                *in_progress = false;
-            }
+            *upload_in_progress.lock() = false;
         });
     }
 }

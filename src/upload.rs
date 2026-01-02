@@ -4,8 +4,9 @@ use crate::tui::UploadStatus;
 use crate::types::{ConversationMessage, ErrorResponse, MultiAnalyzerStats, UploadResponse};
 use crate::utils;
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 fn upload_log_path() -> PathBuf {
@@ -232,10 +233,8 @@ where
 
 /// Helper to set upload status atomically.
 fn set_upload_status(status: &Option<Arc<Mutex<UploadStatus>>>, value: UploadStatus) {
-    if let Some(status) = status
-        && let Ok(mut s) = status.lock()
-    {
-        *s = value;
+    if let Some(status) = status {
+        *status.lock() = value;
     }
 }
 
@@ -244,9 +243,8 @@ fn make_progress_callback(
     upload_status: Option<Arc<Mutex<UploadStatus>>>,
 ) -> impl FnMut(usize, usize) {
     move |current, total| {
-        if let Some(ref status) = upload_status
-            && let Ok(mut s) = status.lock()
-        {
+        if let Some(ref status) = upload_status {
+            let mut s = status.lock();
             match &*s {
                 UploadStatus::Uploading { dots, .. } => {
                     *s = UploadStatus::Uploading {

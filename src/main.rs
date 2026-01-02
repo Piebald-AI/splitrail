@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use analyzer::AnalyzerRegistry;
 use analyzers::{
@@ -260,17 +261,16 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
             });
         } else {
             // Auto-upload is enabled but configuration is incomplete
-            if let Ok(mut status) = upload_status.lock() {
-                if config.is_api_token_missing() && config.is_server_url_missing() {
-                    *status = tui::UploadStatus::MissingConfig;
-                } else if config.is_api_token_missing() {
-                    *status = tui::UploadStatus::MissingApiToken;
-                } else if config.is_server_url_missing() {
-                    *status = tui::UploadStatus::MissingServerUrl;
-                } else {
-                    // Shouldn't happen since is_configured() returned false
-                    *status = tui::UploadStatus::MissingConfig;
-                }
+            let mut status = upload_status.lock();
+            if config.is_api_token_missing() && config.is_server_url_missing() {
+                *status = tui::UploadStatus::MissingConfig;
+            } else if config.is_api_token_missing() {
+                *status = tui::UploadStatus::MissingApiToken;
+            } else if config.is_server_url_missing() {
+                *status = tui::UploadStatus::MissingServerUrl;
+            } else {
+                // Shouldn't happen since is_configured() returned false
+                *status = tui::UploadStatus::MissingConfig;
             }
         }
     }

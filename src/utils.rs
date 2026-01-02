@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Local, Utc};
 use num_format::{Locale, ToFormattedString};
+use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64;
@@ -16,9 +17,7 @@ pub fn warn_once(message: impl Into<String>) {
     let message = message.into();
     let cache = WARNED_MESSAGES.get_or_init(|| Mutex::new(HashSet::new()));
 
-    if let Ok(mut warned) = cache.lock()
-        && warned.insert(message.clone())
-    {
+    if cache.lock().insert(message.clone()) {
         eprintln!("{message}");
     }
 }

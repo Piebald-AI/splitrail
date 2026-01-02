@@ -17,6 +17,7 @@ use crossterm::terminal::{
 };
 use crossterm::{ExecutableCommand, execute};
 use logic::{SessionAggregate, date_matches_buffer, has_data_shared};
+use parking_lot::Mutex;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -25,8 +26,8 @@ use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
 use std::collections::HashSet;
 use std::io::{Write, stdout};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
 
@@ -172,11 +173,11 @@ async fn run_app(
 
     let mut needs_redraw = true;
     let mut last_upload_status = {
-        let status = upload_status.lock().unwrap();
+        let status = upload_status.lock();
         format!("{:?}", *status)
     };
     let mut last_update_status = {
-        let status = update_status.lock().unwrap();
+        let status = update_status.lock();
         format!("{:?}", *status)
     };
     let mut dots_counter = 0; // Counter for dots animation (advance every 5 frames = 500ms)
@@ -193,7 +194,7 @@ async fn run_app(
     loop {
         // Check for update status changes
         let current_update_status = {
-            let status = update_status.lock().unwrap();
+            let status = update_status.lock();
             format!("{:?}", *status)
         };
         if current_update_status != last_update_status {
@@ -225,7 +226,7 @@ async fn run_app(
 
         // Check if upload status has changed or advance dots animation
         let current_upload_status = {
-            let mut status = upload_status.lock().unwrap();
+            let mut status = upload_status.lock();
             // Advance dots animation for uploading status every 500ms (5 frames at 100ms)
             if let UploadStatus::Uploading {
                 current: _,
@@ -301,15 +302,15 @@ async fn run_app(
             }
 
             // Handle update notification dismissal
-            if matches!(key.code, KeyCode::Char('u'))
-                && let Ok(mut status) = update_status.lock()
-                && matches!(
+            if matches!(key.code, KeyCode::Char('u')) {
+                let mut status = update_status.lock();
+                if matches!(
                     *status,
                     crate::version_check::UpdateStatus::Available { .. }
-                )
-            {
-                *status = crate::version_check::UpdateStatus::Dismissed;
-                needs_redraw = true;
+                ) {
+                    *status = crate::version_check::UpdateStatus::Dismissed;
+                    needs_redraw = true;
+                }
             }
 
             // Only handle navigation keys if we have data (`filtered_stats` is non-empty).
@@ -718,21 +719,13 @@ fn draw_ui(
     let has_data = !filtered_stats.is_empty();
 
     // Check if we have an error to determine help area height
-    let has_error = if let Ok(status) = upload_status.lock() {
-        matches!(*status, UploadStatus::Failed(_))
-    } else {
-        false
-    };
+    let has_error = matches!(*upload_status.lock(), UploadStatus::Failed(_));
 
     // Check if update is available
-    let show_update_banner = if let Ok(status) = update_status.lock() {
-        matches!(
-            *status,
-            crate::version_check::UpdateStatus::Available { .. }
-        )
-    } else {
-        false
-    };
+    let show_update_banner = matches!(
+        *update_status.lock(),
+        crate::version_check::UpdateStatus::Available { .. }
+    );
 
     // Adjust layout based on whether we have data and update banner
     let (chunks, chunk_offset) = if has_data {
@@ -792,20 +785,20 @@ fn draw_ui(
     frame.render_widget(header, chunks[0]);
 
     // Update banner (if showing)
-    if show_update_banner
-        && let Ok(status) = update_status.lock()
-        && let crate::version_check::UpdateStatus::Available { latest, current } = &*status
-    {
-        let banner = Paragraph::new(format!(
-            " New version available: {} -> {} (press 'u' to dismiss)",
-            current, latest
-        ))
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-        frame.render_widget(banner, chunks[1]);
+    if show_update_banner {
+        let status = update_status.lock();
+        if let crate::version_check::UpdateStatus::Available { latest, current } = &*status {
+            let banner = Paragraph::new(format!(
+                " New version available: {} -> {} (press 'u' to dismiss)",
+                current, latest
+            ))
+            .style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
+            frame.render_widget(banner, chunks[1]);
+        }
     }
 
     if has_data {
@@ -922,58 +915,58 @@ fn draw_ui(
             frame.render_widget(help, help_chunks[0]);
 
             // Upload status on right side
-            if let Ok(status) = upload_status.lock() {
-                let (status_text, status_style) = match &*status {
-                    UploadStatus::None => (String::new(), Style::default()),
-                    UploadStatus::Uploading {
-                        current,
-                        total,
-                        dots,
-                    } => {
-                        let dots_str = match dots % 4 {
-                            0 => "   ",
-                            1 => ".  ",
-                            2 => ".. ",
-                            _ => "...",
-                        };
-                        (
-                            format!(
-                                "Uploading {}/{} messages{}",
-                                format_number(*current as u64, format_options),
-                                format_number(*total as u64, format_options),
-                                dots_str
-                            ),
-                            Style::default().add_modifier(Modifier::DIM),
-                        )
-                    }
-                    UploadStatus::Uploaded => (
-                        "✓ Uploaded successfully".to_string(),
-                        Style::default().fg(Color::Green),
-                    ),
-                    UploadStatus::Failed(error) => {
-                        (format!("✕ {error}"), Style::default().fg(Color::Red))
-                    }
-                    UploadStatus::MissingApiToken => (
-                        "No API token for uploading".to_string(),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    UploadStatus::MissingServerUrl => (
-                        "No server URL for uploading".to_string(),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    UploadStatus::MissingConfig => (
-                        "Upload config incomplete".to_string(),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                };
-
-                if !status_text.is_empty() {
-                    let status_widget = Paragraph::new(status_text)
-                        .style(status_style)
-                        .alignment(ratatui::layout::Alignment::Right)
-                        .wrap(ratatui::widgets::Wrap { trim: true });
-                    frame.render_widget(status_widget, help_chunks[1]);
+            let status = upload_status.lock();
+            let (status_text, status_style) = match &*status {
+                UploadStatus::None => (String::new(), Style::default()),
+                UploadStatus::Uploading {
+                    current,
+                    total,
+                    dots,
+                } => {
+                    let dots_str = match dots % 4 {
+                        0 => "   ",
+                        1 => ".  ",
+                        2 => ".. ",
+                        _ => "...",
+                    };
+                    (
+                        format!(
+                            "Uploading {}/{} messages{}",
+                            format_number(*current as u64, format_options),
+                            format_number(*total as u64, format_options),
+                            dots_str
+                        ),
+                        Style::default().add_modifier(Modifier::DIM),
+                    )
                 }
+                UploadStatus::Uploaded => (
+                    "✓ Uploaded successfully".to_string(),
+                    Style::default().fg(Color::Green),
+                ),
+                UploadStatus::Failed(error) => {
+                    (format!("✕ {error}"), Style::default().fg(Color::Red))
+                }
+                UploadStatus::MissingApiToken => (
+                    "No API token for uploading".to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+                UploadStatus::MissingServerUrl => (
+                    "No server URL for uploading".to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+                UploadStatus::MissingConfig => (
+                    "Upload config incomplete".to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+            };
+            drop(status); // Release lock before rendering
+
+            if !status_text.is_empty() {
+                let status_widget = Paragraph::new(status_text)
+                    .style(status_style)
+                    .alignment(ratatui::layout::Alignment::Right)
+                    .wrap(ratatui::widgets::Wrap { trim: true });
+                frame.render_widget(status_widget, help_chunks[1]);
             }
         }
     } else {
