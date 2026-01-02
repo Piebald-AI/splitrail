@@ -136,8 +136,10 @@ pub struct SessionAggregate {
     /// Shared across all sessions from the same analyzer (Arc clone is cheap)
     pub analyzer_name: Arc<str>,
     pub stats: TuiStats,
+    /// Reference-counted model names for correct incremental update subtraction.
+    /// Uses BTreeMap<Spur, count> since multiple files can contribute the same model.
     /// Interned model names - each Spur is 4 bytes vs 24+ bytes for String
-    pub models: Vec<Spur>,
+    pub models: BTreeMap<Spur, u32>,
     pub session_name: Option<String>,
     pub date: CompactDate,
 }
@@ -201,6 +203,7 @@ pub struct DailyStats {
     pub user_messages: u32,
     pub ai_messages: u32,
     pub conversations: u32,
+    /// Reference-counted model occurrences for correct incremental update subtraction.
     pub models: BTreeMap<String, u32>,
     pub stats: TuiStats,
 }
@@ -573,10 +576,8 @@ impl AnalyzerStatsView {
             {
                 // Merge into existing session
                 existing.stats += new_session.stats;
-                for &model in &new_session.models {
-                    if !existing.models.contains(&model) {
-                        existing.models.push(model);
-                    }
+                for (&model, &count) in &new_session.models {
+                    *existing.models.entry(model).or_insert(0) += count;
                 }
                 if new_session.first_timestamp < existing.first_timestamp {
                     existing.first_timestamp = new_session.first_timestamp;
@@ -621,9 +622,14 @@ impl AnalyzerStatsView {
                 .find(|s| s.session_id == old_session.session_id)
             {
                 existing.stats -= old_session.stats; // TuiStats is Copy
-                // Remove models that were in the old session
-                for model in &old_session.models {
-                    existing.models.retain(|m| m != model);
+                                                     // Subtract model reference counts
+                for (&model, &count) in &old_session.models {
+                    if let Some(existing_count) = existing.models.get_mut(&model) {
+                        *existing_count = existing_count.saturating_sub(count);
+                        if *existing_count == 0 {
+                            existing.models.remove(&model);
+                        }
+                    }
                 }
             }
         }
@@ -761,5 +767,133 @@ mod tests {
 
         assert_eq!(view.analyzer_stats.len(), 1);
         assert_eq!(&*view.analyzer_stats[0].read().analyzer_name, "Analyzer1");
+    }
+
+    // ========================================================================
+    // Model reference counting tests
+    // ========================================================================
+
+    #[test]
+    fn daily_stats_model_ref_counting() {
+        let mut stats = DailyStats::default();
+        let day1 = DailyStats {
+            models: [("gpt-4".into(), 2)].into_iter().collect(),
+            ..Default::default()
+        };
+        let day2 = DailyStats {
+            models: [("gpt-4".into(), 1), ("claude".into(), 1)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+
+        stats += &day1;
+        assert_eq!(stats.models.get("gpt-4"), Some(&2));
+
+        stats += &day2;
+        assert_eq!(stats.models.get("gpt-4"), Some(&3));
+        assert_eq!(stats.models.get("claude"), Some(&1));
+
+        stats -= &day1;
+        assert_eq!(stats.models.get("gpt-4"), Some(&1));
+        assert_eq!(stats.models.get("claude"), Some(&1));
+
+        stats -= &day2;
+        assert_eq!(stats.models.get("gpt-4"), None); // removed at 0
+        assert_eq!(stats.models.get("claude"), None);
+    }
+
+    fn make_session_contrib(session_id: &str, model: &str, count: u32) -> FileContribution {
+        FileContribution {
+            session_aggregates: vec![SessionAggregate {
+                session_id: session_id.into(),
+                first_timestamp: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+                analyzer_name: Arc::from("Test"),
+                stats: TuiStats::default(),
+                models: [(intern_model(model), count)].into_iter().collect(),
+                session_name: None,
+                date: CompactDate::default(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn empty_view() -> AnalyzerStatsView {
+        AnalyzerStatsView {
+            daily_stats: BTreeMap::new(),
+            session_aggregates: Vec::new(),
+            num_conversations: 0,
+            analyzer_name: Arc::from("Test"),
+        }
+    }
+
+    #[test]
+    fn session_model_ref_counting() {
+        let mut view = empty_view();
+        let model_key = intern_model("claude-3-5-sonnet");
+
+        view.add_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 1));
+        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&1));
+
+        view.add_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 2));
+        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&3));
+
+        view.subtract_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 1));
+        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&2));
+
+        view.subtract_contribution(&make_session_contrib("s1", "claude-3-5-sonnet", 2));
+        assert_eq!(view.session_aggregates[0].models.get(&model_key), None);
+    }
+
+    #[test]
+    fn session_model_persists_after_partial_subtraction() {
+        // Scenario: two files contribute same model to same session
+        let mut view = empty_view();
+        let model_key = intern_model("gpt-4");
+
+        view.add_contribution(&make_session_contrib("s1", "gpt-4", 1)); // file1
+        view.add_contribution(&make_session_contrib("s1", "gpt-4", 1)); // file2
+        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&2));
+
+        view.subtract_contribution(&make_session_contrib("s1", "gpt-4", 1)); // remove file1
+        assert_eq!(view.session_aggregates[0].models.get(&model_key), Some(&1));
+        // file2 remains
+    }
+
+    #[test]
+    fn session_multiple_models() {
+        let mut view = empty_view();
+        let mut contrib = make_session_contrib("s1", "gpt-4", 1);
+        contrib.session_aggregates[0]
+            .models
+            .insert(intern_model("claude"), 2);
+
+        view.add_contribution(&contrib);
+        assert_eq!(
+            view.session_aggregates[0]
+                .models
+                .get(&intern_model("gpt-4")),
+            Some(&1)
+        );
+        assert_eq!(
+            view.session_aggregates[0]
+                .models
+                .get(&intern_model("claude")),
+            Some(&2)
+        );
+
+        view.subtract_contribution(&make_session_contrib("s1", "gpt-4", 1));
+        assert_eq!(
+            view.session_aggregates[0]
+                .models
+                .get(&intern_model("gpt-4")),
+            None
+        );
+        assert_eq!(
+            view.session_aggregates[0]
+                .models
+                .get(&intern_model("claude")),
+            Some(&2)
+        );
     }
 }

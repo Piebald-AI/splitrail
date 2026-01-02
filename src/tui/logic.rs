@@ -1,4 +1,4 @@
-use crate::types::{CompactDate, ConversationMessage, Stats, TuiStats, intern_model};
+use crate::types::{intern_model, CompactDate, ConversationMessage, Stats, TuiStats};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -145,7 +145,7 @@ pub fn aggregate_sessions_from_messages(
                 first_timestamp: msg.date,
                 analyzer_name: Arc::clone(&analyzer_name),
                 stats: TuiStats::default(),
-                models: Vec::with_capacity(2),
+                models: BTreeMap::new(),
                 session_name: None,
                 date: CompactDate::from_local(&msg.date),
             });
@@ -158,9 +158,7 @@ pub fn aggregate_sessions_from_messages(
         // Only aggregate stats for assistant/model messages and track models
         if let Some(model) = &msg.model {
             let interned = intern_model(model);
-            if !entry.models.contains(&interned) {
-                entry.models.push(interned);
-            }
+            *entry.models.entry(interned).or_insert(0) += 1;
             accumulate_tui_stats(&mut entry.stats, &msg.stats);
         }
 
