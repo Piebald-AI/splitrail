@@ -268,6 +268,10 @@ pub struct AnalyzerRegistry {
     /// Tracks the order in which analyzers were registered to maintain stable tab ordering.
     /// Contains display names in registration order.
     analyzer_order: parking_lot::RwLock<Vec<String>>,
+    /// Tracks files that have been modified since the last upload.
+    /// Used for incremental uploads - only modified files are parsed for upload.
+    /// Wrapped in Arc so cloning gives a shared handle for async tasks.
+    dirty_files_for_upload: Arc<DashMap<PathBuf, String>>,
 }
 
 impl Default for AnalyzerRegistry {
@@ -284,6 +288,7 @@ impl AnalyzerRegistry {
             file_contribution_cache: DashMap::new(),
             analyzer_views_cache: DashMap::new(),
             analyzer_order: parking_lot::RwLock::new(Vec::new()),
+            dirty_files_for_upload: Arc::new(DashMap::new()),
         }
     }
 
@@ -490,6 +495,9 @@ impl AnalyzerRegistry {
             return Ok(());
         }
 
+        // Mark file as dirty for incremental upload (only for valid data paths)
+        self.mark_file_dirty(analyzer_name, changed_path);
+
         // Create Arc<str> once for this update
         let analyzer_name_arc: Arc<str> = Arc::from(analyzer_name);
 
@@ -559,6 +567,7 @@ impl AnalyzerRegistry {
 
     /// Remove a file from the cache and update the view (for file deletion events).
     /// Returns true if the file was found and removed.
+    /// Also marks the file as dirty for upload if it was in the cache.
     pub fn remove_file_from_cache(&self, analyzer_name: &str, path: &std::path::Path) -> bool {
         // Hash the path for lookup (no allocation)
         let path_hash = PathHash::new(path);
@@ -618,6 +627,55 @@ impl AnalyzerRegistry {
         }
 
         dir_to_analyzer
+    }
+
+    /// Mark a file as dirty for the next upload (file has been modified).
+    pub fn mark_file_dirty(&self, analyzer_name: &str, path: &Path) {
+        self.dirty_files_for_upload
+            .insert(path.to_path_buf(), analyzer_name.to_string());
+    }
+
+    /// Returns a shared handle to dirty files for use in async tasks.
+    pub fn dirty_files_handle(&self) -> Arc<DashMap<PathBuf, String>> {
+        Arc::clone(&self.dirty_files_for_upload)
+    }
+
+    /// Check if we have any dirty files tracked.
+    pub fn has_dirty_files(&self) -> bool {
+        !self.dirty_files_for_upload.is_empty()
+    }
+
+    /// Load messages from dirty files for incremental upload.
+    /// Returns messages filtered to only those created since last_upload_timestamp.
+    /// Returns empty vec if no dirty files are tracked.
+    pub fn load_messages_for_upload(
+        &self,
+        last_upload_timestamp: i64,
+    ) -> Result<Vec<ConversationMessage>> {
+        if self.dirty_files_for_upload.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Parse dirty files sequentially (typically only 1-2 files)
+        let mut all_messages = Vec::with_capacity(4);
+        for entry in self.dirty_files_for_upload.iter() {
+            let (path, analyzer_name) = entry.pair();
+            if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name) {
+                let source = DataSource { path: path.clone() };
+                if let Ok(msgs) = analyzer.parse_source(&source) {
+                    all_messages.extend(msgs);
+                }
+            }
+        }
+        all_messages = crate::utils::deduplicate_by_global_hash(all_messages);
+
+        // Filter by timestamp
+        let messages_later_than: Vec<_> = all_messages
+            .into_iter()
+            .filter(|msg| msg.date.timestamp_millis() >= last_upload_timestamp)
+            .collect();
+
+        Ok(messages_later_than)
     }
 }
 
@@ -991,5 +1049,109 @@ mod tests {
             after_removal, expected_strings,
             "Order changed after removal"
         );
+    }
+
+    // =========================================================================
+    // DIRTY FILE TRACKING TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_mark_file_dirty_and_clear() {
+        let registry = AnalyzerRegistry::new();
+        let path = PathBuf::from("/fake/test.json");
+
+        assert!(!registry.has_dirty_files());
+
+        registry.mark_file_dirty("test", &path);
+        assert!(registry.has_dirty_files());
+
+        registry.dirty_files_handle().clear();
+        assert!(!registry.has_dirty_files());
+    }
+
+    #[test]
+    fn test_has_dirty_files_multiple() {
+        let registry = AnalyzerRegistry::new();
+
+        registry.mark_file_dirty("test", &PathBuf::from("/a.json"));
+        registry.mark_file_dirty("test", &PathBuf::from("/b.json"));
+        registry.mark_file_dirty("test", &PathBuf::from("/c.json"));
+
+        assert!(registry.has_dirty_files());
+
+        registry.dirty_files_handle().clear();
+        assert!(!registry.has_dirty_files());
+    }
+
+    #[test]
+    fn test_load_messages_for_upload_empty_dirty_set_no_analyzers() {
+        let registry = AnalyzerRegistry::new();
+
+        // No analyzers, no dirty files - should return empty
+        let messages = registry.load_messages_for_upload(0).expect("load");
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_remove_file_from_cache_marks_dirty() {
+        let registry = AnalyzerRegistry::new();
+        let path = PathBuf::from("/fake/test.json");
+
+        // File not in cache - should return false and not mark dirty
+        assert!(!registry.remove_file_from_cache("test", &path));
+        assert!(!registry.has_dirty_files());
+    }
+
+    #[tokio::test]
+    async fn test_reload_file_incremental_marks_dirty_for_valid_path() {
+        use std::fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("test.json");
+        fs::write(&path, "{}").expect("write");
+
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test",
+            available: true,
+            stats: Some(sample_stats("test")),
+            sources: vec![path.clone()],
+            fail_stats: false,
+        });
+
+        // Load initial stats to populate cache
+        let _ = registry.load_all_stats_views_parallel();
+
+        // Reload should mark file dirty
+        assert!(!registry.has_dirty_files());
+        let _ = registry.reload_file_incremental("test", &path);
+        assert!(registry.has_dirty_files());
+    }
+
+    #[tokio::test]
+    async fn test_reload_file_incremental_skips_invalid_path() {
+        use std::fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let valid_path = temp_dir.path().join("test.json");
+        fs::write(&valid_path, "{}").expect("write");
+        let invalid_path = temp_dir.path().join("subdir");
+        fs::create_dir(&invalid_path).expect("mkdir");
+
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test",
+            available: true,
+            stats: Some(sample_stats("test")),
+            sources: vec![valid_path],
+            fail_stats: false,
+        });
+
+        // Load initial stats
+        let _ = registry.load_all_stats_views_parallel();
+
+        // Invalid path (directory) should not mark dirty
+        let _ = registry.reload_file_incremental("test", &invalid_path);
+        assert!(!registry.has_dirty_files());
     }
 }

@@ -242,7 +242,7 @@ impl RealtimeStatsManager {
 
     async fn trigger_auto_upload_if_enabled(&mut self) {
         // Check if auto-upload is enabled
-        let _config = match Config::load() {
+        let config = match Config::load() {
             Ok(Some(cfg)) if cfg.upload.auto_upload && cfg.is_configured() => cfg,
             _ => return, // Auto-upload not enabled or config not available
         };
@@ -285,10 +285,13 @@ impl RealtimeStatsManager {
             *in_progress = true;
         }
 
-        // For upload, we need full stats (with messages)
-        // Uses scoped threadpool that is dropped after parsing
-        let full_stats = match self.registry.load_all_stats_parallel_scoped() {
-            Ok(stats) => stats,
+        // For incremental upload, load only changed/new messages
+        // This avoids loading all historical data into memory
+        let messages = match self
+            .registry
+            .load_messages_for_upload(config.upload.last_date_uploaded)
+        {
+            Ok(msgs) => msgs,
             Err(_) => {
                 if let Ok(mut in_progress) = self.upload_in_progress.lock() {
                     *in_progress = false;
@@ -297,12 +300,27 @@ impl RealtimeStatsManager {
             }
         };
 
+        if messages.is_empty() {
+            // Nothing to upload
+            if let Ok(mut in_progress) = self.upload_in_progress.lock() {
+                *in_progress = false;
+            }
+            return;
+        }
+
         let upload_status = self.upload_status.clone();
         let upload_in_progress = self.upload_in_progress.clone();
+        let dirty_files = self.registry.dirty_files_handle();
 
-        // Spawn background upload task
+        // Spawn background upload task with only the messages to upload
         tokio::spawn(async move {
-            upload::perform_background_upload(full_stats, upload_status, None).await;
+            upload::perform_background_upload_messages(
+                messages,
+                upload_status,
+                None,
+                Some(move || dirty_files.clear()),
+            )
+            .await;
 
             // Mark upload as complete
             if let Ok(mut in_progress) = upload_in_progress.lock() {
