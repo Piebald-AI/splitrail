@@ -292,7 +292,7 @@ pub fn deduplicate_by_local_hash(messages: Vec<ConversationMessage>) -> Vec<Conv
         .collect()
 }
 
-/// Custom serde deserializer for RFC3339 timestamp strings to DateTime<Utc>
+/// Custom serde deserializer for RFC3339 timestamp strings to `DateTime<Utc>`
 pub fn deserialize_utc_timestamp<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
 where
     D: Deserializer<'de>,

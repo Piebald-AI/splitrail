@@ -1,6 +1,6 @@
 //! Piebald analyzer - reads usage data from Piebald's SQLite database.
 //!
-//! https://piebald.ai
+//! <https://piebald.ai>
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::models::calculate_total_cost;
