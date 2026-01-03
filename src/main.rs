@@ -12,6 +12,7 @@ use analyzers::{
 
 mod analyzer;
 mod analyzers;
+mod cache;
 mod config;
 mod contribution_cache;
 mod mcp;

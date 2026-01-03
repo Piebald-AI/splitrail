@@ -3,34 +3,15 @@ use std::fmt;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use lasso::{Spur, ThreadedRodeo};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
 use tinyvec::TinyVec;
 
+use crate::cache::ModelKey;
 use crate::tui::logic::aggregate_sessions_from_messages;
 
-// ============================================================================
-// Model String Interner
-// ============================================================================
-
-/// Global thread-safe string interner for model names.
-/// Model names like "claude-3-5-sonnet" repeat across thousands of sessions.
-/// Interning reduces memory from 24-byte String + heap per occurrence to 4-byte Spur.
-static MODEL_INTERNER: LazyLock<ThreadedRodeo> = LazyLock::new(ThreadedRodeo::default);
-
-/// Intern a model name, returning a cheap 4-byte key.
-#[inline]
-pub fn intern_model(model: &str) -> Spur {
-    MODEL_INTERNER.get_or_intern(model)
-}
-
-/// Resolve an interned model key back to its string.
-#[inline]
-pub fn resolve_model(key: Spur) -> &'static str {
-    MODEL_INTERNER.resolve(&key)
-}
+// Re-export interning functions for convenience
+pub use crate::cache::{intern_model, resolve_model};
 
 // ============================================================================
 // CompactDate - Compact date representation (4 bytes, no heap allocation)
@@ -130,7 +111,7 @@ impl fmt::Display for CompactDate {
 /// Provides a map-like interface over a TinyVec for memory efficiency.
 /// Spills to heap if more than 3 models are added.
 #[derive(Debug, Clone, Default)]
-pub struct ModelCounts(TinyVec<[(Spur, u32); 3]>);
+pub struct ModelCounts(TinyVec<[(ModelKey, u32); 3]>);
 
 impl ModelCounts {
     /// Create an empty ModelCounts.
@@ -141,7 +122,7 @@ impl ModelCounts {
 
     /// Increment the count for a model, inserting with count if not present.
     #[inline]
-    pub fn increment(&mut self, key: Spur, count: u32) {
+    pub fn increment(&mut self, key: ModelKey, count: u32) {
         if let Some((_, c)) = self.0.iter_mut().find(|(k, _)| *k == key) {
             *c += count;
         } else {
@@ -151,7 +132,7 @@ impl ModelCounts {
 
     /// Decrement the count for a model, removing it if count reaches zero.
     #[inline]
-    pub fn decrement(&mut self, key: Spur, count: u32) {
+    pub fn decrement(&mut self, key: ModelKey, count: u32) {
         if let Some((_, c)) = self.0.iter_mut().find(|(k, _)| *k == key) {
             *c = c.saturating_sub(count);
         }
@@ -160,19 +141,19 @@ impl ModelCounts {
 
     /// Get the count for a model, returning None if not present.
     #[inline]
-    pub fn get(&self, key: Spur) -> Option<u32> {
+    pub fn get(&self, key: ModelKey) -> Option<u32> {
         self.0.iter().find(|(k, _)| *k == key).map(|(_, c)| *c)
     }
 
     /// Iterate over (model, count) pairs.
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &(Spur, u32)> {
+    pub fn iter(&self) -> impl Iterator<Item = &(ModelKey, u32)> {
         self.0.iter()
     }
 
     /// Create with a single model entry.
     #[inline]
-    pub fn from_single(key: Spur, count: u32) -> Self {
+    pub fn from_single(key: ModelKey, count: u32) -> Self {
         let mut s = Self::new();
         s.0.push((key, count));
         s
@@ -769,7 +750,7 @@ mod tests {
     }
 
     /// Helper to get model count
-    fn get_model_count(models: &ModelCounts, key: Spur) -> Option<u32> {
+    fn get_model_count(models: &ModelCounts, key: ModelKey) -> Option<u32> {
         models.get(key)
     }
 

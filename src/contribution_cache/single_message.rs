@@ -1,8 +1,7 @@
 //! Single-message contribution type for 1-file-1-message analyzers.
 
-use lasso::Spur;
-
 use super::{CompactMessageStats, SessionHash};
+use crate::cache::ModelKey;
 use crate::types::{CompactDate, ConversationMessage, intern_model};
 
 // ============================================================================
@@ -19,7 +18,7 @@ pub struct SingleMessageContribution {
     /// Date of the message (for daily_stats updates)
     pub date: CompactDate,
     /// Model used (interned key), None if no model specified
-    pub model: Option<Spur>,
+    pub model: Option<ModelKey>,
     /// Hash of conversation_hash for session lookup (avoids String allocation)
     pub session_hash: SessionHash,
 }
