@@ -1,9 +1,8 @@
 //! Single-message contribution type for 1-file-1-message analyzers.
 
 use lasso::Spur;
-use xxhash_rust::xxh3::xxh3_64;
 
-use super::CompactMessageStats;
+use super::{CompactMessageStats, SessionHash};
 use crate::types::{CompactDate, ConversationMessage, intern_model};
 
 // ============================================================================
@@ -22,7 +21,7 @@ pub struct SingleMessageContribution {
     /// Model used (interned key), None if no model specified
     pub model: Option<Spur>,
     /// Hash of conversation_hash for session lookup (avoids String allocation)
-    pub session_hash: u64,
+    pub session_hash: SessionHash,
 }
 
 impl SingleMessageContribution {
@@ -33,13 +32,13 @@ impl SingleMessageContribution {
             stats: CompactMessageStats::from_stats(&msg.stats),
             date: CompactDate::from_local(&msg.date),
             model: msg.model.as_ref().map(|m| intern_model(m)),
-            session_hash: xxh3_64(msg.conversation_hash.as_bytes()),
+            session_hash: SessionHash::from_str(&msg.conversation_hash),
         }
     }
 
     /// Hash a session_id string for comparison with stored session_hash.
     #[inline]
-    pub fn hash_session_id(session_id: &str) -> u64 {
-        xxh3_64(session_id.as_bytes())
+    pub fn hash_session_id(session_id: &str) -> SessionHash {
+        SessionHash::from_str(session_id)
     }
 }

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::super::{ContributionCache, PathHash, SingleSessionContribution};
+use super::super::{ContributionCache, PathHash, SessionHash, SingleSessionContribution};
 use super::{make_message, make_view_with_session};
 
 // ============================================================================
@@ -52,7 +52,7 @@ fn test_single_session_contribution_empty_messages() {
 
     assert_eq!(contrib.ai_message_count, 0);
     assert_eq!(contrib.stats.input_tokens, 0);
-    assert_eq!(contrib.session_hash, 0);
+    assert_eq!(contrib.session_hash, SessionHash::default());
 }
 
 #[test]

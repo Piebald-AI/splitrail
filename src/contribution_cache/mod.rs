@@ -36,6 +36,18 @@ impl PathHash {
     }
 }
 
+/// Newtype wrapper for xxh3 session hashes, used to avoid String allocation for session lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SessionHash(u64);
+
+impl SessionHash {
+    /// Hash a session/conversation ID string using xxh3.
+    #[inline]
+    pub fn from_str(s: &str) -> Self {
+        Self(xxh3_64(s.as_bytes()))
+    }
+}
+
 // ============================================================================
 // ContributionStrategy - Analyzer categorization
 // ============================================================================

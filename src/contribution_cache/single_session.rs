@@ -1,7 +1,6 @@
 //! Single-session contribution type for 1-file-1-session analyzers.
 
-use xxhash_rust::xxh3::xxh3_64;
-
+use super::SessionHash;
 use crate::types::{CompactDate, ConversationMessage, ModelCounts, TuiStats, intern_model};
 
 // ============================================================================
@@ -20,7 +19,7 @@ pub struct SingleSessionContribution {
     /// Models used in this session with reference counts
     pub models: ModelCounts,
     /// Hash of conversation_hash for session lookup
-    pub session_hash: u64,
+    pub session_hash: SessionHash,
     /// Number of AI messages (for daily_stats.ai_messages)
     pub ai_message_count: u32,
 }
@@ -32,12 +31,12 @@ impl SingleSessionContribution {
         let mut models = ModelCounts::new();
         let mut ai_message_count = 0u32;
         let mut first_date = CompactDate::default();
-        let mut session_hash = 0u64;
+        let mut session_hash = SessionHash::default();
 
         for (i, msg) in messages.iter().enumerate() {
             if i == 0 {
                 first_date = CompactDate::from_local(&msg.date);
-                session_hash = xxh3_64(msg.conversation_hash.as_bytes());
+                session_hash = SessionHash::from_str(&msg.conversation_hash);
             }
 
             if let Some(model) = &msg.model {

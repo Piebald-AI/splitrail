@@ -9,7 +9,7 @@ use walkdir::WalkDir;
 
 use crate::contribution_cache::{
     ContributionCache, ContributionStrategy, MultiSessionContribution, PathHash,
-    RemovedContribution, SingleMessageContribution, SingleSessionContribution,
+    RemovedContribution, SessionHash, SingleMessageContribution, SingleSessionContribution,
 };
 use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, SharedAnalyzerView,
@@ -438,7 +438,7 @@ impl AnalyzerRegistry {
                                             stats: Default::default(),
                                             date: Default::default(),
                                             model: None,
-                                            session_hash: 0,
+                                            session_hash: SessionHash::default(),
                                         });
                                     ((path_hash, contribution), msgs)
                                 })
@@ -619,7 +619,7 @@ impl AnalyzerRegistry {
                         stats: Default::default(),
                         date: Default::default(),
                         model: None,
-                        session_hash: 0,
+                        session_hash: SessionHash::default(),
                     });
 
                 self.contribution_cache

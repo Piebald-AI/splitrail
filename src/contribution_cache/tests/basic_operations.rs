@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use super::super::{
-    CompactMessageStats, ContributionCache, MultiSessionContribution, PathHash,
+    CompactMessageStats, ContributionCache, MultiSessionContribution, PathHash, SessionHash,
     SingleMessageContribution, SingleSessionContribution,
 };
 use crate::types::CompactDate;
@@ -18,6 +18,7 @@ fn test_contribution_cache_single_message_insert_get() {
     let path = PathBuf::from("/test/file1.json");
     let path_hash = PathHash::new(&path);
 
+    let session_hash = SessionHash::from_str("test_session");
     let contrib = SingleMessageContribution {
         stats: CompactMessageStats {
             input_tokens: 100,
@@ -26,7 +27,7 @@ fn test_contribution_cache_single_message_insert_get() {
         },
         date: CompactDate::from_str("2025-01-15").unwrap(),
         model: None,
-        session_hash: 12345,
+        session_hash,
     };
 
     cache.insert_single_message(path_hash, contrib);
@@ -36,7 +37,7 @@ fn test_contribution_cache_single_message_insert_get() {
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.stats.input_tokens, 100);
     assert_eq!(retrieved.stats.output_tokens, 50);
-    assert_eq!(retrieved.session_hash, 12345);
+    assert_eq!(retrieved.session_hash, session_hash);
 }
 
 #[test]
@@ -49,7 +50,7 @@ fn test_contribution_cache_single_session_insert_get() {
         stats: Default::default(),
         date: CompactDate::from_str("2025-01-15").unwrap(),
         models: crate::types::ModelCounts::new(),
-        session_hash: 67890,
+        session_hash: SessionHash::from_str("session1"),
         ai_message_count: 5,
     };
 
@@ -99,7 +100,7 @@ fn test_contribution_cache_remove_any() {
             stats: Default::default(),
             date: Default::default(),
             model: None,
-            session_hash: 1,
+            session_hash: SessionHash::from_str("s1"),
         },
     );
     cache.insert_single_session(
@@ -108,7 +109,7 @@ fn test_contribution_cache_remove_any() {
             stats: Default::default(),
             date: Default::default(),
             models: crate::types::ModelCounts::new(),
-            session_hash: 2,
+            session_hash: SessionHash::from_str("s2"),
             ai_message_count: 0,
         },
     );
@@ -159,7 +160,7 @@ fn test_contribution_cache_clear() {
             stats: Default::default(),
             date: Default::default(),
             model: None,
-            session_hash: 1,
+            session_hash: SessionHash::default(),
         },
     );
 
