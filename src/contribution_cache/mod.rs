@@ -1,24 +1,24 @@
 //! Contribution caching for incremental updates.
 //!
 //! Provides memory-efficient caching strategies for different analyzer types:
-//! - `SingleMessageContribution`: ~40 bytes for 1-message-per-file analyzers (OpenCode)
-//! - `SingleSessionContribution`: ~72 bytes for 1-session-per-file analyzers (most)
-//! - `MultiSessionContribution`: ~100+ bytes for all-in-one-file analyzers (Piebald)
+//! - [`SingleMessageContribution`]: ~40 bytes for 1-message-per-file analyzers (OpenCode)
+//! - [`SingleSessionContribution`]: ~72 bytes for 1-session-per-file analyzers (most)
+//! - [`MultiSessionContribution`]: ~100+ bytes for all-in-one-file analyzers (Piebald)
 
-use std::collections::BTreeMap;
+mod multi_session;
+mod single_message;
+mod single_session;
+
+pub use multi_session::MultiSessionContribution;
+pub use single_message::SingleMessageContribution;
+pub use single_session::SingleSessionContribution;
+
 use std::path::Path;
-use std::sync::Arc;
 
 use dashmap::DashMap;
-use lasso::Spur;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::tui::logic::aggregate_sessions_from_messages;
-use crate::types::{
-    intern_model, AnalyzerStatsView, CompactDate, ConversationMessage, DailyStats, ModelCounts,
-    SessionAggregate, TuiStats,
-};
-use crate::utils::aggregate_by_date;
+use crate::types::{AnalyzerStatsView, CompactDate, DailyStats, TuiStats};
 
 // ============================================================================
 // PathHash - Cache key type
@@ -128,131 +128,6 @@ impl std::ops::SubAssign for CompactMessageStats {
         self.cached_tokens = self.cached_tokens.saturating_sub(rhs.cached_tokens);
         self.cost_cents = self.cost_cents.saturating_sub(rhs.cost_cents);
         self.tool_calls = self.tool_calls.saturating_sub(rhs.tool_calls);
-    }
-}
-
-// ============================================================================
-// SingleMessageContribution - For 1 file = 1 message analyzers
-// ============================================================================
-
-/// Lightweight contribution for single-message-per-file analyzers.
-/// Uses ~40 bytes instead of ~100+ bytes for full contributions.
-/// Designed for analyzers like OpenCode where each file contains exactly one message.
-#[derive(Debug, Clone, Copy)]
-pub struct SingleMessageContribution {
-    /// Compact stats from this file's single message
-    pub stats: CompactMessageStats,
-    /// Date of the message (for daily_stats updates)
-    pub date: CompactDate,
-    /// Model used (interned key), None if no model specified
-    pub model: Option<Spur>,
-    /// Hash of conversation_hash for session lookup (avoids String allocation)
-    pub session_hash: u64,
-}
-
-impl SingleMessageContribution {
-    /// Create from a single message.
-    #[inline]
-    pub fn from_message(msg: &ConversationMessage) -> Self {
-        Self {
-            stats: CompactMessageStats::from_stats(&msg.stats),
-            date: CompactDate::from_local(&msg.date),
-            model: msg.model.as_ref().map(|m| intern_model(m)),
-            session_hash: xxh3_64(msg.conversation_hash.as_bytes()),
-        }
-    }
-
-    /// Hash a session_id string for comparison with stored session_hash.
-    #[inline]
-    pub fn hash_session_id(session_id: &str) -> u64 {
-        xxh3_64(session_id.as_bytes())
-    }
-}
-
-// ============================================================================
-// SingleSessionContribution - For 1 file = 1 session analyzers
-// ============================================================================
-
-/// Contribution for single-session-per-file analyzers.
-/// Uses ~72 bytes instead of ~100+ bytes for full contributions.
-/// Designed for most analyzers where each file contains one conversation/session.
-#[derive(Debug, Clone)]
-pub struct SingleSessionContribution {
-    /// Aggregated stats from all messages in this session
-    pub stats: TuiStats,
-    /// Primary date (date of first message)
-    pub date: CompactDate,
-    /// Models used in this session with reference counts
-    pub models: ModelCounts,
-    /// Hash of conversation_hash for session lookup
-    pub session_hash: u64,
-    /// Number of AI messages (for daily_stats.ai_messages)
-    pub ai_message_count: u32,
-}
-
-impl SingleSessionContribution {
-    /// Create from messages belonging to a single session.
-    pub fn from_messages(messages: &[ConversationMessage]) -> Self {
-        let mut stats = TuiStats::default();
-        let mut models = ModelCounts::new();
-        let mut ai_message_count = 0u32;
-        let mut first_date = CompactDate::default();
-        let mut session_hash = 0u64;
-
-        for (i, msg) in messages.iter().enumerate() {
-            if i == 0 {
-                first_date = CompactDate::from_local(&msg.date);
-                session_hash = xxh3_64(msg.conversation_hash.as_bytes());
-            }
-
-            if let Some(model) = &msg.model {
-                ai_message_count += 1;
-                models.increment(intern_model(model), 1);
-                stats += TuiStats::from(&msg.stats);
-            }
-        }
-
-        Self {
-            stats,
-            date: first_date,
-            models,
-            session_hash,
-            ai_message_count,
-        }
-    }
-}
-
-// ============================================================================
-// MultiSessionContribution - For all-in-one-file analyzers
-// ============================================================================
-
-/// Full contribution for multi-session-per-file analyzers.
-/// Used when a single file contains multiple conversations (e.g., Piebald SQLite).
-#[derive(Debug, Clone, Default)]
-pub struct MultiSessionContribution {
-    /// Session aggregates from this file
-    pub session_aggregates: Vec<SessionAggregate>,
-    /// Daily stats from this file keyed by date
-    pub daily_stats: BTreeMap<String, DailyStats>,
-    /// Number of conversations in this file
-    pub conversation_count: u64,
-}
-
-impl MultiSessionContribution {
-    /// Compute from parsed messages.
-    /// Takes `Arc<str>` for analyzer_name to avoid allocating a new String per session.
-    pub fn from_messages(messages: &[ConversationMessage], analyzer_name: Arc<str>) -> Self {
-        let session_aggregates = aggregate_sessions_from_messages(messages, analyzer_name);
-        let mut daily_stats = aggregate_by_date(messages);
-        daily_stats.retain(|date, _| date != "unknown");
-
-        let conversation_count = session_aggregates.len() as u64;
-
-        Self {
-            session_aggregates,
-            daily_stats,
-            conversation_count,
-        }
     }
 }
 
