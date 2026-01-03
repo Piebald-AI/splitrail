@@ -22,13 +22,14 @@ fn test_single_message_contribution_from_message() {
     );
 
     let contrib = SingleMessageContribution::from_message(&msg);
+    let stats = contrib.to_tui_stats();
 
-    assert_eq!(contrib.stats.input_tokens, 1000);
-    assert_eq!(contrib.stats.output_tokens, 500);
-    assert_eq!(contrib.stats.cost_cents, 5);
-    assert_eq!(contrib.stats.tool_calls, 3);
+    assert_eq!(stats.input_tokens, 1000);
+    assert_eq!(stats.output_tokens, 500);
+    assert_eq!(stats.cost_cents, 5);
+    assert_eq!(stats.tool_calls, 3);
     assert!(contrib.model.is_some());
-    assert_eq!(contrib.date.to_string(), "2025-01-15");
+    assert_eq!(contrib.date().to_string(), "2025-01-15");
 }
 
 #[test]
@@ -36,9 +37,10 @@ fn test_single_message_contribution_from_user_message() {
     let msg = make_message("session1", None, 0, 0, 0.0, 0, "2025-01-15");
 
     let contrib = SingleMessageContribution::from_message(&msg);
+    let stats = contrib.to_tui_stats();
 
     assert!(contrib.model.is_none());
-    assert_eq!(contrib.stats.input_tokens, 0);
+    assert_eq!(stats.input_tokens, 0);
 }
 
 #[test]

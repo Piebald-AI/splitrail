@@ -1,7 +1,7 @@
 //! Contribution caching for incremental updates.
 //!
 //! Provides memory-efficient caching strategies for different analyzer types:
-//! - [`SingleMessageContribution`]: ~40 bytes for 1-message-per-file analyzers (OpenCode)
+//! - [`SingleMessageContribution`]: 32 bytes for 1-message-per-file analyzers (OpenCode)
 //! - [`SingleSessionContribution`]: ~72 bytes for 1-session-per-file analyzers (most)
 //! - [`MultiSessionContribution`]: ~100+ bytes for all-in-one-file analyzers (Piebald)
 
@@ -18,7 +18,7 @@ use std::path::Path;
 use dashmap::DashMap;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::types::{AnalyzerStatsView, CompactDate, DailyStats, TuiStats};
+use crate::types::{AnalyzerStatsView, CompactDate, DailyStats};
 
 // ============================================================================
 // PathHash - Cache key type
@@ -56,7 +56,7 @@ impl SessionHash {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContributionStrategy {
     /// 1 file = 1 message (e.g., OpenCode)
-    /// Uses `SingleMessageContribution` (~40 bytes per file)
+    /// Uses `SingleMessageContribution` (32 bytes per file)
     SingleMessage,
 
     /// 1 file = 1 session = many messages (e.g., Claude Code, Cline, Copilot)
@@ -69,88 +69,13 @@ pub enum ContributionStrategy {
 }
 
 // ============================================================================
-// CompactMessageStats - Ultra-lightweight stats for single messages
-// ============================================================================
-
-/// Ultra-compact stats for single-message contributions.
-/// Uses u16 for cost (max $655.35 per message) and u8 for tool_calls.
-/// Total: 20 bytes (vs 24 bytes for TuiStats)
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct CompactMessageStats {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub reasoning_tokens: u32,
-    pub cached_tokens: u32,
-    /// Cost in cents (max $655.35 per message)
-    pub cost_cents: u16,
-    /// Tool calls per message (max 255)
-    pub tool_calls: u8,
-}
-
-impl CompactMessageStats {
-    /// Get cost as f64 dollars for display
-    #[inline]
-    pub fn cost(&self) -> f64 {
-        self.cost_cents as f64 / 100.0
-    }
-
-    /// Create from full Stats
-    #[inline]
-    pub fn from_stats(s: &crate::types::Stats) -> Self {
-        Self {
-            input_tokens: s.input_tokens as u32,
-            output_tokens: s.output_tokens as u32,
-            reasoning_tokens: s.reasoning_tokens as u32,
-            cached_tokens: s.cached_tokens as u32,
-            cost_cents: (s.cost * 100.0).round().min(u16::MAX as f64) as u16,
-            tool_calls: s.tool_calls.min(u8::MAX as u32) as u8,
-        }
-    }
-
-    /// Convert to TuiStats for view operations
-    #[inline]
-    pub fn to_tui_stats(self) -> TuiStats {
-        TuiStats {
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            reasoning_tokens: self.reasoning_tokens,
-            cached_tokens: self.cached_tokens,
-            cost_cents: self.cost_cents as u32,
-            tool_calls: self.tool_calls as u32,
-        }
-    }
-}
-
-impl std::ops::AddAssign for CompactMessageStats {
-    fn add_assign(&mut self, rhs: Self) {
-        self.input_tokens = self.input_tokens.saturating_add(rhs.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(rhs.output_tokens);
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(rhs.reasoning_tokens);
-        self.cached_tokens = self.cached_tokens.saturating_add(rhs.cached_tokens);
-        self.cost_cents = self.cost_cents.saturating_add(rhs.cost_cents);
-        self.tool_calls = self.tool_calls.saturating_add(rhs.tool_calls);
-    }
-}
-
-impl std::ops::SubAssign for CompactMessageStats {
-    fn sub_assign(&mut self, rhs: Self) {
-        self.input_tokens = self.input_tokens.saturating_sub(rhs.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_sub(rhs.output_tokens);
-        self.reasoning_tokens = self.reasoning_tokens.saturating_sub(rhs.reasoning_tokens);
-        self.cached_tokens = self.cached_tokens.saturating_sub(rhs.cached_tokens);
-        self.cost_cents = self.cost_cents.saturating_sub(rhs.cost_cents);
-        self.tool_calls = self.tool_calls.saturating_sub(rhs.tool_calls);
-    }
-}
-
-// ============================================================================
 // ContributionCache - Unified cache wrapper
 // ============================================================================
 
 /// Unified cache for file contributions with strategy-specific storage.
 /// Uses three separate DashMaps for type safety and memory efficiency.
 pub struct ContributionCache {
-    /// Cache for single-message-per-file analyzers (~40 bytes per entry)
+    /// Cache for single-message-per-file analyzers (32 bytes per entry)
     single_message: DashMap<PathHash, SingleMessageContribution>,
     /// Cache for single-session-per-file analyzers (~72 bytes per entry)
     single_session: DashMap<PathHash, SingleSessionContribution>,
@@ -263,26 +188,27 @@ impl AnalyzerStatsView {
     /// Add a single-message contribution to this view.
     pub fn add_single_message_contribution(&mut self, contrib: &SingleMessageContribution) {
         // Update daily stats
-        let date_str = contrib.date.to_string();
+        let date = contrib.date();
+        let date_str = date.to_string();
         let day_stats = self
             .daily_stats
             .entry(date_str)
             .or_insert_with(|| DailyStats {
-                date: contrib.date,
+                date,
                 ..Default::default()
             });
 
         // Single message contributes to AI message count and stats
         if contrib.model.is_some() {
             day_stats.ai_messages += 1;
-            day_stats.stats += contrib.stats.to_tui_stats();
+            day_stats.stats += contrib.to_tui_stats();
         }
 
         // Find session by hash and update
         if let Some(existing) = self.session_aggregates.iter_mut().find(|s| {
             SingleMessageContribution::hash_session_id(&s.session_id) == contrib.session_hash
         }) {
-            existing.stats += contrib.stats.to_tui_stats();
+            existing.stats += contrib.to_tui_stats();
             if let Some(model) = contrib.model {
                 existing.models.increment(model, 1);
             }
@@ -293,11 +219,11 @@ impl AnalyzerStatsView {
     /// Subtract a single-message contribution from this view.
     pub fn subtract_single_message_contribution(&mut self, contrib: &SingleMessageContribution) {
         // Update daily stats
-        let date_str = contrib.date.to_string();
+        let date_str = contrib.date().to_string();
         if let Some(day_stats) = self.daily_stats.get_mut(&date_str) {
             if contrib.model.is_some() {
                 day_stats.ai_messages = day_stats.ai_messages.saturating_sub(1);
-                day_stats.stats -= contrib.stats.to_tui_stats();
+                day_stats.stats -= contrib.to_tui_stats();
             }
 
             // Remove if empty
@@ -313,7 +239,7 @@ impl AnalyzerStatsView {
         if let Some(existing) = self.session_aggregates.iter_mut().find(|s| {
             SingleMessageContribution::hash_session_id(&s.session_id) == contrib.session_hash
         }) {
-            existing.stats -= contrib.stats.to_tui_stats();
+            existing.stats -= contrib.to_tui_stats();
             if let Some(model) = contrib.model {
                 existing.models.decrement(model, 1);
             }

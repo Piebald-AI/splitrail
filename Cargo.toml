@@ -40,6 +40,7 @@ simd-json = { version = "0.17.0", features = ["serde"] }
 tiktoken-rs = "0.9.1"
 parking_lot = "0.12"
 tinyvec = { version = "1.8", features = ["alloc"] }
+c2rust-bitfields = "0.18"
 bincode = "2.0.1"
 dirs = "6.0"
 chrono-tz = "0.10"

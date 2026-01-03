@@ -39,6 +39,30 @@ impl CompactDate {
         }
     }
 
+    /// Create a CompactDate from individual components.
+    #[inline]
+    pub fn from_parts(year: u16, month: u8, day: u8) -> Self {
+        Self { year, month, day }
+    }
+
+    /// Get the year component.
+    #[inline]
+    pub fn year(&self) -> u16 {
+        self.year
+    }
+
+    /// Get the month component (1-12).
+    #[inline]
+    pub fn month(&self) -> u8 {
+        self.month
+    }
+
+    /// Get the day component (1-31).
+    #[inline]
+    pub fn day(&self) -> u8 {
+        self.day
+    }
+
     /// Create a CompactDate from a "YYYY-MM-DD" string.
     #[inline]
     pub fn from_str(s: &str) -> Option<Self> {

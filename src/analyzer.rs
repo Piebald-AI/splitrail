@@ -9,7 +9,7 @@ use walkdir::WalkDir;
 
 use crate::contribution_cache::{
     ContributionCache, ContributionStrategy, MultiSessionContribution, PathHash,
-    RemovedContribution, SessionHash, SingleMessageContribution, SingleSessionContribution,
+    RemovedContribution, SingleMessageContribution, SingleSessionContribution,
 };
 use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, SharedAnalyzerView,
@@ -434,12 +434,7 @@ impl AnalyzerRegistry {
                                     let contribution = msgs
                                         .first()
                                         .map(SingleMessageContribution::from_message)
-                                        .unwrap_or_else(|| SingleMessageContribution {
-                                            stats: Default::default(),
-                                            date: Default::default(),
-                                            model: None,
-                                            session_hash: SessionHash::default(),
-                                        });
+                                        .unwrap_or_default();
                                     ((path_hash, contribution), msgs)
                                 })
                                 .unzip();
@@ -615,12 +610,7 @@ impl AnalyzerRegistry {
                 let new_contribution = new_messages
                     .first()
                     .map(SingleMessageContribution::from_message)
-                    .unwrap_or_else(|| SingleMessageContribution {
-                        stats: Default::default(),
-                        date: Default::default(),
-                        model: None,
-                        session_hash: SessionHash::default(),
-                    });
+                    .unwrap_or_default();
 
                 self.contribution_cache
                     .insert_single_message(path_hash, new_contribution);

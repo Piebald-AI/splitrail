@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 
 use super::super::{
-    CompactMessageStats, ContributionCache, MultiSessionContribution, PathHash, SessionHash,
-    SingleMessageContribution, SingleSessionContribution,
+    ContributionCache, MultiSessionContribution, PathHash, SessionHash, SingleMessageContribution,
+    SingleSessionContribution,
 };
-use crate::types::CompactDate;
+use super::make_message;
 
 // ============================================================================
 // ContributionCache Basic Operations Tests
@@ -18,26 +18,29 @@ fn test_contribution_cache_single_message_insert_get() {
     let path = PathBuf::from("/test/file1.json");
     let path_hash = PathHash::new(&path);
 
-    let session_hash = SessionHash::from_str("test_session");
-    let contrib = SingleMessageContribution {
-        stats: CompactMessageStats {
-            input_tokens: 100,
-            output_tokens: 50,
-            ..Default::default()
-        },
-        date: CompactDate::from_str("2025-01-15").unwrap(),
-        model: None,
-        session_hash,
-    };
+    let msg = make_message(
+        "test_session",
+        Some("claude-3-5-sonnet"),
+        100,
+        50,
+        0.05,
+        2,
+        "2025-01-15",
+    );
+    let contrib = SingleMessageContribution::from_message(&msg);
 
     cache.insert_single_message(path_hash, contrib);
     let retrieved = cache.get_single_message(&path_hash);
 
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
-    assert_eq!(retrieved.stats.input_tokens, 100);
-    assert_eq!(retrieved.stats.output_tokens, 50);
-    assert_eq!(retrieved.session_hash, session_hash);
+    let stats = retrieved.to_tui_stats();
+    assert_eq!(stats.input_tokens, 100);
+    assert_eq!(stats.output_tokens, 50);
+    assert_eq!(
+        retrieved.session_hash,
+        SessionHash::from_str("test_session")
+    );
 }
 
 #[test]
@@ -48,7 +51,7 @@ fn test_contribution_cache_single_session_insert_get() {
 
     let contrib = SingleSessionContribution {
         stats: Default::default(),
-        date: CompactDate::from_str("2025-01-15").unwrap(),
+        date: crate::types::CompactDate::from_str("2025-01-15").unwrap(),
         models: crate::types::ModelCounts::new(),
         session_hash: SessionHash::from_str("session1"),
         ai_message_count: 5,
@@ -94,15 +97,7 @@ fn test_contribution_cache_remove_any() {
     let hash2 = PathHash::new(&path2);
     let hash3 = PathHash::new(&path3);
 
-    cache.insert_single_message(
-        hash1,
-        SingleMessageContribution {
-            stats: Default::default(),
-            date: Default::default(),
-            model: None,
-            session_hash: SessionHash::from_str("s1"),
-        },
-    );
+    cache.insert_single_message(hash1, SingleMessageContribution::default());
     cache.insert_single_session(
         hash2,
         SingleSessionContribution {
@@ -154,15 +149,7 @@ fn test_contribution_cache_clear() {
     let path = PathBuf::from("/test/file.json");
     let hash = PathHash::new(&path);
 
-    cache.insert_single_message(
-        hash,
-        SingleMessageContribution {
-            stats: Default::default(),
-            date: Default::default(),
-            model: None,
-            session_hash: SessionHash::default(),
-        },
-    );
+    cache.insert_single_message(hash, SingleMessageContribution::default());
 
     assert!(cache.get_single_message(&hash).is_some());
 
