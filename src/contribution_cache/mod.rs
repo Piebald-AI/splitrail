@@ -443,3 +443,6 @@ impl AnalyzerStatsView {
             .saturating_sub(contrib.conversation_count);
     }
 }
+
+#[cfg(test)]
+mod tests;
