@@ -143,4 +143,4 @@ cargo run
 
 [MIT](https://github.com/Piebald-AI/splitrail/blob/main/LICENSE)
 
-Copyright © 2025 [Piebald LLC](https://piebald.ai).
+Copyright © 2026 [Piebald LLC](https://piebald.ai).
