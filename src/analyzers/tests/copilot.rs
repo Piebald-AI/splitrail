@@ -1,6 +1,7 @@
 use crate::analyzer::Analyzer;
 use crate::analyzers::copilot::*;
 use crate::types::MessageRole;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[test]
@@ -46,7 +47,7 @@ fn test_parse_sample_copilot_session() {
             }
 
             // Verify hash uniqueness
-            let mut hashes = std::collections::HashSet::new();
+            let mut hashes = HashSet::new();
             for msg in &messages {
                 assert!(
                     hashes.insert(msg.global_hash.clone()),

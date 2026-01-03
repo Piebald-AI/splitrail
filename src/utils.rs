@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Local, Utc};
 use num_format::{Locale, ToFormattedString};
+use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::types::{ConversationMessage, DailyStats};
+use crate::types::{CompactDate, ConversationMessage, DailyStats};
 
 static WARNED_MESSAGES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -16,9 +17,7 @@ pub fn warn_once(message: impl Into<String>) {
     let message = message.into();
     let cache = WARNED_MESSAGES.get_or_init(|| Mutex::new(HashSet::new()));
 
-    if let Ok(mut warned) = cache.lock()
-        && warned.insert(message.clone())
-    {
+    if cache.lock().insert(message.clone()) {
         eprintln!("{message}");
     }
 }
@@ -31,7 +30,9 @@ pub struct NumberFormatOptions {
     pub decimal_places: usize,
 }
 
-pub fn format_number(n: u64, options: &NumberFormatOptions) -> String {
+/// Format a number for display. Accepts both u32 and u64.
+pub fn format_number(n: impl Into<u64>, options: &NumberFormatOptions) -> String {
+    let n: u64 = n.into();
     let locale = match options.locale.as_str() {
         "de" => Locale::de,
         "fr" => Locale::fr,
@@ -102,6 +103,7 @@ pub fn format_date_for_display(date: &str) -> String {
     }
 }
 
+// TODO: Don't use strings here, wasteful.
 pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, DailyStats> {
     let mut daily_stats: BTreeMap<String, DailyStats> = BTreeMap::new();
     let mut conversation_start_dates: BTreeMap<String, String> = BTreeMap::new();
@@ -126,7 +128,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
         let daily_stats_entry = daily_stats
             .entry(date.clone())
             .or_insert_with(|| DailyStats {
-                date: date.clone(),
+                date: CompactDate::from_local(&entry.date),
                 ..Default::default()
             });
 
@@ -139,52 +141,32 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                     .entry(model.to_string())
                     .or_insert(0) += 1;
 
-                // Aggregate all stats
-                daily_stats_entry.stats.cost += entry.stats.cost;
-                daily_stats_entry.stats.input_tokens += entry.stats.input_tokens;
-                daily_stats_entry.stats.output_tokens += entry.stats.output_tokens;
-                daily_stats_entry.stats.reasoning_tokens += entry.stats.reasoning_tokens;
-                daily_stats_entry.stats.cache_creation_tokens += entry.stats.cache_creation_tokens;
-                daily_stats_entry.stats.cache_read_tokens += entry.stats.cache_read_tokens;
-                daily_stats_entry.stats.cached_tokens += entry.stats.cached_tokens;
-                daily_stats_entry.stats.tool_calls += entry.stats.tool_calls;
-                daily_stats_entry.stats.terminal_commands += entry.stats.terminal_commands;
-                daily_stats_entry.stats.file_searches += entry.stats.file_searches;
-                daily_stats_entry.stats.file_content_searches += entry.stats.file_content_searches;
-                daily_stats_entry.stats.files_read += entry.stats.files_read;
-                daily_stats_entry.stats.files_added += entry.stats.files_added;
-                daily_stats_entry.stats.files_edited += entry.stats.files_edited;
-                daily_stats_entry.stats.files_deleted += entry.stats.files_deleted;
-                daily_stats_entry.stats.lines_read += entry.stats.lines_read;
-                daily_stats_entry.stats.lines_added += entry.stats.lines_added;
-                daily_stats_entry.stats.lines_edited += entry.stats.lines_edited;
-                daily_stats_entry.stats.lines_deleted += entry.stats.lines_deleted;
-                daily_stats_entry.stats.bytes_read += entry.stats.bytes_read;
-                daily_stats_entry.stats.bytes_added += entry.stats.bytes_added;
-                daily_stats_entry.stats.bytes_edited += entry.stats.bytes_edited;
-                daily_stats_entry.stats.bytes_deleted += entry.stats.bytes_deleted;
-                daily_stats_entry.stats.todos_created += entry.stats.todos_created;
-                daily_stats_entry.stats.todos_completed += entry.stats.todos_completed;
-                daily_stats_entry.stats.todos_in_progress += entry.stats.todos_in_progress;
-                daily_stats_entry.stats.todo_writes += entry.stats.todo_writes;
-                daily_stats_entry.stats.todo_reads += entry.stats.todo_reads;
-                daily_stats_entry.stats.code_lines += entry.stats.code_lines;
-                daily_stats_entry.stats.docs_lines += entry.stats.docs_lines;
-                daily_stats_entry.stats.data_lines += entry.stats.data_lines;
-                daily_stats_entry.stats.media_lines += entry.stats.media_lines;
-                daily_stats_entry.stats.config_lines += entry.stats.config_lines;
-                daily_stats_entry.stats.other_lines += entry.stats.other_lines;
+                // Aggregate TUI-relevant stats only (TuiStats has 6 fields)
+                daily_stats_entry.stats.add_cost(entry.stats.cost);
+                daily_stats_entry.stats.input_tokens = daily_stats_entry
+                    .stats
+                    .input_tokens
+                    .saturating_add(entry.stats.input_tokens as u32);
+                daily_stats_entry.stats.output_tokens = daily_stats_entry
+                    .stats
+                    .output_tokens
+                    .saturating_add(entry.stats.output_tokens as u32);
+                daily_stats_entry.stats.reasoning_tokens = daily_stats_entry
+                    .stats
+                    .reasoning_tokens
+                    .saturating_add(entry.stats.reasoning_tokens as u32);
+                daily_stats_entry.stats.cached_tokens = daily_stats_entry
+                    .stats
+                    .cached_tokens
+                    .saturating_add(entry.stats.cached_tokens as u32);
+                daily_stats_entry.stats.tool_calls = daily_stats_entry
+                    .stats
+                    .tool_calls
+                    .saturating_add(entry.stats.tool_calls);
             }
             None => {
-                // User message
+                // User message - no TUI-relevant stats to aggregate
                 daily_stats_entry.user_messages += 1;
-
-                // Aggregate user stats too (mostly todo-related)
-                daily_stats_entry.stats.todos_created += entry.stats.todos_created;
-                daily_stats_entry.stats.todos_completed += entry.stats.todos_completed;
-                daily_stats_entry.stats.todos_in_progress += entry.stats.todos_in_progress;
-                daily_stats_entry.stats.todo_writes += entry.stats.todo_writes;
-                daily_stats_entry.stats.todo_reads += entry.stats.todo_reads;
             }
         };
     }
@@ -229,7 +211,7 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 filled_stats.insert(
                     date_str.clone(),
                     DailyStats {
-                        date: date_str,
+                        date: CompactDate::from_str(&date_str).unwrap_or_default(),
                         ..Default::default()
                     },
                 );
@@ -279,36 +261,30 @@ pub fn fast_hash(text: &str) -> String {
     format!("{:016x}", xxh3_64(text.as_bytes()))
 }
 
-/// Parallel deduplication by global_hash using DashMap.
-/// Used by copilot, cline, roo_code, kilo_code analyzers.
-pub fn deduplicate_by_global_hash_parallel(
-    messages: Vec<ConversationMessage>,
-) -> Vec<ConversationMessage> {
-    use dashmap::DashMap;
-    use rayon::iter::{IntoParallelIterator, ParallelIterator};
+/// Sequential deduplication by global_hash using HashSet.
+/// Used for post-init processing (incremental updates, uploads).
+pub fn deduplicate_by_global_hash(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    use std::collections::HashSet;
 
-    let seen: DashMap<String, ()> = DashMap::with_capacity(messages.len() / 2);
+    let mut seen: HashSet<String> = HashSet::with_capacity(messages.len() / 2);
     messages
-        .into_par_iter()
-        .filter(|msg| seen.insert(msg.global_hash.clone(), ()).is_none())
+        .into_iter()
+        .filter(|msg| seen.insert(msg.global_hash.clone()))
         .collect()
 }
 
-/// Parallel deduplication by local_hash using DashMap.
-/// Used by gemini_cli, qwen_code analyzers.
+/// Sequential deduplication by local_hash using HashSet.
 /// Messages without local_hash are always kept.
-pub fn deduplicate_by_local_hash_parallel(
-    messages: Vec<ConversationMessage>,
-) -> Vec<ConversationMessage> {
-    use dashmap::DashMap;
-    use rayon::iter::{IntoParallelIterator, ParallelIterator};
+/// Used for post-init processing (incremental updates, uploads).
+pub fn deduplicate_by_local_hash(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    use std::collections::HashSet;
 
-    let seen: DashMap<String, ()> = DashMap::with_capacity(messages.len() / 2);
+    let mut seen: HashSet<String> = HashSet::with_capacity(messages.len() / 2);
     messages
-        .into_par_iter()
+        .into_iter()
         .filter(|msg| {
             if let Some(local_hash) = &msg.local_hash {
-                seen.insert(local_hash.clone(), ()).is_none()
+                seen.insert(local_hash.clone())
             } else {
                 true // Always keep messages without local_hash
             }
@@ -316,7 +292,7 @@ pub fn deduplicate_by_local_hash_parallel(
         .collect()
 }
 
-/// Custom serde deserializer for RFC3339 timestamp strings to DateTime<Utc>
+/// Custom serde deserializer for RFC3339 timestamp strings to `DateTime<Utc>`
 pub fn deserialize_utc_timestamp<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
 where
     D: Deserializer<'de>,

@@ -1,20 +1,19 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::models::calculate_total_cost;
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{fast_hash, hash_text};
-use jwalk::WalkDir;
+use walkdir::WalkDir;
 
 // Type alias for parse_jsonl_file return type
 type ParseResult = (
@@ -31,7 +30,6 @@ impl ClaudeCodeAnalyzer {
         Self
     }
 
-    /// Returns the root directory for Claude Code project data.
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".claude").join("projects"))
     }
@@ -55,118 +53,134 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let mut sources = Vec::new();
-
-        if let Some(projects_dir) = Self::data_dir()
-            && projects_dir.is_dir()
-        {
-            // jwalk walks directories in parallel
-            for entry in WalkDir::new(&projects_dir)
-                .min_depth(2)
-                .max_depth(2)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            {
-                sources.push(DataSource { path: entry.path() });
-            }
-        }
+        let sources = Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .flat_map(|projects_dir| {
+                WalkDir::new(projects_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
+            .collect();
 
         Ok(sources)
     }
 
-    async fn parse_conversations(
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        let project_hash = extract_and_hash_project_id(&source.path);
+        let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
+        let file = File::open(&source.path)?;
+        let (messages, _, _, _) =
+            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
+        Ok(messages)
+    }
+
+    // Claude Code has complex cross-file deduplication, so we override get_stats_with_sources
+    fn get_stats_with_sources(
         &self,
         sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        use rayon::iter::{IntoParallelIterator, ParallelIterator};
-
-        // Type for concurrent deduplication entry: (insertion_order, message, seen_fingerprints)
+    ) -> Result<crate::types::AgenticCodingToolStats> {
+        // Type for deduplication entry: (insertion_order, message, seen_fingerprints)
         type TokenFingerprint = (u64, u64, u64, u64, u64);
         type DedupEntry = (usize, ConversationMessage, HashSet<TokenFingerprint>);
 
-        // Concurrent deduplication map and session tracking
-        let dedup_map: DashMap<String, DedupEntry> = DashMap::with_capacity(sources.len() * 50);
-        let insertion_counter = AtomicUsize::new(0);
-        let no_hash_counter = AtomicUsize::new(0);
+        // Deduplication map and session tracking
+        let mut dedup_map: HashMap<String, DedupEntry> = HashMap::with_capacity(sources.len() * 50);
+        let mut insertion_counter: usize = 0;
+        let mut no_hash_counter: usize = 0;
 
-        // Concurrent session name mappings
-        let session_names: DashMap<String, String> = DashMap::new();
-        let conversation_summaries: DashMap<String, String> = DashMap::new();
-        let conversation_fallbacks: DashMap<String, String> = DashMap::new();
-        let conversation_uuids: DashMap<String, Vec<String>> = DashMap::new();
+        // Session name mappings
+        let mut session_names: HashMap<String, String> = HashMap::new();
+        let mut conversation_summaries: HashMap<String, String> = HashMap::new();
+        let mut conversation_fallbacks: HashMap<String, String> = HashMap::new();
+        let mut conversation_uuids: HashMap<String, Vec<String>> = HashMap::new();
 
-        // Parse all files in parallel, deduplicating as we go
-        sources.into_par_iter().for_each(|source| {
+        // Parse all files sequentially, deduplicating as we go
+        for source in sources {
             let project_hash = extract_and_hash_project_id(&source.path);
             let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
 
-            if let Ok(file) = File::open(&source.path)
-                && let Ok((msgs, summaries, uuids, fallback)) =
-                    parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)
-            {
-                // Store summaries
-                for (uuid, name) in summaries {
-                    session_names.insert(uuid, name);
+            let file = match File::open(&source.path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to open Claude Code file {:?}: {}", source.path, e);
+                    continue;
                 }
+            };
 
-                // Store UUIDs for this conversation
-                conversation_uuids.insert(conversation_hash.clone(), uuids);
-
-                // Store fallback
-                if let Some(fb) = fallback {
-                    conversation_fallbacks.insert(conversation_hash.clone(), fb);
-                }
-
-                // Deduplicate messages as we insert
-                for msg in msgs {
-                    if let Some(local_hash) = &msg.local_hash {
-                        let order = insertion_counter.fetch_add(1, Ordering::Relaxed);
-                        let fp = (
-                            msg.stats.input_tokens,
-                            msg.stats.output_tokens,
-                            msg.stats.cache_creation_tokens,
-                            msg.stats.cache_read_tokens,
-                            msg.stats.cached_tokens,
-                        );
-
-                        dedup_map
-                            .entry(local_hash.clone())
-                            .and_modify(|(_, existing, seen_fps)| {
-                                merge_message_into(existing, &msg, seen_fps, fp);
-                            })
-                            .or_insert_with(|| {
-                                let mut fps = HashSet::new();
-                                fps.insert(fp);
-                                (order, msg, fps)
-                            });
-                    } else {
-                        // No local hash, always keep with unique key
-                        let order = insertion_counter.fetch_add(1, Ordering::Relaxed);
-                        let unique_key = format!(
-                            "__no_hash_{}",
-                            no_hash_counter.fetch_add(1, Ordering::Relaxed)
-                        );
-                        let fp = (
-                            msg.stats.input_tokens,
-                            msg.stats.output_tokens,
-                            msg.stats.cache_creation_tokens,
-                            msg.stats.cache_read_tokens,
-                            msg.stats.cached_tokens,
-                        );
-                        let mut fps = HashSet::new();
-                        fps.insert(fp);
-                        dedup_map.insert(unique_key, (order, msg, fps));
+            let (msgs, summaries, uuids, fallback) =
+                match parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        eprintln!("Failed to parse Claude Code file {:?}: {}", source.path, e);
+                        continue;
                     }
+                };
+
+            // Store summaries
+            for (uuid, name) in summaries {
+                session_names.insert(uuid, name);
+            }
+
+            // Store UUIDs for this conversation
+            conversation_uuids.insert(conversation_hash.clone(), uuids);
+
+            // Store fallback
+            if let Some(fb) = fallback {
+                conversation_fallbacks.insert(conversation_hash.clone(), fb);
+            }
+
+            // Deduplicate messages as we insert
+            for msg in msgs {
+                if let Some(local_hash) = &msg.local_hash {
+                    let order = insertion_counter;
+                    insertion_counter += 1;
+                    let fp = (
+                        msg.stats.input_tokens,
+                        msg.stats.output_tokens,
+                        msg.stats.cache_creation_tokens,
+                        msg.stats.cache_read_tokens,
+                        msg.stats.cached_tokens,
+                    );
+
+                    dedup_map
+                        .entry(local_hash.clone())
+                        .and_modify(|(_, existing, seen_fps)| {
+                            merge_message_into(existing, &msg, seen_fps, fp);
+                        })
+                        .or_insert_with(|| {
+                            let mut fps = HashSet::new();
+                            fps.insert(fp);
+                            (order, msg, fps)
+                        });
+                } else {
+                    // No local hash, always keep with unique key
+                    let order = insertion_counter;
+                    insertion_counter += 1;
+                    let unique_key = format!("__no_hash_{}", no_hash_counter);
+                    no_hash_counter += 1;
+                    let fp = (
+                        msg.stats.input_tokens,
+                        msg.stats.output_tokens,
+                        msg.stats.cache_creation_tokens,
+                        msg.stats.cache_read_tokens,
+                        msg.stats.cached_tokens,
+                    );
+                    let mut fps = HashSet::new();
+                    fps.insert(fp);
+                    dedup_map.insert(unique_key, (order, msg, fps));
                 }
             }
-        });
+        }
 
         // Link session names to conversations (after all parsing complete)
-        for entry in conversation_uuids.iter() {
-            let conversation_hash = entry.key();
-            let uuids = entry.value();
-
+        for (conversation_hash, uuids) in &conversation_uuids {
             let mut found_summary = false;
             for uuid in uuids {
                 if let Some(name) = session_names.get(uuid) {
@@ -198,23 +212,17 @@ impl Analyzer for ClaudeCodeAnalyzer {
         // Sort by insertion order for deterministic output
         result.sort_by_key(|(order, _)| *order);
 
-        Ok(result.into_iter().map(|(_, msg)| msg).collect())
-    }
+        let messages: Vec<ConversationMessage> = result.into_iter().map(|(_, msg)| msg).collect();
 
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
+        // Aggregate stats
         let mut daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        // Remove any remaining "unknown" entries from daily_stats
         daily_stats.retain(|date, _| date != "unknown");
-
         let num_conversations = daily_stats
             .values()
             .map(|stats| stats.conversations as u64)
             .sum();
 
-        Ok(AgenticCodingToolStats {
+        Ok(crate::types::AgenticCodingToolStats {
             daily_stats,
             num_conversations,
             messages,
@@ -222,16 +230,42 @@ impl Analyzer for ClaudeCodeAnalyzer {
         })
     }
 
-    fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
-    }
-
     fn get_watch_directories(&self) -> Vec<PathBuf> {
         Self::data_dir()
             .filter(|d| d.is_dir())
             .into_iter()
             .collect()
+    }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        // Must be a .jsonl file at depth 2 from projects dir
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "jsonl") {
+            return false;
+        }
+        if let Some(data_dir) = Self::data_dir()
+            && let Ok(relative) = path.strip_prefix(&data_dir)
+        {
+            return relative.components().count() == 2;
+        }
+        false
+    }
+
+    fn is_available(&self) -> bool {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .flat_map(|projects_dir| {
+                WalkDir::new(projects_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }
 
@@ -717,318 +751,5 @@ pub fn merge_message_into(
                 dst.stats.cache_read_tokens,
             );
         }
-    }
-}
-
-/// Deduplicate messages by local_hash, merging stats for duplicates.
-/// This is used for incremental cache loading where messages from multiple
-/// files need to be deduplicated after loading.
-pub fn deduplicate_messages(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
-    let estimated_unique = messages.len() / 2 + 1;
-    let mut seen_hashes = HashMap::<String, usize>::with_capacity(estimated_unique);
-    let mut seen_token_fingerprints: HashMap<String, HashSet<TokenFingerprint>> =
-        HashMap::with_capacity(estimated_unique);
-    let mut deduplicated_entries: Vec<ConversationMessage> = Vec::with_capacity(estimated_unique);
-
-    for message in messages {
-        if let Some(local_hash) = &message.local_hash {
-            let fp = (
-                message.stats.input_tokens,
-                message.stats.output_tokens,
-                message.stats.cache_creation_tokens,
-                message.stats.cache_read_tokens,
-                message.stats.cached_tokens,
-            );
-
-            if let Some(&existing_index) = seen_hashes.get(local_hash) {
-                let seen_fps = seen_token_fingerprints
-                    .entry(local_hash.clone())
-                    .or_default();
-                merge_message_into(
-                    &mut deduplicated_entries[existing_index],
-                    &message,
-                    seen_fps,
-                    fp,
-                );
-            } else {
-                seen_hashes.insert(local_hash.clone(), deduplicated_entries.len());
-                seen_token_fingerprints
-                    .entry(local_hash.clone())
-                    .or_default()
-                    .insert(fp);
-                deduplicated_entries.push(message);
-            }
-        } else {
-            deduplicated_entries.push(message);
-        }
-    }
-
-    deduplicated_entries
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{MessageRole, Stats};
-
-    #[test]
-    fn test_deduplicate_partial_split_messages() {
-        // Test the new format (Oct 18+ 2025): Split messages with DIFFERENT partial tokens
-        let hash = "test_partial_split".to_string();
-
-        let messages = vec![
-            ConversationMessage {
-                global_hash: "unique1".to_string(),
-                local_hash: Some(hash.clone()),
-                application: Application::ClaudeCode,
-                model: Some("claude-sonnet-4-5-20250929".to_string()),
-                date: chrono::Utc::now(),
-                project_hash: "proj1".to_string(),
-                conversation_hash: "conv1".to_string(),
-                role: MessageRole::Assistant,
-                stats: Stats {
-                    input_tokens: 10, // Different from others
-                    output_tokens: 2, // thinking block
-                    tool_calls: 0,
-                    ..Default::default()
-                },
-                uuid: None,
-                session_name: None,
-            },
-            ConversationMessage {
-                global_hash: "unique2".to_string(),
-                local_hash: Some(hash.clone()),
-                application: Application::ClaudeCode,
-                model: Some("claude-sonnet-4-5-20250929".to_string()),
-                date: chrono::Utc::now(),
-                project_hash: "proj1".to_string(),
-                conversation_hash: "conv1".to_string(),
-                role: MessageRole::Assistant,
-                stats: Stats {
-                    input_tokens: 5,  // Different from others
-                    output_tokens: 2, // text block
-                    tool_calls: 0,
-                    ..Default::default()
-                },
-                uuid: None,
-                session_name: None,
-            },
-            ConversationMessage {
-                global_hash: "unique3".to_string(),
-                local_hash: Some(hash.clone()),
-                application: Application::ClaudeCode,
-                model: Some("claude-sonnet-4-5-20250929".to_string()),
-                date: chrono::Utc::now(),
-                project_hash: "proj1".to_string(),
-                conversation_hash: "conv1".to_string(),
-                role: MessageRole::Assistant,
-                stats: Stats {
-                    input_tokens: 0,    // Different from others
-                    output_tokens: 447, // tool_use block
-                    tool_calls: 1,
-                    ..Default::default()
-                },
-                uuid: None,
-                session_name: None,
-            },
-        ];
-
-        let deduplicated = deduplicate_messages(messages);
-
-        // Should have exactly 1 message (all 3 merged)
-        assert_eq!(deduplicated.len(), 1);
-
-        // Output tokens should be summed: 2 + 2 + 447 = 451
-        assert_eq!(deduplicated[0].stats.output_tokens, 451);
-
-        // Input tokens should be summed: 10 + 5 + 0 = 15
-        assert_eq!(deduplicated[0].stats.input_tokens, 15);
-
-        // Tool calls should be summed too
-        assert_eq!(deduplicated[0].stats.tool_calls, 1);
-    }
-
-    #[test]
-    fn test_deduplicate_redundant_split_messages() {
-        // Test the old format (Oct 16-17 2025): Split messages with IDENTICAL redundant tokens
-        let hash = "test_redundant_split".to_string();
-
-        let messages = vec![
-            ConversationMessage {
-                global_hash: "unique1".to_string(),
-                local_hash: Some(hash.clone()),
-                application: Application::ClaudeCode,
-                model: Some("claude-sonnet-4-5-20250929".to_string()),
-                date: chrono::Utc::now(),
-                project_hash: "proj1".to_string(),
-                conversation_hash: "conv1".to_string(),
-                role: MessageRole::Assistant,
-                stats: Stats {
-                    output_tokens: 4, // All blocks report same total
-                    input_tokens: 100,
-                    tool_calls: 2,
-                    ..Default::default()
-                },
-                uuid: None,
-                session_name: None,
-            },
-            ConversationMessage {
-                global_hash: "unique2".to_string(),
-                local_hash: Some(hash.clone()),
-                application: Application::ClaudeCode,
-                model: Some("claude-sonnet-4-5-20250929".to_string()),
-                date: chrono::Utc::now(),
-                project_hash: "proj1".to_string(),
-                conversation_hash: "conv1".to_string(),
-                role: MessageRole::Assistant,
-                stats: Stats {
-                    output_tokens: 4,  // Identical
-                    input_tokens: 100, // Identical
-                    tool_calls: 2,     // Not checked for identity, but will be kept
-                    ..Default::default()
-                },
-                uuid: None,
-                session_name: None,
-            },
-        ];
-
-        let deduplicated = deduplicate_messages(messages);
-
-        // Should have exactly 1 message (duplicate skipped)
-        assert_eq!(deduplicated.len(), 1);
-
-        // Tokens should NOT be summed (identical entries)
-        assert_eq!(deduplicated[0].stats.output_tokens, 4);
-        assert_eq!(deduplicated[0].stats.input_tokens, 100);
-
-        // Tool calls are from the first entry only
-        assert_eq!(deduplicated[0].stats.tool_calls, 2);
-    }
-
-    #[test]
-    fn test_identical_tokens_merge_tool_stats() {
-        // First row has no tools; second row has tool_calls=1, tokens identical
-        let hash = "identical_merge_tools".to_string();
-
-        let msg1 = ConversationMessage {
-            global_hash: "g1".to_string(),
-            local_hash: Some(hash.clone()),
-            application: Application::ClaudeCode,
-            model: Some("claude-sonnet-4-5-20250929".to_string()),
-            date: chrono::Utc::now(),
-            project_hash: "proj".to_string(),
-            conversation_hash: "conv".to_string(),
-            role: MessageRole::Assistant,
-            stats: Stats {
-                input_tokens: 100,
-                output_tokens: 4,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
-                cached_tokens: 0,
-                tool_calls: 0,
-                ..Default::default()
-            },
-            uuid: None,
-            session_name: None,
-        };
-
-        let msg2 = ConversationMessage {
-            global_hash: "g2".to_string(),
-            local_hash: Some(hash.clone()),
-            application: Application::ClaudeCode,
-            model: Some("claude-sonnet-4-5-20250929".to_string()),
-            date: chrono::Utc::now(),
-            project_hash: "proj".to_string(),
-            conversation_hash: "conv".to_string(),
-            role: MessageRole::Assistant,
-            stats: Stats {
-                input_tokens: 100,
-                output_tokens: 4,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
-                cached_tokens: 0,
-                tool_calls: 1,
-                ..Default::default()
-            },
-            uuid: None,
-            session_name: None,
-        };
-
-        let dedup = deduplicate_messages(vec![msg1, msg2]);
-        assert_eq!(dedup.len(), 1);
-        // Tokens unchanged
-        assert_eq!(dedup[0].stats.input_tokens, 100);
-        assert_eq!(dedup[0].stats.output_tokens, 4);
-        // Tool calls merged from second row
-        assert_eq!(dedup[0].stats.tool_calls, 1);
-    }
-
-    #[test]
-    fn test_deduplicate_skips_identical_after_partial_aggregate() {
-        // Mix of partials and redundant duplicates for the same local_hash
-        let hash = "test_mixed_duplicates".to_string();
-
-        let a1 = ConversationMessage {
-            global_hash: "ga1".to_string(),
-            local_hash: Some(hash.clone()),
-            application: Application::ClaudeCode,
-            model: Some("claude-sonnet-4-5-20250929".to_string()),
-            date: chrono::Utc::now(),
-            project_hash: "proj".to_string(),
-            conversation_hash: "conv".to_string(),
-            role: MessageRole::Assistant,
-            stats: Stats {
-                input_tokens: 10,
-                output_tokens: 2,
-                ..Default::default()
-            },
-            uuid: None,
-            session_name: None,
-        };
-        // Exact duplicate of a1 (should be skipped)
-        let a2 = ConversationMessage {
-            global_hash: "ga2".to_string(),
-            ..a1.clone()
-        };
-
-        // Tool-use partial
-        let b1 = ConversationMessage {
-            global_hash: "gb1".to_string(),
-            local_hash: Some(hash.clone()),
-            application: Application::ClaudeCode,
-            model: Some("claude-sonnet-4-5-20250929".to_string()),
-            date: chrono::Utc::now(),
-            project_hash: "proj".to_string(),
-            conversation_hash: "conv".to_string(),
-            role: MessageRole::Assistant,
-            stats: Stats {
-                input_tokens: 0,
-                output_tokens: 447,
-                tool_calls: 1,
-                ..Default::default()
-            },
-            uuid: None,
-            session_name: None,
-        };
-        // Exact duplicate of b1 (should be skipped)
-        let b2 = ConversationMessage {
-            global_hash: "gb2".to_string(),
-            ..b1.clone()
-        };
-
-        // Another duplicate of a1 after aggregation (should still be skipped)
-        let a3 = ConversationMessage {
-            global_hash: "ga3".to_string(),
-            ..a1.clone()
-        };
-
-        let messages = vec![a1, a2, b1, b2, a3];
-        let deduplicated = deduplicate_messages(messages);
-
-        assert_eq!(deduplicated.len(), 1);
-        // Should include A once and B once
-        assert_eq!(deduplicated[0].stats.input_tokens, 10);
-        assert_eq!(deduplicated[0].stats.output_tokens, 2 + 447);
-        assert_eq!(deduplicated[0].stats.tool_calls, 1);
     }
 }

@@ -1,6 +1,7 @@
 use super::*;
 use crate::types::{ConversationMessage, MessageRole, Stats};
 use chrono::{TimeZone, Utc};
+use std::collections::HashSet;
 
 #[test]
 fn test_format_number_comma() {
@@ -11,9 +12,9 @@ fn test_format_number_comma() {
         decimal_places: 2,
     };
 
-    assert_eq!(format_number(1000, &options), "1,000");
-    assert_eq!(format_number(1000000, &options), "1,000,000");
-    assert_eq!(format_number(123, &options), "123");
+    assert_eq!(format_number(1000_u64, &options), "1,000");
+    assert_eq!(format_number(1000000_u64, &options), "1,000,000");
+    assert_eq!(format_number(123_u64, &options), "123");
 }
 
 #[test]
@@ -25,11 +26,11 @@ fn test_format_number_human() {
         decimal_places: 1,
     };
 
-    assert_eq!(format_number(100, &options), "100");
-    assert_eq!(format_number(1500, &options), "1.5k");
-    assert_eq!(format_number(1_500_000, &options), "1.5m");
-    assert_eq!(format_number(1_500_000_000, &options), "1.5b");
-    assert_eq!(format_number(1_500_000_000_000, &options), "1.5t");
+    assert_eq!(format_number(100_u64, &options), "100");
+    assert_eq!(format_number(1500_u64, &options), "1.5k");
+    assert_eq!(format_number(1_500_000_u64, &options), "1.5m");
+    assert_eq!(format_number(1_500_000_000_u64, &options), "1.5b");
+    assert_eq!(format_number(1_500_000_000_000_u64, &options), "1.5t");
 }
 
 #[test]
@@ -41,7 +42,7 @@ fn test_format_number_plain() {
         decimal_places: 2,
     };
 
-    assert_eq!(format_number(1000, &options), "1000");
+    assert_eq!(format_number(1000_u64, &options), "1000");
 }
 
 #[test]
@@ -138,7 +139,7 @@ fn test_aggregate_by_date_basic() {
     assert_eq!(stats.ai_messages, 1);
     assert_eq!(stats.conversations, 1);
     assert_eq!(stats.stats.input_tokens, 100);
-    assert_eq!(stats.stats.cost, 0.01);
+    assert_eq!(stats.stats.cost(), 0.01);
 }
 
 #[test]
@@ -420,7 +421,7 @@ fn test_filter_zero_cost_messages_negative_cost() {
 // =============================================================================
 
 #[test]
-fn test_deduplicate_by_global_hash_parallel() {
+fn test_deduplicate_by_global_hash() {
     let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
 
     let msg1 = ConversationMessage {
@@ -450,19 +451,18 @@ fn test_deduplicate_by_global_hash_parallel() {
     };
 
     let messages = vec![msg1, msg2, msg3];
-    let result = deduplicate_by_global_hash_parallel(messages);
+    let result = deduplicate_by_global_hash(messages);
 
     // Should have 2 unique entries (same_hash and different_hash)
     assert_eq!(result.len(), 2);
 
-    let hashes: std::collections::HashSet<_> =
-        result.iter().map(|m| m.global_hash.as_str()).collect();
+    let hashes: HashSet<_> = result.iter().map(|m| m.global_hash.as_str()).collect();
     assert!(hashes.contains("same_hash"));
     assert!(hashes.contains("different_hash"));
 }
 
 #[test]
-fn test_deduplicate_by_local_hash_parallel() {
+fn test_deduplicate_by_local_hash() {
     let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
 
     let msg1 = ConversationMessage {
@@ -492,7 +492,7 @@ fn test_deduplicate_by_local_hash_parallel() {
     };
 
     let messages = vec![msg1, msg2, msg3];
-    let result = deduplicate_by_local_hash_parallel(messages);
+    let result = deduplicate_by_local_hash(messages);
 
     // Should have 2 unique entries
     assert_eq!(result.len(), 2);
@@ -529,7 +529,7 @@ fn test_deduplicate_keeps_messages_without_local_hash() {
     };
 
     let messages = vec![msg_with_hash, msg_no_hash1, msg_no_hash2];
-    let result = deduplicate_by_local_hash_parallel(messages);
+    let result = deduplicate_by_local_hash(messages);
 
     // All 3 should be kept (1 with hash, 2 without hash)
     assert_eq!(result.len(), 3);

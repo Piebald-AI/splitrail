@@ -1,17 +1,16 @@
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output_cost};
-use crate::types::{
-    AgenticCodingToolStats, Application, ConversationMessage, FileCategory, MessageRole, Stats,
-};
+use crate::types::{Application, ConversationMessage, FileCategory, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jwalk::WalkDir;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 pub struct QwenCodeAnalyzer;
 
@@ -20,7 +19,6 @@ impl QwenCodeAnalyzer {
         Self
     }
 
-    /// Returns the root directory for Qwen Code data.
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".qwen").join("tmp"))
     }
@@ -304,81 +302,53 @@ impl Analyzer for QwenCodeAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let mut sources = Vec::new();
-
-        if let Some(tmp_dir) = Self::data_dir()
-            && tmp_dir.is_dir()
-        {
-            // Pattern: ~/.qwen/tmp/*/chats/*.json
-            // jwalk walks directories in parallel
-            for entry in WalkDir::new(&tmp_dir)
-                .min_depth(3) // */chats/*.json
-                .max_depth(3)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().is_some_and(|ext| ext == "json")
-                        && e.path()
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .is_some_and(|name| name == "chats")
-                })
-            {
-                sources.push(DataSource { path: entry.path() });
-            }
-        }
+        let sources = Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3).into_iter())
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "json")
+                    && e.path()
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|name| name == "chats")
+            })
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
+            .collect();
 
         Ok(sources)
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        // Parse all session files in parallel
-        let all_entries: Vec<ConversationMessage> = sources
-            .into_par_iter()
-            .filter_map(|source| match parse_json_session_file(&source.path) {
-                Ok(messages) => Some(messages),
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse Qwen Code session file {}: {e:#}",
-                        source.path.display(),
-                    );
-                    None
-                }
-            })
-            .flat_map(|messages| messages)
-            .collect();
-
-        // Parallel deduplicate by local hash
-        Ok(crate::utils::deduplicate_by_local_hash_parallel(
-            all_entries,
-        ))
-    }
-
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            analyzer_name: self.display_name().to_string(),
-            daily_stats,
-            messages,
-            num_conversations,
-        })
-    }
-
     fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3).into_iter())
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "json")
+                    && e.path()
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|name| name == "chats")
+            })
+    }
+
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        parse_json_session_file(&source.path)
+    }
+
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let all_messages: Vec<ConversationMessage> = sources
+            .par_iter()
+            .flat_map(|source| self.parse_source(source).unwrap_or_default())
+            .collect();
+        crate::utils::deduplicate_by_local_hash(all_messages)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
@@ -386,5 +356,19 @@ impl Analyzer for QwenCodeAnalyzer {
             .filter(|d| d.is_dir())
             .into_iter()
             .collect()
+    }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        // Must be a .json file in a "chats" directory
+        path.is_file()
+            && path.extension().is_some_and(|ext| ext == "json")
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|name| name == "chats")
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }

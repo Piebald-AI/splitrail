@@ -1,14 +1,16 @@
 //! Piebald analyzer - reads usage data from Piebald's SQLite database.
 //!
-//! https://piebald.ai
+//! <https://piebald.ai>
 
 use crate::analyzer::{Analyzer, DataSource};
+use crate::contribution_cache::ContributionStrategy;
 use crate::models::calculate_total_cost;
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -241,53 +243,37 @@ impl Analyzer for PiebaldAnalyzer {
         Ok(Vec::new())
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        let mut all_messages = Vec::new();
-
-        for source in sources {
-            match open_piebald_db(&source.path) {
-                Ok(conn) => {
-                    let chats = query_chats(&conn)?;
-                    let messages = query_messages(&conn)?;
-                    let converted = convert_messages(&chats, messages);
-                    all_messages.extend(converted);
-                }
-                Err(e) => {
-                    eprintln!("Failed to open Piebald database {:?}: {}", source.path, e);
-                }
-            }
-        }
-
-        // Deduplicate by local hash
-        Ok(crate::utils::deduplicate_by_local_hash_parallel(
-            all_messages,
-        ))
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        let conn = open_piebald_db(&source.path)?;
+        let chats = query_chats(&conn)?;
+        let messages = query_messages(&conn)?;
+        Ok(convert_messages(&chats, messages))
     }
 
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: self.display_name().to_string(),
-        })
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let all_messages: Vec<ConversationMessage> = sources
+            .par_iter()
+            .flat_map(|source| self.parse_source(source).unwrap_or_default())
+            .collect();
+        crate::utils::deduplicate_by_local_hash(all_messages)
     }
 
-    fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
+    fn get_watch_directories(&self) -> Vec<PathBuf> {
+        dirs::data_dir()
+            .map(|data_dir| data_dir.join("piebald"))
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .collect()
+    }
+
+    fn is_valid_data_path(&self, path: &std::path::Path) -> bool {
+        // Must be the app.db file
+        path.is_file() && path.file_name().is_some_and(|n| n == "app.db")
+    }
+
+    // Piebald uses SQLite database containing all sessions
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::MultiSession
     }
 }
 
@@ -308,12 +294,12 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_parse_conversations_empty_sources() {
+    #[test]
+    fn test_get_stats_empty_sources() {
         let analyzer = PiebaldAnalyzer::new();
-        let result = analyzer.parse_conversations(Vec::new()).await;
+        let result = analyzer.get_stats_with_sources(Vec::new());
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        assert!(result.unwrap().messages.is_empty());
     }
 
     #[test]

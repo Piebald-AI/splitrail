@@ -24,9 +24,9 @@ fn test_kilo_code_discover_data_sources_no_panic() {
 }
 
 #[tokio::test]
-async fn test_kilo_code_parse_empty_sources() {
+async fn test_kilo_code_get_stats_empty_sources() {
     let analyzer = KiloCodeAnalyzer::new();
-    let result = analyzer.parse_conversations(vec![]).await;
+    let result = analyzer.get_stats_with_sources(vec![]);
     assert!(result.is_ok());
-    assert!(result.unwrap().is_empty());
+    assert!(result.unwrap().messages.is_empty());
 }

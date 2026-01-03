@@ -1,15 +1,16 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::contribution_cache::ContributionStrategy;
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jwalk::WalkDir;
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use walkdir::WalkDir;
 
 pub struct PiAgentAnalyzer;
 
@@ -18,7 +19,6 @@ impl PiAgentAnalyzer {
         Self
     }
 
-    /// Returns the root directory for Pi Agent session data.
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".pi").join("agent").join("sessions"))
     }
@@ -413,93 +413,55 @@ impl Analyzer for PiAgentAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let mut sources = Vec::new();
-
-        if let Some(sessions_dir) = Self::data_dir()
-            && sessions_dir.is_dir()
-        {
-            // Pattern: ~/.pi/agent/sessions/*/*.jsonl
-            for entry in WalkDir::new(&sessions_dir)
-                .min_depth(2)
-                .max_depth(2)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            {
-                sources.push(DataSource { path: entry.path() });
-            }
-        }
+        let sources = Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .flat_map(|sessions_dir| {
+                WalkDir::new(sessions_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
+            .collect();
 
         Ok(sources)
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        let all_entries: Vec<ConversationMessage> = sources
-            .into_par_iter()
-            .filter_map(|source| {
-                let project_hash = extract_and_hash_project_id(&source.path);
-                let conversation_hash = hash_text(&source.path.to_string_lossy());
-
-                match File::open(&source.path) {
-                    Ok(file) => {
-                        match parse_jsonl_file(
-                            &source.path,
-                            file,
-                            &project_hash,
-                            &conversation_hash,
-                        ) {
-                            Ok((messages, _)) => Some(messages),
-                            Err(e) => {
-                                eprintln!(
-                                    "Failed to parse Pi Agent session {}: {e:#}",
-                                    source.path.display()
-                                );
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to open Pi Agent session {}: {e}",
-                            source.path.display()
-                        );
-                        None
-                    }
-                }
-            })
-            .flat_map(|messages| messages)
-            .collect();
-
-        // Deduplicate by local hash
-        Ok(crate::utils::deduplicate_by_local_hash_parallel(
-            all_entries,
-        ))
-    }
-
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            analyzer_name: self.display_name().to_string(),
-            daily_stats,
-            messages,
-            num_conversations,
-        })
-    }
-
     fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .flat_map(|sessions_dir| {
+                WalkDir::new(sessions_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+    }
+
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        let project_hash = extract_and_hash_project_id(&source.path);
+        let conversation_hash = hash_text(&source.path.to_string_lossy());
+
+        let file = File::open(&source.path)?;
+        let (messages, _) =
+            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
+        Ok(messages)
+    }
+
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let all_messages: Vec<ConversationMessage> = sources
+            .par_iter()
+            .flat_map(|source| self.parse_source(source).unwrap_or_default())
+            .collect();
+        crate::utils::deduplicate_by_local_hash(all_messages)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
@@ -507,5 +469,22 @@ impl Analyzer for PiAgentAnalyzer {
             .filter(|d| d.is_dir())
             .into_iter()
             .collect()
+    }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        // Must be a .jsonl file at depth 2 from sessions dir
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "jsonl") {
+            return false;
+        }
+        if let Some(data_dir) = Self::data_dir()
+            && let Ok(relative) = path.strip_prefix(&data_dir)
+        {
+            return relative.components().count() == 2;
+        }
+        false
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }

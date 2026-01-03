@@ -4,11 +4,12 @@ use crate::types::{
     Stats,
 };
 use chrono::Utc;
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -142,15 +143,14 @@ async fn upload_message_stats_success_updates_progress_and_config() {
     let progress_values_clone = progress_values.clone();
 
     upload_message_stats(&messages, &mut config, move |current, total| {
-        let mut guard = progress_values_clone.lock().unwrap();
-        guard.push((current, total));
+        progress_values_clone.lock().push((current, total));
     })
     .await
     .expect("upload should succeed");
 
     assert_eq!(request_counter.load(Ordering::SeqCst), 1);
 
-    let recorded = progress_values.lock().unwrap();
+    let recorded = progress_values.lock();
     assert!(!recorded.is_empty(), "progress callback should be called");
     let (final_current, final_total) = recorded[recorded.len() - 1];
     assert_eq!(final_total, messages.len());
@@ -308,7 +308,7 @@ async fn perform_background_upload_no_config_keeps_status_unchanged() {
 
     perform_background_upload(stats, Some(status_clone), None).await;
 
-    let final_status = status.lock().unwrap().clone();
+    let final_status = status.lock().clone();
     assert!(
         matches!(final_status, UploadStatus::MissingConfig),
         "status should remain unchanged when config is missing"
@@ -332,7 +332,7 @@ async fn perform_background_upload_unconfigured_config_keeps_status_unchanged() 
 
     perform_background_upload(stats, Some(status_clone), None).await;
 
-    let final_status = status.lock().unwrap().clone();
+    let final_status = status.lock().clone();
     assert!(
         matches!(final_status, UploadStatus::MissingApiToken),
         "status should remain unchanged when config is not fully configured"
@@ -376,7 +376,7 @@ async fn perform_background_upload_propagates_upload_errors_to_status() {
 
     assert_eq!(request_counter.load(Ordering::SeqCst), 1);
 
-    let final_status = status.lock().unwrap().clone();
+    let final_status = status.lock().clone();
     match final_status {
         UploadStatus::Failed(msg) => {
             assert!(
