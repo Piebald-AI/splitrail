@@ -5,13 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-01-15
+- Improved memory usage with incremental file-level updates and memory-efficient contribution caching (#99) - @Sewer56
+- Refactored CLAUDE.md to AGENTS.md with modular skill documentation (#94) - @Sewer56
+- Added support for GPT-5.2-Codex model (#101) - @mike1858
+
 ## [3.2.2] - 2025-12-27
-- TUI: Display cached tokens in session view instead of redundant tool column (#88) - @mike1858
-- TUI: Filter summary totals to selected day in session view (#87) - @mike1858
-- TUI: Add 'r' hotkey to toggle reverse sort order (#84) - @mike1858
+- TUI: Display cached tokens in session view instead of redundant tool column (#88) - @Sewer56
+- TUI: Filter summary totals to selected day in session view (#87) - @Sewer56
+- TUI: Add 'r' hotkey to toggle reverse sort order (#84) - @Sewer56
 - Fix hash collisions by using timestamp+id hash for deduplication (#90) - @mike1858
-- Fix file watcher to detect new sessions in nested directories (#86) - @mike1858
-- Fix OpenCode parsing crash when messages contain boolean summary field (#83) - @mike1858
+- Fix file watcher to detect new sessions in nested directories (#86) - @Sewer56
+- Fix OpenCode parsing crash when messages contain boolean summary field (#83) - @Sewer56
 
 ## [3.2.1] - 2025-12-13
 - Added update notifications: Splitrail now checks GitHub Releases on startup and displays a banner when a new version is available - @mike1858
