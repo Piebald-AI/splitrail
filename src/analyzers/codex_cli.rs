@@ -13,7 +13,7 @@ use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
 use crate::models::calculate_total_cost;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
-use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
+use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once, warn_once_yellow};
 
 const DEFAULT_FALLBACK_MODEL: &str = "gpt-5";
 
@@ -188,6 +188,15 @@ struct SessionModel {
 
 impl SessionModel {
     fn explicit(name: String) -> Self {
+        // Warn users who may have uploaded gpt-5.2-codex data before pricing was added
+        if name == "gpt-5.2-codex" {
+            warn_once_yellow(
+                "gpt-5.2-codex pricing was added recently. Any data uploaded to \
+                Splitrail Cloud with this model will show costs as $0. To fix: go to \
+                Settings on splitrail.dev, delete your Codex CLI data, then re-upload."
+                    .to_string(),
+            );
+        }
         Self { name }
     }
 

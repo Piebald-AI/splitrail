@@ -22,6 +22,17 @@ pub fn warn_once(message: impl Into<String>) {
     }
 }
 
+/// Like warn_once, but prints in yellow with a warning emoji
+pub fn warn_once_yellow(message: impl Into<String>) {
+    let message = message.into();
+    let cache = WARNED_MESSAGES.get_or_init(|| Mutex::new(HashSet::new()));
+
+    if cache.lock().insert(message.clone()) {
+        // ANSI escape codes: \x1b[33m = yellow, \x1b[0m = reset
+        eprintln!("\x1b[33m⚠️  {message}\x1b[0m");
+    }
+}
+
 #[derive(Clone)]
 pub struct NumberFormatOptions {
     pub use_comma: bool,

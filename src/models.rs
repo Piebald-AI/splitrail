@@ -315,6 +315,16 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::None,
         is_estimated: false,
     },
+    "gpt-5.2-codex" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.75,
+            output_per_1m: 14.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.175,
+        },
+        is_estimated: false,
+    },
     "gpt-5-pro" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 15.0,
@@ -700,6 +710,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5.1-codex-max" => "gpt-5.1-codex-max",
     "gpt-5.2" => "gpt-5.2",
     "gpt-5.2-pro" => "gpt-5.2-pro",
+    "gpt-5.2-codex" => "gpt-5.2-codex",
     "gpt-5-pro" => "gpt-5-pro",
 
     // Anthropic aliases
