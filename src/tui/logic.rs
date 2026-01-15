@@ -1,128 +1,21 @@
-use crate::types::{AgenticCodingToolStats, Stats};
-use chrono::{DateTime, Local, Utc};
+use crate::types::{CompactDate, ConversationMessage, ModelCounts, Stats, TuiStats, intern_model};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-#[derive(Debug, Clone)]
-pub struct SessionAggregate {
-    pub session_id: String,
-    pub first_timestamp: DateTime<Utc>,
-    #[allow(dead_code)] // Used in tests and preserved for external API
-    pub analyzer_name: String,
-    pub stats: Stats,
-    pub models: Vec<String>,
-    pub session_name: Option<String>,
-    pub day_key: String,
-}
+// Re-export SessionAggregate from types
+pub use crate::types::SessionAggregate;
 
-pub fn accumulate_stats(dst: &mut Stats, src: &Stats) {
-    // Token and cost stats
-    dst.input_tokens += src.input_tokens;
-    dst.output_tokens += src.output_tokens;
-    dst.reasoning_tokens += src.reasoning_tokens;
-    dst.cache_creation_tokens += src.cache_creation_tokens;
-    dst.cache_read_tokens += src.cache_read_tokens;
-    dst.cached_tokens += src.cached_tokens;
-    dst.cost += src.cost;
-    dst.tool_calls += src.tool_calls;
-
-    // File operation stats
-    dst.terminal_commands += src.terminal_commands;
-    dst.file_searches += src.file_searches;
-    dst.file_content_searches += src.file_content_searches;
-    dst.files_read += src.files_read;
-    dst.files_added += src.files_added;
-    dst.files_edited += src.files_edited;
-    dst.files_deleted += src.files_deleted;
-    dst.lines_read += src.lines_read;
-    dst.lines_added += src.lines_added;
-    dst.lines_edited += src.lines_edited;
-    dst.lines_deleted += src.lines_deleted;
-    dst.bytes_read += src.bytes_read;
-    dst.bytes_added += src.bytes_added;
-    dst.bytes_edited += src.bytes_edited;
-    dst.bytes_deleted += src.bytes_deleted;
-
-    // Todo stats
-    dst.todos_created += src.todos_created;
-    dst.todos_completed += src.todos_completed;
-    dst.todos_in_progress += src.todos_in_progress;
-    dst.todo_writes += src.todo_writes;
-    dst.todo_reads += src.todo_reads;
-
-    // Composition stats
-    dst.code_lines += src.code_lines;
-    dst.docs_lines += src.docs_lines;
-    dst.data_lines += src.data_lines;
-    dst.media_lines += src.media_lines;
-    dst.config_lines += src.config_lines;
-    dst.other_lines += src.other_lines;
-}
-
-pub fn aggregate_sessions_for_tool(stats: &AgenticCodingToolStats) -> Vec<SessionAggregate> {
-    let mut sessions: BTreeMap<String, SessionAggregate> = BTreeMap::new();
-
-    for msg in &stats.messages {
-        let session_key = msg.conversation_hash.clone();
-        let entry = sessions
-            .entry(session_key.clone())
-            .or_insert_with(|| SessionAggregate {
-                session_id: session_key.clone(),
-                first_timestamp: msg.date,
-                analyzer_name: stats.analyzer_name.clone(),
-                stats: Stats::default(),
-                models: Vec::new(),
-                session_name: None,
-                day_key: msg
-                    .date
-                    .with_timezone(&Local)
-                    .format("%Y-%m-%d")
-                    .to_string(),
-            });
-
-        if msg.date < entry.first_timestamp {
-            entry.first_timestamp = msg.date;
-            entry.day_key = msg
-                .date
-                .with_timezone(&Local)
-                .format("%Y-%m-%d")
-                .to_string();
-        }
-
-        // Only aggregate stats for assistant/model messages and track models
-        if let Some(model) = &msg.model {
-            if !entry.models.iter().any(|m| m == model) {
-                entry.models.push(model.clone());
-            }
-            accumulate_stats(&mut entry.stats, &msg.stats);
-        }
-
-        // Capture session name if available (last one wins, or first one, doesn't matter much as they should be consistent per file/session)
-        if let Some(name) = &msg.session_name {
-            entry.session_name = Some(name.clone());
-        }
-    }
-
-    let mut result: Vec<SessionAggregate> = sessions.into_values().collect();
-
-    // Sort oldest sessions first so newest appear at the bottom (like per-day view)
-    result.sort_by_key(|s| s.first_timestamp);
-
-    result
-}
-
-pub fn aggregate_sessions_for_all_tools(
-    filtered_stats: &[&AgenticCodingToolStats],
-) -> Vec<Vec<SessionAggregate>> {
-    filtered_stats
-        .iter()
-        .map(|stats| aggregate_sessions_for_tool(stats))
-        .collect()
-}
-
-pub fn aggregate_sessions_for_all_tools_owned(
-    stats: &[AgenticCodingToolStats],
-) -> Vec<Vec<SessionAggregate>> {
-    stats.iter().map(aggregate_sessions_for_tool).collect()
+/// Accumulate TUI-relevant stats from a full Stats into a TuiStats.
+/// Only copies the 6 fields displayed in the TUI.
+pub fn accumulate_tui_stats(dst: &mut TuiStats, src: &Stats) {
+    dst.input_tokens = dst.input_tokens.saturating_add(src.input_tokens as u32);
+    dst.output_tokens = dst.output_tokens.saturating_add(src.output_tokens as u32);
+    dst.reasoning_tokens = dst
+        .reasoning_tokens
+        .saturating_add(src.reasoning_tokens as u32);
+    dst.cached_tokens = dst.cached_tokens.saturating_add(src.cached_tokens as u32);
+    dst.add_cost(src.cost);
+    dst.tool_calls = dst.tool_calls.saturating_add(src.tool_calls);
 }
 
 /// Check if a date string (YYYY-MM-DD format) matches the user's search buffer
@@ -212,13 +105,105 @@ pub fn date_matches_buffer(day: &str, buffer: &str) -> bool {
     false
 }
 
-pub fn has_data(stats: &AgenticCodingToolStats) -> bool {
+/// Check if an AnalyzerStatsView has any data to display.
+pub fn has_data_view(stats: &crate::types::AnalyzerStatsView) -> bool {
     stats.num_conversations > 0
         || stats.daily_stats.values().any(|day| {
-            day.stats.cost > 0.0
+            day.stats.cost_cents > 0
                 || day.stats.input_tokens > 0
                 || day.stats.output_tokens > 0
                 || day.stats.reasoning_tokens > 0
                 || day.stats.tool_calls > 0
         })
+}
+
+/// Check if a SharedAnalyzerView has any data to display.
+/// Acquires a read lock to check the data.
+pub fn has_data_shared(stats: &crate::types::SharedAnalyzerView) -> bool {
+    has_data_view(&stats.read())
+}
+
+/// Aggregate sessions from a slice of messages with a specified analyzer name.
+/// Used when converting AgenticCodingToolStats to AnalyzerStatsView.
+///
+/// Takes `Arc<str>` for analyzer_name to avoid allocating a new String per session.
+/// The Arc is cloned (cheap pointer copy) into each SessionAggregate.
+pub fn aggregate_sessions_from_messages(
+    messages: &[ConversationMessage],
+    analyzer_name: Arc<str>,
+) -> Vec<SessionAggregate> {
+    let mut sessions: BTreeMap<String, SessionAggregate> = BTreeMap::new();
+
+    for msg in messages {
+        // Use or_insert_with_key to avoid redundant cloning:
+        // - Pass owned key to entry() (1 clone of conversation_hash)
+        // - Clone key only when inserting a new session (via closure's &key)
+        let entry = sessions
+            .entry(msg.conversation_hash.clone())
+            .or_insert_with_key(|key| SessionAggregate {
+                session_id: key.clone(),
+                first_timestamp: msg.date,
+                analyzer_name: Arc::clone(&analyzer_name),
+                stats: TuiStats::default(),
+                models: ModelCounts::new(),
+                session_name: None,
+                date: CompactDate::from_local(&msg.date),
+            });
+
+        if msg.date < entry.first_timestamp {
+            entry.first_timestamp = msg.date;
+            entry.date = CompactDate::from_local(&msg.date);
+        }
+
+        // Only aggregate stats for assistant/model messages and track models
+        if let Some(model) = &msg.model {
+            entry.models.increment(intern_model(model), 1);
+            accumulate_tui_stats(&mut entry.stats, &msg.stats);
+        }
+
+        // Capture session name if available
+        if let Some(name) = &msg.session_name {
+            entry.session_name = Some(name.clone());
+        }
+    }
+
+    let mut result: Vec<SessionAggregate> = sessions.into_values().collect();
+
+    // Sort oldest sessions first so newest appear at the bottom
+    result.sort_by_key(|s| s.first_timestamp);
+
+    // Shrink to fit to release excess capacity
+    result.shrink_to_fit();
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::AnalyzerStatsView;
+
+    #[test]
+    fn has_data_view_returns_true_for_non_empty() {
+        let view = AnalyzerStatsView {
+            daily_stats: BTreeMap::new(),
+            session_aggregates: vec![],
+            num_conversations: 1,
+            analyzer_name: Arc::from("Test"),
+        };
+
+        assert!(has_data_view(&view));
+    }
+
+    #[test]
+    fn has_data_view_returns_false_for_empty() {
+        let view = AnalyzerStatsView {
+            daily_stats: BTreeMap::new(),
+            session_aggregates: vec![],
+            num_conversations: 0,
+            analyzer_name: Arc::from("Test"),
+        };
+
+        assert!(!has_data_view(&view));
+    }
 }

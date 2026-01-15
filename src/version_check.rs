@@ -1,6 +1,7 @@
 use anyhow::Result;
+use parking_lot::Mutex;
 use serde::Deserialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::reqwest_simd_json::ResponseSimdJsonExt;
@@ -98,9 +99,7 @@ pub fn spawn_version_check() -> Arc<Mutex<UpdateStatus>> {
 
     tokio::spawn(async move {
         let result = check_for_updates().await;
-        if let Ok(mut s) = status_clone.lock() {
-            *s = result;
-        }
+        *status_clone.lock() = result;
     });
 
     status

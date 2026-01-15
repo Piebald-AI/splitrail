@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::types::{DailyStats, Stats};
+use crate::types::DailyStats;
 
 // ============================================================================
 // Request Types
@@ -101,22 +101,35 @@ pub struct DailyStatsResponse {
     pub results: Vec<DailySummary>,
 }
 
-impl From<(&str, &DailyStats)> for DailySummary {
-    fn from((date, ds): (&str, &DailyStats)) -> Self {
+/// File operation stats computed on-demand from raw messages.
+/// Used to supplement DailyStats (which only contains TUI-relevant fields).
+#[derive(Debug, Clone, Default)]
+pub struct DateFileOps {
+    pub files_read: u64,
+    pub files_edited: u64,
+    pub files_added: u64,
+    pub terminal_commands: u64,
+}
+
+impl DailySummary {
+    /// Create a DailySummary from DailyStats and file operation stats.
+    /// File ops are computed separately from raw messages since DailyStats
+    /// only contains TUI-relevant fields.
+    pub fn new(date: &str, ds: &DailyStats, file_ops: &DateFileOps) -> Self {
         Self {
             date: date.to_string(),
             user_messages: ds.user_messages,
             ai_messages: ds.ai_messages,
             conversations: ds.conversations,
-            total_cost: ds.stats.cost,
-            input_tokens: ds.stats.input_tokens,
-            output_tokens: ds.stats.output_tokens,
-            cache_read_tokens: ds.stats.cache_read_tokens,
+            total_cost: ds.stats.cost(),
+            input_tokens: ds.stats.input_tokens as u64,
+            output_tokens: ds.stats.output_tokens as u64,
+            cache_read_tokens: ds.stats.cached_tokens as u64,
             tool_calls: ds.stats.tool_calls,
-            files_read: ds.stats.files_read,
-            files_edited: ds.stats.files_edited,
-            files_added: ds.stats.files_added,
-            terminal_commands: ds.stats.terminal_commands,
+            files_read: file_ops.files_read,
+            files_edited: file_ops.files_edited,
+            files_added: file_ops.files_added,
+            terminal_commands: file_ops.terminal_commands,
             models: ds.models.clone(),
         }
     }
@@ -147,7 +160,7 @@ pub struct CostBreakdownResponse {
     pub average_daily_cost: f64,
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct FileOpsResponse {
     pub files_read: u64,
     pub files_edited: u64,
@@ -164,28 +177,6 @@ pub struct FileOpsResponse {
     pub terminal_commands: u64,
     pub file_searches: u64,
     pub file_content_searches: u64,
-}
-
-impl From<&Stats> for FileOpsResponse {
-    fn from(s: &Stats) -> Self {
-        Self {
-            files_read: s.files_read,
-            files_edited: s.files_edited,
-            files_added: s.files_added,
-            files_deleted: s.files_deleted,
-            lines_read: s.lines_read,
-            lines_edited: s.lines_edited,
-            lines_added: s.lines_added,
-            lines_deleted: s.lines_deleted,
-            bytes_read: s.bytes_read,
-            bytes_edited: s.bytes_edited,
-            bytes_added: s.bytes_added,
-            bytes_deleted: s.bytes_deleted,
-            terminal_commands: s.terminal_commands,
-            file_searches: s.file_searches,
-            file_content_searches: s.file_content_searches,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

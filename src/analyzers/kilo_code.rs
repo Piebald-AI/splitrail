@@ -1,12 +1,13 @@
 use crate::analyzer::{
     Analyzer, DataSource, discover_vscode_extension_sources, get_vscode_extension_tasks_dirs,
+    vscode_extension_has_sources,
 };
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::contribution_cache::ContributionStrategy;
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::path::{Path, PathBuf};
@@ -299,61 +300,24 @@ impl Analyzer for KiloCodeAnalyzer {
         discover_vscode_extension_sources(KILO_CODE_EXTENSION_ID, "ui_messages.json", true)
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        // Parse all task directories in parallel
-        let all_entries: Vec<ConversationMessage> = sources
-            .into_par_iter()
-            .flat_map(
-                |source| match parse_kilo_code_task_directory(&source.path) {
-                    Ok(messages) => messages,
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to parse Kilo Code task directory {:?}: {}",
-                            source.path, e
-                        );
-                        Vec::new()
-                    }
-                },
-            )
-            .collect();
-
-        // Parallel deduplicate by global hash
-        Ok(crate::utils::deduplicate_by_global_hash_parallel(
-            all_entries,
-        ))
-    }
-
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        // Remove any "unknown" entries
-        daily_stats.retain(|date, _| date != "unknown");
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: self.display_name().to_string(),
-        })
-    }
-
     fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
+        vscode_extension_has_sources(KILO_CODE_EXTENSION_ID, "ui_messages.json")
+    }
+
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        parse_kilo_code_task_directory(&source.path)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
         get_vscode_extension_tasks_dirs(KILO_CODE_EXTENSION_ID)
+    }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        path.is_file() && path.file_name().is_some_and(|n| n == "ui_messages.json")
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }
 

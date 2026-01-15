@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use analyzer::AnalyzerRegistry;
 use analyzers::{
@@ -11,7 +12,9 @@ use analyzers::{
 
 mod analyzer;
 mod analyzers;
+mod cache;
 mod config;
+mod contribution_cache;
 mod mcp;
 mod models;
 mod reqwest_simd_json;
@@ -21,6 +24,10 @@ mod upload;
 mod utils;
 mod version_check;
 mod watcher;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
 #[command(name = "splitrail")]
@@ -205,17 +212,26 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         }
     };
 
-    // Create real-time stats manager
-    let mut stats_manager = match watcher::RealtimeStatsManager::new(registry).await {
-        Ok(manager) => manager,
-        Err(e) => {
-            eprintln!("Error loading analyzer stats: {e}");
-            std::process::exit(1);
+    // Create real-time stats manager using temporary rayon threadpool for parallel loading
+    let mut stats_manager = {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to create rayon threadpool");
+
+        let result = pool.install(|| watcher::RealtimeStatsManager::new(registry));
+
+        // Pool is dropped here, releasing threads
+        match result {
+            Ok(manager) => manager,
+            Err(e) => {
+                eprintln!("Error loading analyzer stats: {e}");
+                std::process::exit(1);
+            }
         }
     };
 
-    // Get the initial stats to check if we have data
-    let initial_stats = stats_manager.get_stats_receiver().borrow().clone();
+    // Release memory from parallel parsing back to OS
+    release_unused_memory();
 
     // Create upload status for TUI
     let upload_status = Arc::new(Mutex::new(tui::UploadStatus::None));
@@ -230,28 +246,33 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     let config = config::Config::load().unwrap_or(None).unwrap_or_default();
     if config.upload.auto_upload {
         if config.is_configured() {
+            // For initial auto-upload, load full stats separately (sync, no threadpool for background task)
+            let registry_for_upload = create_analyzer_registry();
             let upload_status_clone = upload_status.clone();
             tokio::spawn(async move {
-                upload::perform_background_upload(
-                    initial_stats,
-                    Some(upload_status_clone),
-                    Some(500),
-                )
-                .await;
+                if let Ok(full_stats) = registry_for_upload.load_all_stats_parallel_scoped() {
+                    // Scoped threadpool already released, also release allocator memory
+                    release_unused_memory();
+                    upload::perform_background_upload(
+                        full_stats,
+                        Some(upload_status_clone),
+                        Some(500),
+                    )
+                    .await;
+                }
             });
         } else {
             // Auto-upload is enabled but configuration is incomplete
-            if let Ok(mut status) = upload_status.lock() {
-                if config.is_api_token_missing() && config.is_server_url_missing() {
-                    *status = tui::UploadStatus::MissingConfig;
-                } else if config.is_api_token_missing() {
-                    *status = tui::UploadStatus::MissingApiToken;
-                } else if config.is_server_url_missing() {
-                    *status = tui::UploadStatus::MissingServerUrl;
-                } else {
-                    // Shouldn't happen since is_configured() returned false
-                    *status = tui::UploadStatus::MissingConfig;
-                }
+            let mut status = upload_status.lock();
+            if config.is_api_token_missing() && config.is_server_url_missing() {
+                *status = tui::UploadStatus::MissingConfig;
+            } else if config.is_api_token_missing() {
+                *status = tui::UploadStatus::MissingApiToken;
+            } else if config.is_server_url_missing() {
+                *status = tui::UploadStatus::MissingServerUrl;
+            } else {
+                // Shouldn't happen since is_configured() returned false
+                *status = tui::UploadStatus::MissingConfig;
             }
         }
     }
@@ -271,7 +292,18 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
 
 async fn run_upload(args: UploadArgs) -> Result<()> {
     let registry = create_analyzer_registry();
-    let stats = registry.load_all_stats().await?;
+
+    // Load stats using temporary rayon threadpool for parallel parsing
+    let stats = {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to create rayon threadpool");
+        pool.install(|| registry.load_all_stats_parallel())?
+        // Pool is dropped here, releasing threads
+    };
+
+    // Release memory from parallel parsing back to OS
+    release_unused_memory();
 
     // Load config file to get formatting options and upload date
     let config_file = config::Config::load().unwrap_or(None).unwrap_or_default();
@@ -358,7 +390,18 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
 
 async fn run_stats(args: StatsArgs) -> Result<()> {
     let registry = create_analyzer_registry();
-    let mut stats = registry.load_all_stats().await?;
+
+    // Load stats using temporary rayon threadpool for parallel parsing
+    let mut stats = {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to create rayon threadpool");
+        pool.install(|| registry.load_all_stats_parallel())?
+        // Pool is dropped here, releasing threads
+    };
+
+    // Release memory from parallel parsing back to OS
+    release_unused_memory();
 
     if !args.include_messages {
         for analyzer_stats in &mut stats.analyzer_stats {
@@ -399,3 +442,19 @@ async fn handle_config_subcommand(config_args: ConfigArgs) {
         }
     }
 }
+
+/// Release unused memory back to the OS after heavy allocations.
+/// Call this after heavy allocations (e.g., parsing) to reclaim memory.
+#[cfg(feature = "mimalloc")]
+pub fn release_unused_memory() {
+    // SAFETY: mi_collect is a safe FFI call that triggers garbage collection
+    // and returns unused memory to the OS. The `force` parameter (true) ensures
+    // aggressive collection.
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
+}
+
+/// No-op when mimalloc is disabled.
+#[cfg(not(feature = "mimalloc"))]
+pub fn release_unused_memory() {}

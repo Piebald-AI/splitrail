@@ -4,8 +4,9 @@ use crate::tui::UploadStatus;
 use crate::types::{ConversationMessage, ErrorResponse, MultiAnalyzerStats, UploadResponse};
 use crate::utils;
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 fn upload_log_path() -> PathBuf {
@@ -230,20 +231,71 @@ where
     Ok(())
 }
 
-pub async fn perform_background_upload(
-    stats: MultiAnalyzerStats,
+/// Helper to set upload status atomically.
+fn set_upload_status(status: &Option<Arc<Mutex<UploadStatus>>>, value: UploadStatus) {
+    if let Some(status) = status {
+        *status.lock() = value;
+    }
+}
+
+/// Creates an upload progress callback that updates the TUI status.
+fn make_progress_callback(
     upload_status: Option<Arc<Mutex<UploadStatus>>>,
-    initial_delay_ms: Option<u64>,
-) {
-    // Helper to set status
-    fn set_status(status: &Option<Arc<Mutex<UploadStatus>>>, value: UploadStatus) {
-        if let Some(status) = status
-            && let Ok(mut s) = status.lock()
-        {
-            *s = value;
+) -> impl FnMut(usize, usize) {
+    move |current, total| {
+        if let Some(ref status) = upload_status {
+            let mut s = status.lock();
+            match &*s {
+                UploadStatus::Uploading { dots, .. } => {
+                    *s = UploadStatus::Uploading {
+                        current,
+                        total,
+                        dots: *dots,
+                    };
+                }
+                _ => {
+                    *s = UploadStatus::Uploading {
+                        current,
+                        total,
+                        dots: 0,
+                    };
+                }
+            }
         }
     }
+}
 
+/// Handles the result of an upload operation, updating status accordingly.
+async fn handle_upload_result(
+    result: Option<anyhow::Result<()>>,
+    upload_status: &Option<Arc<Mutex<UploadStatus>>>,
+) {
+    match result {
+        Some(Ok(_)) => {
+            set_upload_status(upload_status, UploadStatus::Uploaded);
+            // Hide success message after 3 seconds
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            set_upload_status(upload_status, UploadStatus::None);
+        }
+        Some(Err(e)) => {
+            // Keep error messages visible permanently
+            set_upload_status(upload_status, UploadStatus::Failed(format!("{e:#}")));
+        }
+        None => (), // Config not available or nothing to upload
+    }
+}
+
+/// Upload pre-filtered messages directly (used for incremental uploads from watcher).
+/// This is more efficient than loading all stats and filtering afterwards.
+/// If `on_success` is provided, it will be called after a successful upload.
+pub async fn perform_background_upload_messages<F>(
+    messages: Vec<ConversationMessage>,
+    upload_status: Option<Arc<Mutex<UploadStatus>>>,
+    initial_delay_ms: Option<u64>,
+    on_success: Option<F>,
+) where
+    F: FnOnce(),
+{
     // Optional initial delay
     if let Some(delay) = initial_delay_ms {
         tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -255,60 +307,65 @@ pub async fn perform_background_upload(
             return None;
         }
 
-        let mut messages = vec![];
-        for analyzer_stats in stats.analyzer_stats {
-            messages.extend(analyzer_stats.messages);
-        }
-
-        let messages = utils::get_messages_later_than(config.upload.last_date_uploaded, messages)
-            .await
-            .ok()?;
-
         if messages.is_empty() {
-            return Some(Ok(())); // Nothing new to upload
+            return Some(Ok(())); // Nothing to upload
         }
 
-        Some(
-            upload_message_stats(&messages, &mut config, |current, total| {
-                // Update upload progress
-                if let Some(ref status) = upload_status
-                    && let Ok(mut s) = status.lock()
-                {
-                    match &*s {
-                        UploadStatus::Uploading { dots, .. } => {
-                            *s = UploadStatus::Uploading {
-                                current,
-                                total,
-                                dots: *dots,
-                            };
-                        }
-                        _ => {
-                            *s = UploadStatus::Uploading {
-                                current,
-                                total,
-                                dots: 0,
-                            };
-                        }
-                    }
-                }
-            })
-            .await,
+        let result = upload_message_stats(
+            &messages,
+            &mut config,
+            make_progress_callback(upload_status.clone()),
         )
+        .await;
+
+        // Call on_success callback if upload succeeded
+        if result.is_ok()
+            && let Some(callback) = on_success
+        {
+            callback();
+        }
+
+        Some(result)
     }
     .await;
 
-    match upload_result {
-        Some(Ok(_)) => {
-            set_status(&upload_status, UploadStatus::Uploaded);
-            // Hide success message after 3 seconds
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            set_status(&upload_status, UploadStatus::None);
+    handle_upload_result(upload_result, &upload_status).await;
+}
+
+/// Upload stats from all analyzers (used for initial startup upload).
+/// Filters messages by last upload timestamp before uploading.
+pub async fn perform_background_upload(
+    stats: MultiAnalyzerStats,
+    upload_status: Option<Arc<Mutex<UploadStatus>>>,
+    initial_delay_ms: Option<u64>,
+) {
+    // Optional initial delay
+    if let Some(delay) = initial_delay_ms {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
+
+    // Load config and filter messages
+    let messages = async {
+        let config = Config::load().ok().flatten()?;
+        if !config.is_configured() {
+            return None;
         }
-        Some(Err(e)) => {
-            // Keep error messages visible permanently
-            set_status(&upload_status, UploadStatus::Failed(format!("{e:#}")));
-        }
-        None => (), // Config not available or nothing to upload
+
+        let all_messages: Vec<_> = stats
+            .analyzer_stats
+            .into_iter()
+            .flat_map(|s| s.messages)
+            .collect();
+
+        utils::get_messages_later_than(config.upload.last_date_uploaded, all_messages)
+            .await
+            .ok()
+    }
+    .await;
+
+    if let Some(msgs) = messages {
+        // Delegate to the messages-based upload (no additional delay, no callback)
+        perform_background_upload_messages::<fn()>(msgs, upload_status, None, None).await;
     }
 }
 

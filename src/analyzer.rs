@@ -1,10 +1,19 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use jwalk::WalkDir;
-use std::path::PathBuf;
+use rayon::prelude::*;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use walkdir::WalkDir;
 
-use crate::types::{AgenticCodingToolStats, ConversationMessage};
+use crate::contribution_cache::{
+    ContributionCache, ContributionStrategy, MultiSessionContribution, PathHash,
+    RemovedContribution, SingleMessageContribution, SingleSessionContribution,
+};
+use crate::types::{
+    AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, SharedAnalyzerView,
+};
 
 /// VSCode GUI forks that might have extensions installed
 const VSCODE_GUI_FORKS: &[&str] = &[
@@ -88,7 +97,27 @@ pub fn get_vscode_extension_tasks_dirs(extension_id: &str) -> Vec<PathBuf> {
     dirs
 }
 
-/// Discover data sources for VSCode extension-based analyzers using jwalk.
+fn walk_vscode_extension_tasks(extension_id: &str) -> impl Iterator<Item = WalkDir> {
+    get_vscode_extension_tasks_dirs(extension_id)
+        .into_iter()
+        .map(|tasks_dir| WalkDir::new(tasks_dir).min_depth(2).max_depth(2))
+}
+
+/// Check if any data sources exist for a VSCode extension-based analyzer.
+/// Short-circuits after finding the first match.
+pub fn vscode_extension_has_sources(extension_id: &str, target_filename: &str) -> bool {
+    walk_vscode_extension_tasks(extension_id)
+        .flat_map(|w| w.into_iter())
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_type().is_file()
+                && e.path()
+                    .file_name()
+                    .is_some_and(|name| name == target_filename)
+        })
+}
+
+/// Discover data sources for VSCode extension-based analyzers.
 ///
 /// # Arguments
 /// * `extension_id` - The VSCode extension ID (e.g., "saoudrizwan.claude-dev")
@@ -99,33 +128,24 @@ pub fn discover_vscode_extension_sources(
     target_filename: &str,
     return_parent_dir: bool,
 ) -> Result<Vec<DataSource>> {
-    let mut sources = Vec::new();
-
-    for tasks_dir in get_vscode_extension_tasks_dirs(extension_id) {
-        // Pattern: {task_id}/{target_filename}
-        for entry in WalkDir::new(&tasks_dir)
-            .min_depth(2)
-            .max_depth(2)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type().is_file()
-                    && e.path()
-                        .file_name()
-                        .is_some_and(|name| name == target_filename)
-            })
-        {
-            let path = if return_parent_dir {
+    let sources = walk_vscode_extension_tasks(extension_id)
+        .flat_map(|w| w.into_iter())
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file()
+                && e.path()
+                    .file_name()
+                    .is_some_and(|name| name == target_filename)
+        })
+        .filter_map(|entry| {
+            if return_parent_dir {
                 entry.path().parent().map(|p| p.to_path_buf())
             } else {
-                Some(entry.path())
-            };
-
-            if let Some(p) = path {
-                sources.push(DataSource { path: p });
+                Some(entry.into_path())
             }
-        }
-    }
+        })
+        .map(|path| DataSource { path })
+        .collect();
 
     Ok(sources)
 }
@@ -145,47 +165,125 @@ pub trait Analyzer: Send + Sync {
     /// Get glob patterns for discovering data sources
     fn get_data_glob_patterns(&self) -> Vec<String>;
 
-    /// Discover data sources for this analyzer
+    /// Discover data sources for this analyzer (returns all sources)
     fn discover_data_sources(&self) -> Result<Vec<DataSource>>;
 
-    /// Parse conversations from data sources into normalized messages
-    async fn parse_conversations(
+    /// Parse a single data source into messages.
+    /// This is the core parsing logic without parallelism decisions.
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>>;
+
+    /// Parse multiple data sources in parallel, returning messages grouped by source path.
+    ///
+    /// Default: parses all sources in parallel using rayon.
+    /// Override for shared context loading (e.g., OpenCode loads session data once).
+    /// Must be called within a rayon threadpool context for parallelism.
+    ///
+    /// Note: Messages are NOT deduplicated - caller should deduplicate if needed.
+    fn parse_sources_parallel_with_paths(
         &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>>;
+        sources: &[DataSource],
+    ) -> Vec<(PathBuf, Vec<ConversationMessage>)> {
+        sources
+            .par_iter()
+            .filter_map(|source| match self.parse_source(source) {
+                Ok(msgs) => Some((source.path.clone(), msgs)),
+                Err(e) => {
+                    eprintln!(
+                        "Failed to parse {} source {:?}: {}",
+                        self.display_name(),
+                        source.path,
+                        e
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
 
-    /// Get complete statistics for this analyzer
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats>;
-
-    /// Check if this analyzer is available on the current system
-    fn is_available(&self) -> bool;
+    /// Parse multiple data sources in parallel and deduplicate.
+    ///
+    /// Default: calls `parse_sources_parallel_with_paths` and deduplicates by `global_hash`.
+    /// Override for different dedup strategy (e.g., Piebald uses local_hash).
+    /// Must be called within a rayon threadpool context for parallelism.
+    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
+        let all_messages: Vec<ConversationMessage> = self
+            .parse_sources_parallel_with_paths(sources)
+            .into_iter()
+            .flat_map(|(_, msgs)| msgs)
+            .collect();
+        crate::utils::deduplicate_by_global_hash(all_messages)
+    }
 
     /// Get directories to watch for file changes.
-    ///
-    /// Returns the root data directories for this analyzer. The file watcher will
-    /// recursively watch these directories for new, modified, or deleted files.
-    ///
-    /// This is important for analyzers with nested directory structures (e.g.,
-    /// `sessions/{id}/file.json`) where new subdirectories need to be detected.
-    /// Without this, only existing subdirectories would be watched, missing new
-    /// sessions/projects/tasks.
-    ///
-    /// Default implementation returns empty vec, which falls back to watching
-    /// parent directories of discovered data sources (legacy behavior).
-    fn get_watch_directories(&self) -> Vec<PathBuf> {
-        Vec::new()
+    /// Returns the root data directories for this analyzer.
+    fn get_watch_directories(&self) -> Vec<PathBuf>;
+
+    /// Check if a path is a valid data source for this analyzer.
+    /// Used by file watcher to filter events before processing.
+    /// Default: returns true for files, false for directories.
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+
+    /// Check if this analyzer is available (has any data).
+    /// Default: checks if discover_data_sources returns at least one source.
+    /// Analyzers can override with optimized versions that stop after finding 1 file.
+    fn is_available(&self) -> bool {
+        self.discover_data_sources()
+            .is_ok_and(|sources| !sources.is_empty())
+    }
+
+    /// Returns the contribution caching strategy for this analyzer.
+    /// - `SingleMessage`: 1 file = 1 message (~40 bytes/file) - e.g., OpenCode
+    /// - `SingleSession`: 1 file = 1 session (~72 bytes/file) - e.g., Claude Code, Cline
+    /// - `MultiSession`: 1 file = many sessions (~100+ bytes/file) - e.g., Piebald
+    fn contribution_strategy(&self) -> ContributionStrategy;
+
+    /// Get stats with pre-discovered sources (avoids double discovery).
+    /// Default implementation parses sources in parallel via `parse_sources_parallel()`.
+    /// Override for analyzers with complex cross-file logic (e.g., claude_code).
+    fn get_stats_with_sources(&self, sources: Vec<DataSource>) -> Result<AgenticCodingToolStats> {
+        let messages = self.parse_sources_parallel(&sources);
+
+        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
+        daily_stats.retain(|date, _| date != "unknown");
+        let num_conversations = daily_stats
+            .values()
+            .map(|stats| stats.conversations as u64)
+            .sum();
+
+        Ok(AgenticCodingToolStats {
+            daily_stats,
+            num_conversations,
+            messages,
+            analyzer_name: self.display_name().to_string(),
+        })
+    }
+
+    /// Get complete statistics for this analyzer.
+    /// Default: discovers sources then calls get_stats_with_sources().
+    fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+        let sources = self.discover_data_sources()?;
+        self.get_stats_with_sources(sources)
     }
 }
 
 /// Registry for managing multiple analyzers
 pub struct AnalyzerRegistry {
     analyzers: Vec<Box<dyn Analyzer>>,
-    /// Cached data sources per analyzer (display_name -> sources)
-    data_source_cache: DashMap<String, Vec<DataSource>>,
-    /// In-memory message cache for fast incremental updates during file watching.
-    /// Key: file path, Value: parsed messages from that file.
-    /// This allows us to reparse only changed files instead of all files.
-    message_cache: DashMap<PathBuf, Vec<crate::types::ConversationMessage>>,
+    /// Unified contribution cache for incremental updates.
+    /// Strategy-specific storage: SingleMessage (~40B), SingleSession (~72B), MultiSession (~100+B).
+    contribution_cache: ContributionCache,
+    /// Cached analyzer views for incremental updates.
+    /// Key: analyzer display name, Value: shared view with RwLock for in-place mutation.
+    analyzer_views_cache: DashMap<String, SharedAnalyzerView>,
+    /// Tracks the order in which analyzers were registered to maintain stable tab ordering.
+    /// Contains display names in registration order.
+    analyzer_order: parking_lot::RwLock<Vec<String>>,
+    /// Tracks files that have been modified since the last upload.
+    /// Used for incremental uploads - only modified files are parsed for upload.
+    /// Wrapped in Arc so cloning gives a shared handle for async tasks.
+    dirty_files_for_upload: Arc<DashMap<PathBuf, String>>,
 }
 
 impl Default for AnalyzerRegistry {
@@ -199,51 +297,50 @@ impl AnalyzerRegistry {
     pub fn new() -> Self {
         Self {
             analyzers: Vec::new(),
-            data_source_cache: DashMap::new(),
-            message_cache: DashMap::new(),
+            contribution_cache: ContributionCache::new(),
+            analyzer_views_cache: DashMap::new(),
+            analyzer_order: parking_lot::RwLock::new(Vec::new()),
+            dirty_files_for_upload: Arc::new(DashMap::new()),
         }
     }
 
     /// Register an analyzer
     pub fn register<A: Analyzer + 'static>(&mut self, analyzer: A) {
-        self.analyzers.push(Box::new(analyzer));
-    }
-
-    /// Get or discover data sources for an analyzer (cached)
-    pub fn get_cached_data_sources(&self, analyzer: &dyn Analyzer) -> Result<Vec<DataSource>> {
         let name = analyzer.display_name().to_string();
-
-        // Check cache first
-        if let Some(cached) = self.data_source_cache.get(&name) {
-            return Ok(cached.clone());
-        }
-
-        // Discover and cache
-        let sources = analyzer.discover_data_sources()?;
-        self.data_source_cache.insert(name, sources.clone());
-        Ok(sources)
+        self.analyzers.push(Box::new(analyzer));
+        // Track registration order for stable tab ordering in TUI
+        self.analyzer_order.write().push(name);
     }
 
-    /// Invalidate cache for a specific analyzer
-    pub fn invalidate_cache(&self, analyzer_name: &str) {
-        self.data_source_cache.remove(analyzer_name);
-    }
-
-    /// Invalidate all caches
+    /// Invalidate all caches (file contributions and analyzer views)
     pub fn invalidate_all_caches(&self) {
-        self.data_source_cache.clear();
+        self.contribution_cache.clear();
+        self.analyzer_views_cache.clear();
     }
 
-    /// Get available analyzers (those that are present on the system)
-    /// Uses cached data sources to check availability, avoiding redundant glob scans
+    /// Get available analyzers (fast check, no source discovery).
+    /// Returns analyzers that have at least one data source on the system.
     pub fn available_analyzers(&self) -> Vec<&dyn Analyzer> {
         self.analyzers
             .iter()
-            .filter(|a| {
-                self.get_cached_data_sources(a.as_ref())
-                    .is_ok_and(|sources| !sources.is_empty())
-            })
+            .filter(|a| a.is_available())
             .map(|a| a.as_ref())
+            .collect()
+    }
+
+    /// Get available analyzers with their discovered data sources.
+    /// Returns analyzers that have at least one data source on the system.
+    /// Sources are discovered once and returned for callers to use directly.
+    pub fn available_analyzers_with_sources(&self) -> Vec<(&dyn Analyzer, Vec<DataSource>)> {
+        self.analyzers
+            .iter()
+            .filter_map(|a| {
+                let sources = a.discover_data_sources().ok()?;
+                if sources.is_empty() {
+                    return None;
+                }
+                Some((a.as_ref(), sources))
+            })
             .collect()
     }
 
@@ -255,39 +352,37 @@ impl AnalyzerRegistry {
             .map(|a| a.as_ref())
     }
 
+    /// Load stats from all available analyzers in parallel using a scoped threadpool.
+    /// Creates a temporary rayon threadpool that is dropped after use, releasing memory.
+    /// Use this when you need full stats but aren't already inside a rayon context.
+    pub fn load_all_stats_parallel_scoped(&self) -> Result<crate::types::MultiAnalyzerStats> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .build()
+            .expect("Failed to create rayon threadpool");
+        pool.install(|| self.load_all_stats_parallel())
+        // Pool is dropped here, releasing threads
+    }
+
     /// Load stats from all available analyzers in parallel.
-    /// Also populates the message cache for fast incremental updates during watching.
-    pub async fn load_all_stats(&self) -> Result<crate::types::MultiAnalyzerStats> {
-        use futures::future::join_all;
+    /// Used for uploads - returns full stats with messages.
+    /// Must be called within a rayon threadpool context for parallelism.
+    pub fn load_all_stats_parallel(&self) -> Result<crate::types::MultiAnalyzerStats> {
+        let available = self.available_analyzers_with_sources();
 
-        let available_analyzers = self.available_analyzers();
-
-        // Create futures for all analyzers - they'll run concurrently
-        let futures: Vec<_> = available_analyzers
-            .into_iter()
-            .map(|analyzer| async move {
-                let name = analyzer.display_name().to_string();
-                let sources = analyzer.discover_data_sources().ok();
-                let result = analyzer.get_stats().await;
-                (name, sources, result)
-            })
+        // Parse all analyzers in parallel using rayon
+        let results: Vec<_> = available
+            .into_par_iter()
+            .map(|(analyzer, sources)| analyzer.get_stats_with_sources(sources))
             .collect();
 
-        // Run all analyzers in parallel
-        let results = join_all(futures).await;
-
         let mut all_stats = Vec::new();
-        for (name, sources, result) in results {
+        for result in results {
             match result {
                 Ok(stats) => {
-                    // Populate message cache: store messages keyed by file path
-                    if let Some(sources) = sources {
-                        self.populate_message_cache(&name, &sources, &stats.messages);
-                    }
                     all_stats.push(stats);
                 }
                 Err(e) => {
-                    eprintln!("⚠️  Error analyzing {} data: {}", name, e);
+                    eprintln!("⚠️  Error analyzing data: {}", e);
                 }
             }
         }
@@ -297,146 +392,392 @@ impl AnalyzerRegistry {
         })
     }
 
-    /// Populate the message cache from parsed messages.
-    /// Groups messages by their source file using conversation_hash matching.
-    fn populate_message_cache(
-        &self,
-        _analyzer_name: &str,
-        sources: &[DataSource],
-        messages: &[crate::types::ConversationMessage],
-    ) {
-        use crate::utils::hash_text;
+    /// Load view-only stats using rayon for parallel file reads.
+    /// Called once at startup. Uses rayon threadpool for parallel I/O operations.
+    /// Populates file contribution cache for true incremental updates.
+    /// Must be called within a rayon threadpool context for parallelism.
+    pub fn load_all_stats_views_parallel(&self) -> Result<crate::types::MultiAnalyzerStatsView> {
+        // Contribution cache variants based on analyzer strategy
+        enum CachedContributions {
+            SingleMessage(Vec<(PathHash, SingleMessageContribution)>),
+            SingleSession(Vec<(PathHash, SingleSessionContribution)>),
+            MultiSession(Vec<(PathHash, MultiSessionContribution)>),
+        }
 
-        // Create a map of conversation_hash -> file_path
-        let hash_to_path: std::collections::HashMap<String, PathBuf> = sources
-            .iter()
-            .map(|s| (hash_text(&s.path.to_string_lossy()), s.path.clone()))
+        // Get available analyzers with their sources (single discovery)
+        let analyzer_data: Vec<_> = self
+            .available_analyzers_with_sources()
+            .into_iter()
+            .map(|(a, sources)| {
+                let strategy = a.contribution_strategy();
+                (a, a.display_name().to_string(), sources, strategy)
+            })
             .collect();
 
-        // Group messages by their source file
-        for msg in messages {
-            if let Some(path) = hash_to_path.get(&msg.conversation_hash) {
-                self.message_cache
-                    .entry(path.clone())
-                    .or_default()
-                    .push(msg.clone());
+        // Parse all analyzers in parallel using rayon
+        let all_results: Vec<_> = analyzer_data
+            .into_par_iter()
+            .map(|(analyzer, name, sources, strategy)| {
+                let analyzer_name_arc: Arc<str> = Arc::from(name.as_str());
+
+                // Parse sources with path association preserved.
+                let grouped = analyzer.parse_sources_parallel_with_paths(&sources);
+
+                // Compute contributions per source based on strategy
+                let (contributions, all_messages): (CachedContributions, Vec<Vec<_>>) =
+                    match strategy {
+                        ContributionStrategy::SingleMessage => {
+                            let (contribs, msgs): (Vec<_>, Vec<_>) = grouped
+                                .into_par_iter()
+                                .map(|(path, msgs)| {
+                                    let path_hash = PathHash::new(&path);
+                                    let contribution = msgs
+                                        .first()
+                                        .map(SingleMessageContribution::from_message)
+                                        .unwrap_or_default();
+                                    ((path_hash, contribution), msgs)
+                                })
+                                .unzip();
+                            (CachedContributions::SingleMessage(contribs), msgs)
+                        }
+                        ContributionStrategy::SingleSession => {
+                            let (contribs, msgs): (Vec<_>, Vec<_>) = grouped
+                                .into_par_iter()
+                                .map(|(path, msgs)| {
+                                    let path_hash = PathHash::new(&path);
+                                    let contribution =
+                                        SingleSessionContribution::from_messages(&msgs);
+                                    ((path_hash, contribution), msgs)
+                                })
+                                .unzip();
+                            (CachedContributions::SingleSession(contribs), msgs)
+                        }
+                        ContributionStrategy::MultiSession => {
+                            let (contribs, msgs): (Vec<_>, Vec<_>) = grouped
+                                .into_par_iter()
+                                .map(|(path, msgs)| {
+                                    let path_hash = PathHash::new(&path);
+                                    let contribution = MultiSessionContribution::from_messages(
+                                        &msgs,
+                                        Arc::clone(&analyzer_name_arc),
+                                    );
+                                    ((path_hash, contribution), msgs)
+                                })
+                                .unzip();
+                            (CachedContributions::MultiSession(contribs), msgs)
+                        }
+                    };
+
+                let all_messages: Vec<_> = all_messages.into_iter().flatten().collect();
+
+                // Deduplicate messages across sources
+                let messages = crate::utils::deduplicate_by_global_hash(all_messages);
+
+                // Aggregate stats
+                let mut daily_stats = crate::utils::aggregate_by_date(&messages);
+                daily_stats.retain(|date, _| date != "unknown");
+                let num_conversations = daily_stats
+                    .values()
+                    .map(|stats| stats.conversations as u64)
+                    .sum();
+
+                let stats = AgenticCodingToolStats {
+                    daily_stats,
+                    num_conversations,
+                    messages,
+                    analyzer_name: name.clone(),
+                };
+
+                (
+                    name,
+                    contributions,
+                    Ok(stats) as Result<AgenticCodingToolStats>,
+                )
+            })
+            .collect();
+
+        // Build views from results and cache contributions
+        let mut all_views = Vec::new();
+        for (name, contributions, result) in all_results {
+            match result {
+                Ok(stats) => {
+                    // Cache file contributions based on type
+                    match contributions {
+                        CachedContributions::SingleMessage(contribs) => {
+                            for (path_hash, contribution) in contribs {
+                                self.contribution_cache
+                                    .insert_single_message(path_hash, contribution);
+                            }
+                        }
+                        CachedContributions::SingleSession(contribs) => {
+                            for (path_hash, contribution) in contribs {
+                                self.contribution_cache
+                                    .insert_single_session(path_hash, contribution);
+                            }
+                        }
+                        CachedContributions::MultiSession(contribs) => {
+                            for (path_hash, contribution) in contribs {
+                                self.contribution_cache
+                                    .insert_multi_session(path_hash, contribution);
+                            }
+                        }
+                    }
+                    // Convert to view (drops messages)
+                    let view = stats.into_view();
+                    // Cache the view for incremental updates
+                    self.analyzer_views_cache.insert(name, view.clone());
+                    all_views.push(view);
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Error analyzing {} data: {}", name, e);
+                }
             }
         }
+
+        // Shrink caches after bulk insertion
+        self.contribution_cache.shrink_to_fit();
+
+        Ok(crate::types::MultiAnalyzerStatsView {
+            analyzer_stats: all_views,
+        })
     }
 
-    /// Reload stats for a single file change (incremental update).
-    /// Much faster than reparsing all files - only reparses the changed file.
-    pub async fn reload_file(
+    /// Reload stats for a single file change using true incremental update.
+    /// O(1) update - only reparses the changed file, subtracts old contribution,
+    /// adds new contribution. No cloning needed thanks to RwLock.
+    /// Uses sequential parsing (no threadpool) since it's just one file.
+    pub fn reload_file_incremental(
         &self,
         analyzer_name: &str,
         changed_path: &std::path::Path,
-    ) -> Result<crate::types::AgenticCodingToolStats> {
+    ) -> Result<()> {
         let analyzer = self
             .get_analyzer_by_display_name(analyzer_name)
             .ok_or_else(|| anyhow::anyhow!("Analyzer not found: {}", analyzer_name))?;
 
-        // Parse just the changed file
+        // Skip invalid paths (directories, wrong file types, etc.)
+        if !analyzer.is_valid_data_path(changed_path) {
+            return Ok(());
+        }
+
+        // Mark file as dirty for incremental upload (only for valid data paths)
+        self.mark_file_dirty(analyzer_name, changed_path);
+
+        // Create Arc<str> once for this update
+        let analyzer_name_arc: Arc<str> = Arc::from(analyzer_name);
+
+        // Hash the path for cache lookup (no allocation)
+        let path_hash = PathHash::new(changed_path);
+
+        // Get contribution strategy for this analyzer
+        let strategy = analyzer.contribution_strategy();
+
+        // Parse just the changed file (sequential, no threadpool needed for single file)
         let source = DataSource {
             path: changed_path.to_path_buf(),
         };
-        let new_messages = analyzer.parse_conversations(vec![source]).await?;
+        let new_messages = match analyzer.parse_source(&source) {
+            Ok(msgs) => crate::utils::deduplicate_by_global_hash(msgs),
+            Err(e) => {
+                eprintln!(
+                    "Failed to parse {} source {:?}: {}",
+                    analyzer.display_name(),
+                    source.path,
+                    e
+                );
+                Vec::new()
+            }
+        };
 
-        // Update the message cache for this file
-        self.message_cache
-            .insert(changed_path.to_path_buf(), new_messages);
+        // Get or create the cached view for this analyzer
+        let shared_view = self
+            .analyzer_views_cache
+            .entry(analyzer_name.to_string())
+            .or_insert_with(|| {
+                Arc::new(parking_lot::RwLock::new(AnalyzerStatsView {
+                    daily_stats: BTreeMap::new(),
+                    session_aggregates: Vec::new(),
+                    num_conversations: 0,
+                    analyzer_name: Arc::clone(&analyzer_name_arc),
+                }))
+            })
+            .clone();
 
-        // Rebuild stats from all cached messages for this analyzer
-        self.rebuild_stats_from_cache(analyzer_name, analyzer).await
-    }
+        match strategy {
+            ContributionStrategy::SingleMessage => {
+                let old_contribution = self.contribution_cache.get_single_message(&path_hash);
 
-    /// Remove a file from the message cache (for file deletion events).
-    pub fn remove_file_from_cache(&self, path: &std::path::Path) {
-        self.message_cache.remove(path);
-    }
+                let new_contribution = new_messages
+                    .first()
+                    .map(SingleMessageContribution::from_message)
+                    .unwrap_or_default();
 
-    /// Rebuild stats from the message cache for a specific analyzer.
-    async fn rebuild_stats_from_cache(
-        &self,
-        analyzer_name: &str,
-        analyzer: &dyn Analyzer,
-    ) -> Result<crate::types::AgenticCodingToolStats> {
-        // Get all sources for this analyzer
-        let sources = self.get_cached_data_sources(analyzer)?;
+                self.contribution_cache
+                    .insert_single_message(path_hash, new_contribution);
 
-        // Collect all cached messages for files belonging to this analyzer
-        let mut all_messages = Vec::new();
-        for source in &sources {
-            if let Some(messages) = self.message_cache.get(&source.path) {
-                all_messages.extend(messages.clone());
+                let mut view = shared_view.write();
+                if let Some(old) = old_contribution {
+                    view.subtract_single_message_contribution(&old);
+                }
+                view.add_single_message_contribution(&new_contribution);
+            }
+            ContributionStrategy::SingleSession => {
+                let old_contribution = self.contribution_cache.get_single_session(&path_hash);
+
+                let new_contribution = SingleSessionContribution::from_messages(&new_messages);
+
+                self.contribution_cache
+                    .insert_single_session(path_hash, new_contribution.clone());
+
+                let mut view = shared_view.write();
+                if let Some(old) = old_contribution {
+                    view.subtract_single_session_contribution(&old);
+                }
+                view.add_single_session_contribution(&new_contribution);
+            }
+            ContributionStrategy::MultiSession => {
+                let old_contribution = self.contribution_cache.get_multi_session(&path_hash);
+
+                let new_contribution = MultiSessionContribution::from_messages(
+                    &new_messages,
+                    Arc::clone(&analyzer_name_arc),
+                );
+
+                self.contribution_cache
+                    .insert_multi_session(path_hash, new_contribution.clone());
+
+                let mut view = shared_view.write();
+                if let Some(old) = old_contribution {
+                    view.subtract_multi_session_contribution(&old);
+                }
+                view.add_multi_session_contribution(&new_contribution);
             }
         }
 
-        // Deduplicate messages
-        let messages = crate::analyzers::deduplicate_messages(all_messages);
-
-        // Aggregate by date
-        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
-        daily_stats.retain(|date, _| date != "unknown");
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(crate::types::AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: analyzer_name.to_string(),
-        })
+        Ok(())
     }
 
-    /// Check if the message cache is populated for an analyzer.
-    pub fn has_cached_messages(&self, analyzer_name: &str) -> bool {
-        if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name)
-            && let Ok(sources) = self.get_cached_data_sources(analyzer)
-        {
-            return sources
-                .iter()
-                .any(|s| self.message_cache.contains_key(&s.path));
+    /// Remove a file from the cache and update the view (for file deletion events).
+    /// Returns true if the file was found and removed.
+    /// Also marks the file as dirty for upload if it was in the cache.
+    pub fn remove_file_from_cache(&self, analyzer_name: &str, path: &std::path::Path) -> bool {
+        let path_hash = PathHash::new(path);
+
+        // Try to remove from any cache and update view accordingly
+        if let Some(removed) = self.contribution_cache.remove_any(&path_hash) {
+            if let Some(shared_view) = self.analyzer_views_cache.get(analyzer_name) {
+                let mut view = shared_view.write();
+                match removed {
+                    RemovedContribution::SingleMessage(old) => {
+                        view.subtract_single_message_contribution(&old);
+                    }
+                    RemovedContribution::SingleSession(old) => {
+                        view.subtract_single_session_contribution(&old);
+                    }
+                    RemovedContribution::MultiSession(old) => {
+                        view.subtract_multi_session_contribution(&old);
+                    }
+                }
+            }
+            true
+        } else {
+            false
         }
-        false
+    }
+
+    /// Check if the contribution cache is populated for an analyzer.
+    pub fn has_cached_contributions(&self, analyzer_name: &str) -> bool {
+        self.analyzer_views_cache.contains_key(analyzer_name)
+    }
+
+    /// Get the cached view for an analyzer.
+    pub fn get_cached_view(&self, analyzer_name: &str) -> Option<SharedAnalyzerView> {
+        self.analyzer_views_cache
+            .get(analyzer_name)
+            .map(|r| r.clone())
+    }
+
+    /// Get all cached views as a Vec, for building MultiAnalyzerStatsView.
+    /// Returns SharedAnalyzerView clones (cheap Arc pointer copies).
+    /// Views are returned in registration order for stable tab ordering in TUI.
+    pub fn get_all_cached_views(&self) -> Vec<SharedAnalyzerView> {
+        let order = self.analyzer_order.read();
+        order
+            .iter()
+            .filter_map(|name| self.analyzer_views_cache.get(name).map(|v| v.clone()))
+            .collect()
+    }
+
+    /// Update the cache with a new view for an analyzer.
+    /// Used when doing a full reload (not incremental).
+    pub fn update_cached_view(&self, analyzer_name: &str, view: SharedAnalyzerView) {
+        self.analyzer_views_cache
+            .insert(analyzer_name.to_string(), view);
     }
 
     /// Get a mapping of data directories to analyzer names for file watching.
-    ///
-    /// Prefers explicit watch directories from `get_watch_directories()` when available,
-    /// which allows detecting new subdirectories (sessions/projects/tasks).
-    /// Falls back to parent directories of data sources for backward compatibility.
+    /// Uses explicit watch directories from `get_watch_directories()`.
     pub fn get_directory_to_analyzer_mapping(&self) -> std::collections::HashMap<PathBuf, String> {
         let mut dir_to_analyzer = std::collections::HashMap::new();
 
         for analyzer in self.available_analyzers() {
-            let watch_dirs = analyzer.get_watch_directories();
-
-            if !watch_dirs.is_empty() {
-                // Use explicit watch directories (preferred - catches new subdirectories)
-                for dir in watch_dirs {
-                    if dir.exists() {
-                        dir_to_analyzer.insert(dir, analyzer.display_name().to_string());
-                    }
-                }
-            } else {
-                // Fallback: derive from data sources (legacy behavior)
-                if let Ok(sources) = self.get_cached_data_sources(analyzer) {
-                    for source in sources {
-                        if let Some(parent) = source.path.parent()
-                            && parent.exists()
-                        {
-                            dir_to_analyzer
-                                .insert(parent.to_path_buf(), analyzer.display_name().to_string());
-                        }
-                    }
+            for dir in analyzer.get_watch_directories() {
+                if dir.exists() {
+                    dir_to_analyzer.insert(dir, analyzer.display_name().to_string());
                 }
             }
         }
 
         dir_to_analyzer
+    }
+
+    /// Mark a file as dirty for the next upload (file has been modified).
+    pub fn mark_file_dirty(&self, analyzer_name: &str, path: &Path) {
+        self.dirty_files_for_upload
+            .insert(path.to_path_buf(), analyzer_name.to_string());
+    }
+
+    /// Returns a shared handle to dirty files for use in async tasks.
+    pub fn dirty_files_handle(&self) -> Arc<DashMap<PathBuf, String>> {
+        Arc::clone(&self.dirty_files_for_upload)
+    }
+
+    /// Check if we have any dirty files tracked.
+    pub fn has_dirty_files(&self) -> bool {
+        !self.dirty_files_for_upload.is_empty()
+    }
+
+    /// Load messages from dirty files for incremental upload.
+    /// Returns messages filtered to only those created since last_upload_timestamp.
+    /// Returns empty vec if no dirty files are tracked.
+    pub fn load_messages_for_upload(
+        &self,
+        last_upload_timestamp: i64,
+    ) -> Result<Vec<ConversationMessage>> {
+        if self.dirty_files_for_upload.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Parse dirty files sequentially (typically only 1-2 files)
+        let mut all_messages = Vec::with_capacity(4);
+        for entry in self.dirty_files_for_upload.iter() {
+            let (path, analyzer_name) = entry.pair();
+            if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name) {
+                let source = DataSource { path: path.clone() };
+                if let Ok(msgs) = analyzer.parse_source(&source) {
+                    all_messages.extend(msgs);
+                }
+            }
+        }
+        all_messages = crate::utils::deduplicate_by_global_hash(all_messages);
+
+        // Filter by timestamp
+        let messages_later_than: Vec<_> = all_messages
+            .into_iter()
+            .filter(|msg| msg.date.timestamp_millis() >= last_upload_timestamp)
+            .collect();
+
+        Ok(messages_later_than)
     }
 }
 
@@ -477,14 +818,23 @@ mod tests {
                 .collect())
         }
 
-        async fn parse_conversations(
-            &self,
-            _sources: Vec<DataSource>,
-        ) -> Result<Vec<ConversationMessage>> {
+        fn parse_source(&self, _source: &DataSource) -> Result<Vec<ConversationMessage>> {
             Ok(Vec::new())
         }
 
-        async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+        fn get_stats_with_sources(
+            &self,
+            _sources: Vec<DataSource>,
+        ) -> Result<AgenticCodingToolStats> {
+            if self.fail_stats {
+                anyhow::bail!("stats failed");
+            }
+            self.stats
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no stats"))
+        }
+
+        fn get_stats(&self) -> Result<AgenticCodingToolStats> {
             if self.fail_stats {
                 anyhow::bail!("stats failed");
             }
@@ -495,6 +845,18 @@ mod tests {
 
         fn is_available(&self) -> bool {
             self.available
+        }
+
+        fn get_watch_directories(&self) -> Vec<PathBuf> {
+            // Return parent directories of sources for testing
+            self.sources
+                .iter()
+                .filter_map(|p| p.parent().map(|parent| parent.to_path_buf()))
+                .collect()
+        }
+
+        fn contribution_strategy(&self) -> ContributionStrategy {
+            ContributionStrategy::SingleSession
         }
     }
 
@@ -568,7 +930,7 @@ mod tests {
             .expect("analyzer 'ok'");
         assert_eq!(by_name.display_name(), "ok");
 
-        let stats = registry.load_all_stats().await.expect("load stats");
+        let stats = registry.load_all_stats_parallel().expect("load stats");
         // Only the successful analyzer should contribute stats.
         assert_eq!(stats.analyzer_stats.len(), 1);
         assert_eq!(stats.analyzer_stats[0].analyzer_name, "ok");
@@ -626,14 +988,11 @@ mod tests {
                 .collect())
         }
 
-        async fn parse_conversations(
-            &self,
-            _sources: Vec<DataSource>,
-        ) -> Result<Vec<ConversationMessage>> {
+        fn parse_source(&self, _source: &DataSource) -> Result<Vec<ConversationMessage>> {
             Ok(Vec::new())
         }
 
-        async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
+        fn get_stats(&self) -> Result<AgenticCodingToolStats> {
             Ok(AgenticCodingToolStats {
                 daily_stats: BTreeMap::new(),
                 num_conversations: 0,
@@ -648,6 +1007,10 @@ mod tests {
 
         fn get_watch_directories(&self) -> Vec<PathBuf> {
             self.watch_dirs.clone()
+        }
+
+        fn contribution_strategy(&self) -> ContributionStrategy {
+            ContributionStrategy::SingleSession
         }
     }
 
@@ -694,35 +1057,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn registry_falls_back_to_parent_dirs_when_no_watch_dirs() {
-        use std::fs;
-
-        // Without explicit watch_dirs, should fall back to parent directories
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let base = temp_dir.path().join("data").join("files");
-        fs::create_dir_all(&base).expect("mkdirs");
-        let file_path = base.join("data.json");
-
-        let mut registry = AnalyzerRegistry::new();
-        let analyzer = TestAnalyzerWithWatchDirs {
-            name: "fallback",
-            sources: vec![file_path.clone()],
-            watch_dirs: vec![], // Empty = use legacy behavior
-        };
-
-        registry.register(analyzer);
-
-        let mapping = registry.get_directory_to_analyzer_mapping();
-
-        // Should fall back to parent directory of the source file
-        assert_eq!(
-            mapping.get(&base).map(String::as_str),
-            Some("fallback"),
-            "Should fall back to watching parent directory when watch_dirs is empty"
-        );
-    }
-
     // =========================================================================
     // DISCOVER_VSCODE_EXTENSION_SOURCES TESTS
     // =========================================================================
@@ -757,5 +1091,177 @@ mod tests {
 
         assert!(result1.is_ok());
         assert!(result2.is_ok());
+    }
+
+    /// Test that analyzer tab order remains stable across initial load and updates.
+    /// Regression test for bug where DashMap iteration order caused tabs to jump.
+    #[tokio::test]
+    async fn test_analyzer_order_stable_across_updates() {
+        let mut registry = AnalyzerRegistry::new();
+        let expected_order = vec!["analyzer-a", "analyzer-b", "analyzer-c"];
+
+        // Register analyzers in a specific order
+        for name in &expected_order {
+            registry.register(TestAnalyzer {
+                name,
+                available: true,
+                stats: Some(sample_stats(name)),
+                sources: vec![PathBuf::from(format!("/fake/{}.jsonl", name))],
+                fail_stats: false,
+            });
+        }
+
+        // Initial load should preserve registration order
+        let initial_views = registry
+            .load_all_stats_views_parallel()
+            .expect("load_all_stats_views_parallel");
+        let initial_names: Vec<String> = initial_views
+            .analyzer_stats
+            .iter()
+            .map(|v| v.read().analyzer_name.to_string())
+            .collect();
+        let expected_strings: Vec<String> = expected_order.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            initial_names, expected_strings,
+            "Initial load order mismatch"
+        );
+
+        // get_all_cached_views() should return same order (used by watcher updates)
+        let cached_names: Vec<String> = registry
+            .get_all_cached_views()
+            .iter()
+            .map(|v| v.read().analyzer_name.to_string())
+            .collect();
+        assert_eq!(
+            cached_names, expected_strings,
+            "Cached views order mismatch"
+        );
+
+        // Order stable after incremental file update
+        let _ = registry
+            .reload_file_incremental("analyzer-b", &PathBuf::from("/fake/analyzer-b.jsonl"));
+        let after_update: Vec<String> = registry
+            .get_all_cached_views()
+            .iter()
+            .map(|v| v.read().analyzer_name.to_string())
+            .collect();
+        assert_eq!(after_update, expected_strings, "Order changed after update");
+
+        // Order stable after file removal
+        let _ =
+            registry.remove_file_from_cache("analyzer-c", &PathBuf::from("/fake/analyzer-c.jsonl"));
+        let after_removal: Vec<String> = registry
+            .get_all_cached_views()
+            .iter()
+            .map(|v| v.read().analyzer_name.to_string())
+            .collect();
+        assert_eq!(
+            after_removal, expected_strings,
+            "Order changed after removal"
+        );
+    }
+
+    // =========================================================================
+    // DIRTY FILE TRACKING TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_mark_file_dirty_and_clear() {
+        let registry = AnalyzerRegistry::new();
+        let path = PathBuf::from("/fake/test.json");
+
+        assert!(!registry.has_dirty_files());
+
+        registry.mark_file_dirty("test", &path);
+        assert!(registry.has_dirty_files());
+
+        registry.dirty_files_handle().clear();
+        assert!(!registry.has_dirty_files());
+    }
+
+    #[test]
+    fn test_has_dirty_files_multiple() {
+        let registry = AnalyzerRegistry::new();
+
+        registry.mark_file_dirty("test", &PathBuf::from("/a.json"));
+        registry.mark_file_dirty("test", &PathBuf::from("/b.json"));
+        registry.mark_file_dirty("test", &PathBuf::from("/c.json"));
+
+        assert!(registry.has_dirty_files());
+
+        registry.dirty_files_handle().clear();
+        assert!(!registry.has_dirty_files());
+    }
+
+    #[test]
+    fn test_load_messages_for_upload_empty_dirty_set_no_analyzers() {
+        let registry = AnalyzerRegistry::new();
+
+        // No analyzers, no dirty files - should return empty
+        let messages = registry.load_messages_for_upload(0).expect("load");
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_remove_file_from_cache_marks_dirty() {
+        let registry = AnalyzerRegistry::new();
+        let path = PathBuf::from("/fake/test.json");
+
+        // File not in cache - should return false and not mark dirty
+        assert!(!registry.remove_file_from_cache("test", &path));
+        assert!(!registry.has_dirty_files());
+    }
+
+    #[tokio::test]
+    async fn test_reload_file_incremental_marks_dirty_for_valid_path() {
+        use std::fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("test.json");
+        fs::write(&path, "{}").expect("write");
+
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test",
+            available: true,
+            stats: Some(sample_stats("test")),
+            sources: vec![path.clone()],
+            fail_stats: false,
+        });
+
+        // Load initial stats to populate cache
+        let _ = registry.load_all_stats_views_parallel();
+
+        // Reload should mark file dirty
+        assert!(!registry.has_dirty_files());
+        let _ = registry.reload_file_incremental("test", &path);
+        assert!(registry.has_dirty_files());
+    }
+
+    #[tokio::test]
+    async fn test_reload_file_incremental_skips_invalid_path() {
+        use std::fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let valid_path = temp_dir.path().join("test.json");
+        fs::write(&valid_path, "{}").expect("write");
+        let invalid_path = temp_dir.path().join("subdir");
+        fs::create_dir(&invalid_path).expect("mkdir");
+
+        let mut registry = AnalyzerRegistry::new();
+        registry.register(TestAnalyzer {
+            name: "test",
+            available: true,
+            stats: Some(sample_stats("test")),
+            sources: vec![valid_path],
+            fail_stats: false,
+        });
+
+        // Load initial stats
+        let _ = registry.load_all_stats_views_parallel();
+
+        // Invalid path (directory) should not mark dirty
+        let _ = registry.reload_file_incremental("test", &invalid_path);
+        assert!(!registry.has_dirty_files());
     }
 }

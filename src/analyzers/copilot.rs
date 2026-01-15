@@ -1,15 +1,15 @@
 use crate::analyzer::{Analyzer, DataSource};
-use crate::types::{AgenticCodingToolStats, Application, ConversationMessage, MessageRole, Stats};
+use crate::contribution_cache::ContributionStrategy;
+use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use jwalk::WalkDir;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::path::{Path, PathBuf};
 use tiktoken_rs::get_bpe_from_model;
+use walkdir::WalkDir;
 
 pub struct CopilotAnalyzer;
 
@@ -29,7 +29,6 @@ impl CopilotAnalyzer {
         Self
     }
 
-    /// Returns all VSCode workspaceStorage directories where Copilot data may exist.
     fn workspace_storage_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
 
@@ -451,85 +450,61 @@ impl Analyzer for CopilotAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let mut sources = Vec::new();
-
-        for workspace_storage in Self::workspace_storage_dirs() {
-            // Pattern: */chatSessions/*.json
-            // jwalk walks directories in parallel
-            for entry in WalkDir::new(&workspace_storage)
-                .min_depth(3) // */chatSessions/*.json
-                .max_depth(3)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().is_some_and(|ext| ext == "json")
-                        && e.path()
-                            .parent()
-                            .and_then(|p| p.file_name())
-                            .is_some_and(|name| name == "chatSessions")
-                })
-            {
-                sources.push(DataSource { path: entry.path() });
-            }
-        }
+        let sources = Self::workspace_storage_dirs()
+            .into_iter()
+            .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "json")
+                    && e.path()
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|name| name == "chatSessions")
+            })
+            .map(|e| DataSource {
+                path: e.into_path(),
+            })
+            .collect();
 
         Ok(sources)
     }
 
-    async fn parse_conversations(
-        &self,
-        sources: Vec<DataSource>,
-    ) -> Result<Vec<ConversationMessage>> {
-        // Parse all session files in parallel
-        let all_entries: Vec<ConversationMessage> = sources
-            .into_par_iter()
-            .flat_map(|source| match parse_copilot_session_file(&source.path) {
-                Ok(messages) => messages,
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse Copilot session file {:?}: {}",
-                        source.path, e
-                    );
-                    Vec::new()
-                }
-            })
-            .collect();
-
-        // Parallel deduplicate by global hash
-        Ok(crate::utils::deduplicate_by_global_hash_parallel(
-            all_entries,
-        ))
-    }
-
-    async fn get_stats(&self) -> Result<AgenticCodingToolStats> {
-        let sources = self.discover_data_sources()?;
-        let messages = self.parse_conversations(sources).await?;
-        let mut daily_stats = crate::utils::aggregate_by_date(&messages);
-
-        // Remove any "unknown" entries
-        daily_stats.retain(|date, _| date != "unknown");
-
-        let num_conversations = daily_stats
-            .values()
-            .map(|stats| stats.conversations as u64)
-            .sum();
-
-        Ok(AgenticCodingToolStats {
-            daily_stats,
-            num_conversations,
-            messages,
-            analyzer_name: self.display_name().to_string(),
-        })
-    }
-
     fn is_available(&self) -> bool {
-        self.discover_data_sources()
-            .is_ok_and(|sources| !sources.is_empty())
+        Self::workspace_storage_dirs()
+            .into_iter()
+            .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_type().is_file()
+                    && e.path().extension().is_some_and(|ext| ext == "json")
+                    && e.path()
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|name| name == "chatSessions")
+            })
+    }
+
+    fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        parse_copilot_session_file(&source.path)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
         Self::workspace_storage_dirs()
+    }
+
+    fn is_valid_data_path(&self, path: &Path) -> bool {
+        // Must be a .json file in a "chatSessions" directory
+        path.is_file()
+            && path.extension().is_some_and(|ext| ext == "json")
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|name| name == "chatSessions")
+    }
+
+    fn contribution_strategy(&self) -> ContributionStrategy {
+        ContributionStrategy::SingleSession
     }
 }
 

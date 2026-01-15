@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -13,7 +13,7 @@ use rmcp::{
     tool_router,
 };
 
-use crate::types::{MultiAnalyzerStats, Stats};
+use crate::types::MultiAnalyzerStats;
 use crate::{create_analyzer_registry, utils};
 
 use super::types::*;
@@ -38,19 +38,55 @@ impl SplitrailMcpServer {
     }
 
     /// Load stats from all analyzers (reuses existing infrastructure)
-    async fn load_stats(&self) -> Result<MultiAnalyzerStats, McpError> {
+    fn load_stats(&self) -> Result<MultiAnalyzerStats, McpError> {
         let registry = create_analyzer_registry();
         registry
-            .load_all_stats()
-            .await
+            .load_all_stats_parallel()
             .map_err(|e| McpError::internal_error(format!("Failed to load stats: {}", e), None))
+    }
+
+    /// Compute file operation stats grouped by date from raw messages.
+    /// This is computed on-demand since DailyStats only contains TUI-relevant fields.
+    fn compute_file_ops_by_date(
+        stats: &MultiAnalyzerStats,
+        analyzer: Option<&str>,
+    ) -> HashMap<String, DateFileOps> {
+        let messages: Vec<_> = if let Some(analyzer_name) = analyzer {
+            stats
+                .analyzer_stats
+                .iter()
+                .filter(|a| a.analyzer_name.eq_ignore_ascii_case(analyzer_name))
+                .flat_map(|a| a.messages.iter())
+                .collect()
+        } else {
+            stats
+                .analyzer_stats
+                .iter()
+                .flat_map(|a| a.messages.iter())
+                .collect()
+        };
+
+        let mut file_ops_by_date: HashMap<String, DateFileOps> = HashMap::new();
+        for msg in messages {
+            let date = msg
+                .date
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string();
+            let entry = file_ops_by_date.entry(date).or_default();
+            entry.files_read += msg.stats.files_read;
+            entry.files_edited += msg.stats.files_edited;
+            entry.files_added += msg.stats.files_added;
+            entry.terminal_commands += msg.stats.terminal_commands;
+        }
+        file_ops_by_date
     }
 
     /// Get daily stats for a specific analyzer or combined across all
     fn get_daily_stats_for_analyzer(
         stats: &MultiAnalyzerStats,
         analyzer: Option<&str>,
-    ) -> std::collections::BTreeMap<String, crate::types::DailyStats> {
+    ) -> BTreeMap<String, crate::types::DailyStats> {
         if let Some(analyzer_name) = analyzer {
             // Find specific analyzer
             for analyzer_stats in &stats.analyzer_stats {
@@ -61,7 +97,7 @@ impl SplitrailMcpServer {
                     return analyzer_stats.daily_stats.clone();
                 }
             }
-            std::collections::BTreeMap::new()
+            BTreeMap::new()
         } else {
             // Combine all messages and aggregate
             let all_messages: Vec<_> = stats
@@ -84,20 +120,24 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<GetDailyStatsRequest>,
     ) -> Result<Json<DailyStatsResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
         let daily_stats = Self::get_daily_stats_for_analyzer(&stats, req.analyzer.as_deref());
+        let file_ops_by_date = Self::compute_file_ops_by_date(&stats, req.analyzer.as_deref());
 
-        let mut results: Vec<DailySummary> = if let Some(date) = req.date {
+        let mut results: Vec<DailySummary> = if let Some(ref date) = req.date {
             // Filter by specific date
-            daily_stats
-                .get(&date)
-                .map(|ds| vec![DailySummary::from((date.as_str(), ds))])
-                .unwrap_or_default()
+            daily_stats.get(date).map_or_else(Vec::new, |ds| {
+                let file_ops = file_ops_by_date.get(date).cloned().unwrap_or_default();
+                vec![DailySummary::new(date.as_str(), ds, &file_ops)]
+            })
         } else {
             // All dates
             daily_stats
                 .iter()
-                .map(|(date, ds)| DailySummary::from((date.as_str(), ds)))
+                .map(|(date, ds)| {
+                    let file_ops = file_ops_by_date.get(date).cloned().unwrap_or_default();
+                    DailySummary::new(date.as_str(), ds, &file_ops)
+                })
                 .collect()
         };
 
@@ -120,7 +160,7 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<GetModelUsageRequest>,
     ) -> Result<Json<ModelUsageResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
         let daily_stats = Self::get_daily_stats_for_analyzer(&stats, req.analyzer.as_deref());
 
         let mut model_counts: HashMap<String, u32> = HashMap::new();
@@ -163,7 +203,7 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<GetCostBreakdownRequest>,
     ) -> Result<Json<CostBreakdownResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
         let daily_stats = Self::get_daily_stats_for_analyzer(&stats, req.analyzer.as_deref());
 
         let daily_costs: Vec<DailyCost> = daily_stats
@@ -183,7 +223,7 @@ impl SplitrailMcpServer {
             })
             .map(|(date, ds)| DailyCost {
                 date: date.clone(),
-                cost: ds.stats.cost,
+                cost: ds.stats.cost(),
             })
             .collect();
 
@@ -209,36 +249,61 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<GetFileOpsRequest>,
     ) -> Result<Json<FileOpsResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
-        let daily_stats = Self::get_daily_stats_for_analyzer(&stats, req.analyzer.as_deref());
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
 
-        let mut aggregated = Stats::default();
-
-        if let Some(date) = req.date {
-            if let Some(ds) = daily_stats.get(&date) {
-                aggregated = ds.stats.clone();
-            }
+        // Collect messages, optionally filtered by analyzer
+        let messages: Vec<_> = if let Some(ref analyzer_name) = req.analyzer {
+            stats
+                .analyzer_stats
+                .iter()
+                .filter(|a| a.analyzer_name.eq_ignore_ascii_case(analyzer_name))
+                .flat_map(|a| a.messages.iter())
+                .collect()
         } else {
-            for ds in daily_stats.values() {
-                aggregated.files_read += ds.stats.files_read;
-                aggregated.files_edited += ds.stats.files_edited;
-                aggregated.files_added += ds.stats.files_added;
-                aggregated.files_deleted += ds.stats.files_deleted;
-                aggregated.lines_read += ds.stats.lines_read;
-                aggregated.lines_edited += ds.stats.lines_edited;
-                aggregated.lines_added += ds.stats.lines_added;
-                aggregated.lines_deleted += ds.stats.lines_deleted;
-                aggregated.bytes_read += ds.stats.bytes_read;
-                aggregated.bytes_edited += ds.stats.bytes_edited;
-                aggregated.bytes_added += ds.stats.bytes_added;
-                aggregated.bytes_deleted += ds.stats.bytes_deleted;
-                aggregated.terminal_commands += ds.stats.terminal_commands;
-                aggregated.file_searches += ds.stats.file_searches;
-                aggregated.file_content_searches += ds.stats.file_content_searches;
-            }
+            stats
+                .analyzer_stats
+                .iter()
+                .flat_map(|a| a.messages.iter())
+                .collect()
+        };
+
+        // Filter by date if specified
+        let filtered: Vec<_> = if let Some(ref date) = req.date {
+            messages
+                .into_iter()
+                .filter(|m| {
+                    m.date
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string()
+                        == *date
+                })
+                .collect()
+        } else {
+            messages
+        };
+
+        // Sum file operations from raw Stats
+        let mut response = FileOpsResponse::default();
+        for msg in filtered {
+            response.files_read += msg.stats.files_read;
+            response.files_edited += msg.stats.files_edited;
+            response.files_added += msg.stats.files_added;
+            response.files_deleted += msg.stats.files_deleted;
+            response.lines_read += msg.stats.lines_read;
+            response.lines_edited += msg.stats.lines_edited;
+            response.lines_added += msg.stats.lines_added;
+            response.lines_deleted += msg.stats.lines_deleted;
+            response.bytes_read += msg.stats.bytes_read;
+            response.bytes_edited += msg.stats.bytes_edited;
+            response.bytes_added += msg.stats.bytes_added;
+            response.bytes_deleted += msg.stats.bytes_deleted;
+            response.terminal_commands += msg.stats.terminal_commands;
+            response.file_searches += msg.stats.file_searches;
+            response.file_content_searches += msg.stats.file_content_searches;
         }
 
-        Ok(Json(FileOpsResponse::from(&aggregated)))
+        Ok(Json(response))
     }
 
     #[tool(
@@ -249,7 +314,7 @@ impl SplitrailMcpServer {
         &self,
         Parameters(req): Parameters<CompareToolsRequest>,
     ) -> Result<Json<ToolComparisonResponse>, String> {
-        let stats = self.load_stats().await.map_err(|e| e.to_string())?;
+        let stats = self.load_stats().map_err(|e| e.to_string())?;
 
         let tools: Vec<ToolSummary> = stats
             .analyzer_stats
@@ -273,7 +338,7 @@ impl SplitrailMcpServer {
                     })
                     .collect();
 
-                let total_cost: f64 = filtered_stats.iter().map(|(_, ds)| ds.stats.cost).sum();
+                let total_cost: f64 = filtered_stats.iter().map(|(_, ds)| ds.stats.cost()).sum();
                 let total_messages: u64 = filtered_stats
                     .iter()
                     .map(|(_, ds)| (ds.user_messages + ds.ai_messages) as u64)
@@ -284,7 +349,7 @@ impl SplitrailMcpServer {
                     .sum();
                 let total_tokens: u64 = filtered_stats
                     .iter()
-                    .map(|(_, ds)| ds.stats.input_tokens + ds.stats.output_tokens)
+                    .map(|(_, ds)| (ds.stats.input_tokens as u64) + (ds.stats.output_tokens as u64))
                     .sum();
                 let total_tool_calls: u32 = filtered_stats
                     .iter()
@@ -316,7 +381,7 @@ impl SplitrailMcpServer {
         let registry = create_analyzer_registry();
         let analyzers: Vec<String> = registry
             .available_analyzers()
-            .iter()
+            .into_iter()
             .map(|a| a.display_name().to_string())
             .collect();
 
@@ -364,6 +429,7 @@ impl ServerHandler for SplitrailMcpServer {
                 .no_annotation(),
             ],
             next_cursor: None,
+            meta: None,
         })
     }
 
@@ -374,7 +440,7 @@ impl ServerHandler for SplitrailMcpServer {
     ) -> Result<ReadResourceResult, McpError> {
         match uri.as_str() {
             resource_uris::DAILY_SUMMARY => {
-                let stats = self.load_stats().await?;
+                let stats = self.load_stats()?;
                 let all_messages: Vec<_> = stats
                     .analyzer_stats
                     .iter()
@@ -390,7 +456,7 @@ impl ServerHandler for SplitrailMcpServer {
                         ds.user_messages,
                         ds.ai_messages,
                         ds.conversations,
-                        ds.stats.cost,
+                        ds.stats.cost(),
                         ds.stats.input_tokens,
                         ds.stats.output_tokens
                     )
@@ -403,7 +469,7 @@ impl ServerHandler for SplitrailMcpServer {
                 })
             }
             resource_uris::MODEL_BREAKDOWN => {
-                let stats = self.load_stats().await?;
+                let stats = self.load_stats()?;
                 let mut model_counts: HashMap<String, u32> = HashMap::new();
 
                 for analyzer_stats in &stats.analyzer_stats {
