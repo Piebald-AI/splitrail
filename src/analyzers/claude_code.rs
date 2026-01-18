@@ -365,6 +365,13 @@ struct ClaudeCodeFileHistorySnapshotEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ClaudeCodeProgressEntry {
+    #[serde(flatten)]
+    fields: simd_json::OwnedValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ClaudeCodeMessageEntry {
     r#type: Option<String>,      // "assistant" or "user"
     parent_uuid: Option<String>, // e.g. "773f9fdc-51ed-41cc-b107-19e5418bcf13"
@@ -402,6 +409,8 @@ enum ClaudeCodeEntry {
     Message(ClaudeCodeMessageEntry),
     #[serde(rename = "queue-operation")]
     QueueOperation(ClaudeCodeQueueOperationEntry),
+    #[serde(rename = "progress")]
+    Progress(ClaudeCodeProgressEntry),
 }
 
 pub mod tool_schema {
@@ -677,7 +686,7 @@ pub fn parse_jsonl_file<R: Read>(
                 ));
                 continue;
             }
-            _ => continue, // Skip other entry types like FileHistorySnapshot, QueueOperation
+            _ => continue, // Skip other entry types like FileHistorySnapshot, QueueOperation, Progress
         };
     }
 
