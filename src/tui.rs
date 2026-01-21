@@ -2122,3 +2122,122 @@ pub fn show_upload_error(error: &str) {
         ResetColor
     );
 }
+
+/// Display a dry-run summary of what would be uploaded
+pub fn show_upload_dry_run(
+    messages: &[crate::types::ConversationMessage],
+    format_options: &NumberFormatOptions,
+) {
+    use std::collections::BTreeMap;
+
+    if messages.is_empty() {
+        let _ = execute!(
+            stdout(),
+            SetForegroundColor(crossterm::style::Color::DarkYellow),
+            Print("⊘ Dry run: No messages to upload\n"),
+            ResetColor
+        );
+        return;
+    }
+
+    // Aggregate stats
+    let mut total_input_tokens: u64 = 0;
+    let mut total_output_tokens: u64 = 0;
+    let mut total_cost: f64 = 0.0;
+    let mut models: BTreeMap<String, u64> = BTreeMap::new();
+    let mut applications: BTreeMap<String, u64> = BTreeMap::new();
+    let mut earliest_date: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut latest_date: Option<chrono::DateTime<chrono::Utc>> = None;
+
+    for msg in messages {
+        total_input_tokens += msg.stats.input_tokens;
+        total_output_tokens += msg.stats.output_tokens;
+        total_cost += msg.stats.cost;
+
+        if let Some(ref model) = msg.model {
+            *models.entry(model.clone()).or_insert(0) += 1;
+        }
+
+        let app_name = format!("{:?}", msg.application);
+        *applications.entry(app_name).or_insert(0) += 1;
+
+        match earliest_date {
+            Some(d) if msg.date < d => earliest_date = Some(msg.date),
+            None => earliest_date = Some(msg.date),
+            _ => {}
+        }
+        match latest_date {
+            Some(d) if msg.date > d => latest_date = Some(msg.date),
+            None => latest_date = Some(msg.date),
+            _ => {}
+        }
+    }
+
+    // Print header
+    let _ = execute!(
+        stdout(),
+        SetForegroundColor(crossterm::style::Color::DarkYellow),
+        Print("⊘ Dry run: The following would be uploaded:\n"),
+        ResetColor
+    );
+
+    // Print summary
+    println!();
+    println!(
+        "  Messages:      {}",
+        format_number(messages.len() as u64, format_options)
+    );
+    println!(
+        "  Input tokens:  {}",
+        format_number(total_input_tokens, format_options)
+    );
+    println!(
+        "  Output tokens: {}",
+        format_number(total_output_tokens, format_options)
+    );
+    println!("  Total cost:    ${:.4}", total_cost);
+
+    // Print date range
+    if let (Some(earliest), Some(latest)) = (earliest_date, latest_date) {
+        println!();
+        println!(
+            "  Date range:    {} to {}",
+            earliest.format("%Y-%m-%d"),
+            latest.format("%Y-%m-%d")
+        );
+    }
+
+    // Print applications breakdown
+    if !applications.is_empty() {
+        println!();
+        println!("  Applications:");
+        for (app, count) in &applications {
+            println!(
+                "    {}: {} messages",
+                app,
+                format_number(*count, format_options)
+            );
+        }
+    }
+
+    // Print model breakdown
+    if !models.is_empty() {
+        println!();
+        println!("  Models:");
+        for (model, count) in &models {
+            println!(
+                "    {}: {} messages",
+                model,
+                format_number(*count, format_options)
+            );
+        }
+    }
+
+    println!();
+    let _ = execute!(
+        stdout(),
+        SetForegroundColor(crossterm::style::Color::DarkGrey),
+        Print("  Run without --dry-run to upload\n"),
+        ResetColor
+    );
+}

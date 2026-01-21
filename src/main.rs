@@ -83,6 +83,10 @@ struct UploadArgs {
     /// Re-upload only messages with zero cost (useful for fixing pricing errors).
     #[arg(long, default_value_t = false)]
     zero_cost: bool,
+
+    /// Show what would be uploaded without actually uploading.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -363,6 +367,12 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
             } else {
                 messages_to_upload
             };
+
+            // If dry-run, show summary and exit without uploading
+            if args.dry_run {
+                tui::show_upload_dry_run(&messages_to_upload, &format_options);
+                return Ok(());
+            }
 
             let progress_callback = tui::create_upload_progress_callback(&format_options);
             upload::upload_message_stats(&messages_to_upload, &mut config, progress_callback)
