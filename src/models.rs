@@ -660,6 +660,78 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
         is_estimated: false,
     },
+
+    // Z.AI (Zhipu AI) Models
+    "glm-4.6" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.60,
+            output_per_1m: 2.20,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.11,
+        },
+        is_estimated: false,
+    },
+    "glm-4.7" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.60,
+            output_per_1m: 2.20,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.11,
+        },
+        is_estimated: false,
+    },
+    "glm-4.7-flash" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.0,
+            output_per_1m: 0.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.0,
+        },
+        is_estimated: false,
+    },
+    "glm-4.6v" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.30,
+            output_per_1m: 0.90,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.05,
+        },
+        is_estimated: false,
+    },
+
+    // xAI Models
+    "grok-code-fast-1" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.20,
+            output_per_1m: 1.50,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.02,
+        },
+        is_estimated: false,
+    },
+
+    // Synthetic.new Models
+    "hf:zai-org/GLM-4.6" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.55,
+            output_per_1m: 2.19,
+        },
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
+    "hf:MiniMaxAI/MiniMax-M2" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.55,
+            output_per_1m: 2.19,
+        },
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
 };
 
 static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
@@ -781,6 +853,9 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gemini-1.5-pro-002" => "gemini-1.5-pro",
     "gemini-1.5-pro-exp-0827" => "gemini-1.5-pro",
     "gemini-1.5-pro-exp-0801" => "gemini-1.5-pro",
+
+    // Zhipu AI aliases
+    "zai-glm-4.6" => "glm-4.6",
 };
 
 /// Get model info by any valid name (canonical or alias)
