@@ -187,7 +187,7 @@ impl SplitrailMcpServer {
                 message_count: count,
             })
             .collect();
-        models.sort_by(|a, b| b.message_count.cmp(&a.message_count));
+        models.sort_by_key(|b| std::cmp::Reverse(b.message_count));
 
         Ok(Json(ModelUsageResponse {
             models,
@@ -481,7 +481,7 @@ impl ServerHandler for SplitrailMcpServer {
                 }
 
                 let mut sorted: Vec<_> = model_counts.into_iter().collect();
-                sorted.sort_by(|a, b| b.1.cmp(&a.1));
+                sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
 
                 let breakdown: String = sorted
                     .iter()

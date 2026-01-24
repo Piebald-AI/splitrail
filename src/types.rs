@@ -267,6 +267,9 @@ pub struct DailyStats {
     /// Reference-counted model occurrences for correct incremental update subtraction.
     pub models: BTreeMap<String, u32>,
     pub stats: TuiStats,
+    /// Per-model aggregated statistics (tokens, cost, etc.) for this day.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_stats: BTreeMap<String, ModelStats>,
 }
 
 impl std::ops::AddAssign<&DailyStats> for DailyStats {
@@ -278,6 +281,12 @@ impl std::ops::AddAssign<&DailyStats> for DailyStats {
             *self.models.entry(model.clone()).or_insert(0) += count;
         }
         self.stats += rhs.stats;
+        for (model, model_stat) in &rhs.model_stats {
+            self.model_stats
+                .entry(model.clone())
+                .or_insert_with(|| ModelStats::new(model.clone()))
+                .add_model_stats(model_stat);
+        }
     }
 }
 
@@ -295,6 +304,14 @@ impl std::ops::SubAssign<&DailyStats> for DailyStats {
             }
         }
         self.stats -= rhs.stats;
+        for (model, model_stat) in &rhs.model_stats {
+            if let Some(existing) = self.model_stats.get_mut(model) {
+                existing.sub_model_stats(model_stat);
+                if existing.message_count == 0 {
+                    self.model_stats.remove(model);
+                }
+            }
+        }
     }
 }
 
@@ -525,6 +542,76 @@ impl FileCategory {
             | "service" => FileCategory::Config,
             _ => FileCategory::Other,
         }
+    }
+}
+
+/// Aggregated statistics for a specific model.
+/// Used in JSON output to show per-model breakdowns.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStats {
+    pub model: String,
+    pub message_count: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cached_tokens: u64,
+    pub cost: f64,
+    pub tool_calls: u32,
+}
+
+impl ModelStats {
+    /// Create a new ModelStats for the given model name.
+    pub fn new(model: String) -> Self {
+        Self {
+            model,
+            ..Default::default()
+        }
+    }
+
+    /// Add stats from a message to this model's aggregate.
+    pub fn add_message(&mut self, stats: &Stats) {
+        self.message_count += 1;
+        self.input_tokens += stats.input_tokens;
+        self.output_tokens += stats.output_tokens;
+        self.reasoning_tokens += stats.reasoning_tokens;
+        self.cache_creation_tokens += stats.cache_creation_tokens;
+        self.cache_read_tokens += stats.cache_read_tokens;
+        self.cached_tokens += stats.cached_tokens;
+        self.cost += stats.cost;
+        self.tool_calls += stats.tool_calls;
+    }
+
+    /// Add another ModelStats to this one (for aggregation).
+    pub fn add_model_stats(&mut self, other: &ModelStats) {
+        self.message_count += other.message_count;
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.reasoning_tokens += other.reasoning_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cached_tokens += other.cached_tokens;
+        self.cost += other.cost;
+        self.tool_calls += other.tool_calls;
+    }
+
+    /// Subtract another ModelStats from this one (for incremental updates).
+    pub fn sub_model_stats(&mut self, other: &ModelStats) {
+        self.message_count = self.message_count.saturating_sub(other.message_count);
+        self.input_tokens = self.input_tokens.saturating_sub(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_sub(other.output_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_sub(other.reasoning_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_sub(other.cache_creation_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_sub(other.cache_read_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_sub(other.cached_tokens);
+        self.cost -= other.cost;
+        self.tool_calls = self.tool_calls.saturating_sub(other.tool_calls);
     }
 }
 
@@ -864,5 +951,120 @@ mod tests {
             get_model_count(&view.session_aggregates[0].models, intern_model("claude")),
             Some(2)
         );
+    }
+
+    // ========================================================================
+    // ModelStats tests
+    // ========================================================================
+
+    #[test]
+    fn model_stats_add_message() {
+        let mut ms = ModelStats::new("claude-3-5-sonnet".into());
+        let stats = Stats {
+            input_tokens: 100,
+            output_tokens: 50,
+            reasoning_tokens: 10,
+            cost: 0.05,
+            tool_calls: 2,
+            ..Stats::default()
+        };
+
+        ms.add_message(&stats);
+
+        assert_eq!(ms.message_count, 1);
+        assert_eq!(ms.input_tokens, 100);
+        assert_eq!(ms.output_tokens, 50);
+        assert_eq!(ms.reasoning_tokens, 10);
+        assert!((ms.cost - 0.05).abs() < 0.001);
+        assert_eq!(ms.tool_calls, 2);
+
+        // Add another message
+        ms.add_message(&stats);
+
+        assert_eq!(ms.message_count, 2);
+        assert_eq!(ms.input_tokens, 200);
+        assert_eq!(ms.output_tokens, 100);
+        assert!((ms.cost - 0.10).abs() < 0.001);
+    }
+
+    #[test]
+    fn model_stats_add_and_sub() {
+        let mut ms1 = ModelStats::new("gpt-4".into());
+        ms1.message_count = 5;
+        ms1.input_tokens = 500;
+        ms1.output_tokens = 250;
+        ms1.cost = 1.0;
+        ms1.tool_calls = 10;
+
+        let ms2 = ModelStats {
+            model: "gpt-4".into(),
+            message_count: 2,
+            input_tokens: 100,
+            output_tokens: 50,
+            cost: 0.3,
+            tool_calls: 3,
+            ..ModelStats::default()
+        };
+
+        ms1.add_model_stats(&ms2);
+        assert_eq!(ms1.message_count, 7);
+        assert_eq!(ms1.input_tokens, 600);
+        assert!((ms1.cost - 1.3).abs() < 0.001);
+
+        ms1.sub_model_stats(&ms2);
+        assert_eq!(ms1.message_count, 5);
+        assert_eq!(ms1.input_tokens, 500);
+        assert!((ms1.cost - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn daily_stats_model_stats_aggregation() {
+        let mut day1 = DailyStats::default();
+        day1.model_stats.insert(
+            "gpt-4".into(),
+            ModelStats {
+                model: "gpt-4".into(),
+                message_count: 2,
+                input_tokens: 200,
+                cost: 0.5,
+                ..ModelStats::default()
+            },
+        );
+
+        let mut day2 = DailyStats::default();
+        day2.model_stats.insert(
+            "gpt-4".into(),
+            ModelStats {
+                model: "gpt-4".into(),
+                message_count: 1,
+                input_tokens: 100,
+                cost: 0.25,
+                ..ModelStats::default()
+            },
+        );
+        day2.model_stats.insert(
+            "claude".into(),
+            ModelStats {
+                model: "claude".into(),
+                message_count: 3,
+                input_tokens: 300,
+                cost: 0.1,
+                ..ModelStats::default()
+            },
+        );
+
+        day1 += &day2;
+
+        assert_eq!(day1.model_stats.len(), 2);
+        assert_eq!(day1.model_stats["gpt-4"].message_count, 3);
+        assert_eq!(day1.model_stats["gpt-4"].input_tokens, 300);
+        assert!((day1.model_stats["gpt-4"].cost - 0.75).abs() < 0.001);
+        assert_eq!(day1.model_stats["claude"].message_count, 3);
+
+        day1 -= &day2;
+
+        assert_eq!(day1.model_stats.len(), 1); // claude removed (count = 0)
+        assert_eq!(day1.model_stats["gpt-4"].message_count, 2);
+        assert_eq!(day1.model_stats["gpt-4"].input_tokens, 200);
     }
 }

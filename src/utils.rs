@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::types::{CompactDate, ConversationMessage, DailyStats};
+use crate::types::{CompactDate, ConversationMessage, DailyStats, ModelStats};
 
 static WARNED_MESSAGES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -174,6 +174,13 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                     .stats
                     .tool_calls
                     .saturating_add(entry.stats.tool_calls);
+
+                // Aggregate per-model stats for JSON output
+                daily_stats_entry
+                    .model_stats
+                    .entry(model.to_string())
+                    .or_insert_with(|| ModelStats::new(model.to_string()))
+                    .add_message(&entry.stats);
             }
             None => {
                 // User message - no TUI-relevant stats to aggregate
