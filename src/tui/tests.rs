@@ -26,6 +26,7 @@ fn make_tool_stats(name: &str, has_data: bool) -> AgenticCodingToolStats {
                     input_tokens: 10,
                     ..TuiStats::default()
                 },
+                model_stats: BTreeMap::new(),
             },
         );
     }
