@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] - 2026-01-30
+- Fix #104 (#105) - @mike1858
+- Add a --dry-run flag for uploading (#106) - @basekevin
+- Add support for Z.AI/Zhipu AI, xAI, and Synthetic.new models (#107) - @Sewer56
+- Add per-model daily stats to the JSON output (#108) - @signadou
+
 ## [3.3.0] - 2026-01-15
 - Improved memory usage with incremental file-level updates and memory-efficient contribution caching (#99) - @Sewer56
 - Refactored CLAUDE.md to AGENTS.md with modular skill documentation (#94) - @Sewer56
