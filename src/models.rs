@@ -335,6 +335,17 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
     },
 
     // Anthropic Models
+    "claude-opus-4-6" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 5.0,
+            output_per_1m: 25.0,
+        },
+        caching: CachingSupport::Anthropic {
+            cache_write_per_1m: 6.25,  // 1.25x base input
+            cache_read_per_1m: 0.5,    // 0.1x base input
+        },
+        is_estimated: false,
+    },
     "claude-opus-4-5" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 5.0,
@@ -786,6 +797,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5-pro" => "gpt-5-pro",
 
     // Anthropic aliases
+    "claude-opus-4-6" => "claude-opus-4-6",
     "claude-opus-4-5" => "claude-opus-4-5",
     "claude-opus-4.5" => "claude-opus-4-5",
     "claude-opus-4-5-20251101" => "claude-opus-4-5",
