@@ -58,6 +58,7 @@ struct PiebaldMessage {
     id: i64,
     parent_chat_id: i64,
     role: String,
+    model: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     reasoning_tokens: Option<i64>,
@@ -90,7 +91,7 @@ fn query_chats(conn: &Connection) -> Result<Vec<PiebaldChat>> {
 /// Query all messages from the database.
 fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, parent_chat_id, role, input_tokens, output_tokens,
+        "SELECT id, parent_chat_id, role, model, input_tokens, output_tokens,
                 reasoning_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at
          FROM messages
          ORDER BY updated_at",
@@ -102,13 +103,14 @@ fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
                 id: row.get(0)?,
                 parent_chat_id: row.get(1)?,
                 role: row.get(2)?,
-                input_tokens: row.get(3)?,
-                output_tokens: row.get(4)?,
-                reasoning_tokens: row.get(5)?,
-                cache_read_tokens: row.get(6)?,
-                cache_write_tokens: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                model: row.get(3)?,
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+                reasoning_tokens: row.get(6)?,
+                cache_read_tokens: row.get(7)?,
+                cache_write_tokens: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -163,9 +165,11 @@ fn convert_messages(
                 _ => MessageRole::Assistant,
             };
 
-            // Model is only set for assistant messages
+            // Use per-message model (the model that actually generated this response),
+            // falling back to chat-level model for older messages that may lack it.
+            // Only set for assistant messages.
             let model_str = if role == MessageRole::Assistant {
-                chat.model.clone()
+                msg.model.clone().or_else(|| chat.model.clone())
             } else {
                 None
             };
