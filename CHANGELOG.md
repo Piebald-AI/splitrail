@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.3] - 2026-02-13
+- fix: strip non-standard numeric format annotations from MCP JSON schemas (#114) - @mike1858
+- feat: add pricing for Gemini 3 Flash and GPT-5.3-Codex (#115) - @mike1858
+
 ## [3.3.2] - 2026-02-05
 - Add Opus 4.6 support (#110) - @mike1858
 
