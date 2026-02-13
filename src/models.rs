@@ -325,6 +325,17 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
         is_estimated: false,
     },
+    // GPT-5.3 Codex (estimated pricing - API not yet published)
+    "gpt-5.3-codex" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.75,
+            output_per_1m: 14.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.175,
+        },
+        is_estimated: true,
+    },
     "gpt-5-pro" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 15.0,
@@ -469,6 +480,21 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
     },
 
     // Google Models
+    "gemini-3-flash-preview" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.5,
+            output_per_1m: 3.0,
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.05,
+                },
+            ],
+        },
+        is_estimated: false,
+    },
     "gemini-3-pro-preview-11-2025" => ModelInfo {
         pricing: PricingStructure::Tiered {
             tiers: &[
@@ -794,6 +820,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5.2" => "gpt-5.2",
     "gpt-5.2-pro" => "gpt-5.2-pro",
     "gpt-5.2-codex" => "gpt-5.2-codex",
+    "gpt-5.3-codex" => "gpt-5.3-codex",
     "gpt-5-pro" => "gpt-5-pro",
 
     // Anthropic aliases
@@ -831,6 +858,9 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "claude-3-haiku-20240307" => "claude-3-haiku",
 
     // Google aliases
+    "gemini-3-flash-preview" => "gemini-3-flash-preview",
+    "gemini-3-flash-preview-12-2025" => "gemini-3-flash-preview",
+    "gemini-3-flash" => "gemini-3-flash-preview",
     "gemini-3-pro-preview-11-2025" => "gemini-3-pro-preview-11-2025",
     "gemini-3-pro-preview" => "gemini-3-pro-preview-11-2025",
     "gemini-3-pro" => "gemini-3-pro-preview-11-2025",
