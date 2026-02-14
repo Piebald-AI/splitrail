@@ -215,6 +215,7 @@ pub enum Application {
     Cline,
     RooCode,
     KiloCode,
+    KiloCli,
     Copilot,
     OpenCode,
     PiAgent,
