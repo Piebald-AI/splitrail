@@ -818,6 +818,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5.1-codex-mini" => "gpt-5.1-codex-mini",
     "gpt-5.1-codex-max" => "gpt-5.1-codex-max",
     "gpt-5.2" => "gpt-5.2",
+    "gpt-5.2-2025-12-11" => "gpt-5.2",
     "gpt-5.2-pro" => "gpt-5.2-pro",
     "gpt-5.2-codex" => "gpt-5.2-codex",
     "gpt-5.3-codex" => "gpt-5.3-codex",
