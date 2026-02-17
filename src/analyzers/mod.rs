@@ -6,6 +6,7 @@ pub mod gemini_cli;
 pub mod kilo_cli;
 pub mod kilo_code;
 pub mod opencode;
+pub(crate) mod opencode_common;
 pub mod pi_agent;
 pub mod piebald;
 pub mod qwen_code;
