@@ -1203,9 +1203,11 @@ mod tests {
             model_id: Some("test-model".to_string()),
             ..Default::default()
         };
-        let mut tool_stats = Stats::default();
-        tool_stats.tool_calls = 5;
-        tool_stats.files_read = 3;
+        let tool_stats = Stats {
+            tool_calls: 5,
+            files_read: 3,
+            ..Default::default()
+        };
 
         let stats = compute_message_stats(&msg, tool_stats);
         assert_eq!(stats.tool_calls, 5);
