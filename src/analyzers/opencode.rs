@@ -44,7 +44,7 @@ impl OpenCodeAnalyzer {
         dirs::home_dir().map(|h| h.join(".local/share/opencode"))
     }
 
-    /// Check if the SQLite database exists and has the expected schema.
+    /// Check if the SQLite database file exists on disk.
     fn has_sqlite_db() -> bool {
         Self::db_path().is_some_and(|p| p.exists())
     }
@@ -415,6 +415,33 @@ fn load_sessions(session_root: &Path) -> HashMap<String, OpenCodeSession> {
     sessions
 }
 
+/// Accumulate a single tool-call part into `stats`.
+///
+/// Shared between the legacy filesystem path ([`extract_tool_stats_from_parts`])
+/// and the SQLite path ([`batch_load_tool_stats_from_db`]) so the counting logic
+/// stays in one place.
+fn accumulate_tool_stat(stats: &mut Stats, tool_name: &str, value: &OwnedValue) {
+    stats.tool_calls += 1;
+
+    match tool_name {
+        "read" => {
+            stats.files_read += 1;
+        }
+        "glob" => {
+            stats.file_searches += 1;
+            if let Some(count) = value
+                .get("state")
+                .and_then(|s| s.get("metadata"))
+                .and_then(|m| m.get("count"))
+                .and_then(|c| c.as_u64())
+            {
+                stats.files_read += count;
+            }
+        }
+        _ => {}
+    }
+}
+
 fn extract_tool_stats_from_parts(part_root: &Path, message_id: &str) -> Stats {
     let mut stats = Stats::default();
 
@@ -456,25 +483,7 @@ fn extract_tool_stats_from_parts(part_root: &Path, message_id: &str) -> Stats {
             continue;
         };
 
-        stats.tool_calls += 1;
-
-        match tool_name {
-            "read" => {
-                stats.files_read += 1;
-            }
-            "glob" => {
-                stats.file_searches += 1;
-                if let Some(count) = value
-                    .get("state")
-                    .and_then(|s| s.get("metadata"))
-                    .and_then(|m| m.get("count"))
-                    .and_then(|c| c.as_u64())
-                {
-                    stats.files_read += count;
-                }
-            }
-            _ => {}
-        }
+        accumulate_tool_stat(&mut stats, tool_name, &value);
     }
 
     stats
@@ -591,6 +600,14 @@ fn load_sessions_from_db(conn: &Connection) -> HashMap<String, DbSession> {
 /// Returns a map of `message_id → Stats` with tool call counts.
 /// Only loads parts that contain tool-type data (uses a LIKE filter
 /// to avoid deserializing non-tool parts).
+///
+/// **Assumption**: OpenCode serialises JSON with `JSON.stringify()` (no
+/// pretty-printing), so the `type` key is always immediately followed by
+/// its value without extra whitespace.  The two LIKE patterns cover the
+/// standard `"type":"tool"` form and the `"type": "tool"` variant (single
+/// space after colon).  Rows that match the LIKE but aren't actually tool
+/// parts are safely filtered out by the Rust-side `part_type != "tool"`
+/// check, so false positives are harmless.
 fn batch_load_tool_stats_from_db(conn: &Connection) -> HashMap<String, Stats> {
     let mut map: HashMap<String, Stats> = HashMap::new();
 
@@ -631,25 +648,7 @@ fn batch_load_tool_stats_from_db(conn: &Connection) -> HashMap<String, Stats> {
         };
 
         let stats = map.entry(message_id).or_default();
-        stats.tool_calls += 1;
-
-        match tool_name {
-            "read" => {
-                stats.files_read += 1;
-            }
-            "glob" => {
-                stats.file_searches += 1;
-                if let Some(count) = value
-                    .get("state")
-                    .and_then(|s| s.get("metadata"))
-                    .and_then(|m| m.get("count"))
-                    .and_then(|c| c.as_u64())
-                {
-                    stats.files_read += count;
-                }
-            }
-            _ => {}
-        }
+        accumulate_tool_stat(stats, tool_name, &value);
     }
 
     map
@@ -704,7 +703,10 @@ fn parse_sqlite_messages(db_path: &Path) -> Result<Vec<ConversationMessage>> {
 
             let session_title = session.map(|s| s.title.clone());
             let worktree = project.map(|p| p.worktree.as_str());
-            let fallback = session.map(|s| s.project_id.as_str());
+            // Use session_id as fallback (consistent with the JSON path which
+            // uses session.id — NOT project_id — so deduplication produces the
+            // same project_hash regardless of which source a message came from).
+            let fallback = Some(session_id.as_str());
 
             Some(build_conversation_message(
                 msg,
@@ -875,61 +877,14 @@ impl Analyzer for OpenCodeAnalyzer {
         crate::utils::deduplicate_by_global_hash(all)
     }
 
-    /// Override to load shared context once for the JSON path and handle SQLite.
+    /// Reuses `parse_sources_parallel` for the shared partition → parse → dedup
+    /// pipeline, then aggregates into stats.
     fn get_stats_with_sources(
         &self,
         sources: Vec<DataSource>,
     ) -> Result<crate::types::AgenticCodingToolStats> {
-        // Partition sources into JSON files and DB files.
-        let (db_sources, json_sources): (Vec<_>, Vec<_>) = sources
-            .iter()
-            .partition(|s| s.path.extension().is_some_and(|ext| ext == "db"));
+        let messages = self.parse_sources_parallel(&sources);
 
-        let mut all_messages: Vec<ConversationMessage> = Vec::new();
-
-        // --- Parse JSON sources in parallel ---
-        if !json_sources.is_empty()
-            && let Some(storage_root) = Self::storage_root()
-        {
-            let project_root = storage_root.join("project");
-            let session_root = storage_root.join("session");
-            let part_root = storage_root.join("part");
-
-            let projects = load_projects(&project_root);
-            let sessions = load_sessions(&session_root);
-
-            let json_messages: Vec<ConversationMessage> = json_sources
-                .par_iter()
-                .filter_map(|source| {
-                    let content = fs::read_to_string(&source.path).ok()?;
-                    let mut bytes = content.into_bytes();
-                    let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
-                    Some(json_to_conversation_message(
-                        msg, &sessions, &projects, &part_root,
-                    ))
-                })
-                .collect();
-
-            all_messages.extend(json_messages);
-        }
-
-        // --- Parse SQLite sources ---
-        for source in db_sources {
-            match parse_sqlite_messages(&source.path) {
-                Ok(messages) => all_messages.extend(messages),
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse OpenCode SQLite DB {:?}: {}",
-                        source.path, e
-                    );
-                }
-            }
-        }
-
-        // Deduplicate (messages may exist in both JSON and DB during migration).
-        let messages = crate::utils::deduplicate_by_global_hash(all_messages);
-
-        // Aggregate stats.
         let mut daily_stats = crate::utils::aggregate_by_date(&messages);
         daily_stats.retain(|date, _| date != "unknown");
         let num_conversations = daily_stats
@@ -1564,7 +1519,7 @@ mod tests {
                 let stats = compute_message_stats(&msg, tool_stats);
                 let session_title = session.map(|s| s.title.clone());
                 let worktree = project.map(|p| p.worktree.as_str());
-                let fallback = session.map(|s| s.project_id.as_str());
+                let fallback = Some(session_id.as_str());
 
                 Some(build_conversation_message(
                     msg,
