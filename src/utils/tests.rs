@@ -33,6 +33,174 @@ fn test_format_number_human() {
     assert_eq!(format_number(1_500_000_000_000_u64, &options), "1.5t");
 }
 
+// =============================================================================
+// FORMAT_NUMBER_FIT TESTS
+// =============================================================================
+
+#[test]
+fn test_format_number_fit_preferred_format_fits() {
+    // When the preferred format fits within max_width, use it as-is
+    let options = NumberFormatOptions {
+        use_comma: true,
+        use_human: false,
+        locale: "en".to_string(),
+        decimal_places: 1,
+    };
+
+    // "1,000" = 5 chars, fits in 12
+    assert_eq!(format_number_fit(1000_u64, &options, 12), "1,000");
+    // "1,000,000" = 9 chars, fits in 12
+    assert_eq!(format_number_fit(1_000_000_u64, &options, 12), "1,000,000");
+    // Plain small number
+    assert_eq!(format_number_fit(42_u64, &options, 12), "42");
+}
+
+#[test]
+fn test_format_number_fit_comma_overflow_falls_back_to_human() {
+    // Comma-formatted number too wide → falls back to human-readable
+    let options = NumberFormatOptions {
+        use_comma: true,
+        use_human: false,
+        locale: "en".to_string(),
+        decimal_places: 1,
+    };
+
+    // "4,294,967,295" = 13 chars, doesn't fit in 12 → fallback to "4.3b" (4 chars)
+    assert_eq!(format_number_fit(4_294_967_295_u64, &options, 12), "4.3b");
+
+    // "1,000,000,000" = 13 chars, doesn't fit in 12 → "1.0b" (4 chars)
+    assert_eq!(format_number_fit(1_000_000_000_u64, &options, 12), "1.0b");
+
+    // "100,000,000" = 11 chars, fits in 12
+    assert_eq!(
+        format_number_fit(100_000_000_u64, &options, 12),
+        "100,000,000"
+    );
+}
+
+#[test]
+fn test_format_number_fit_narrow_column_forces_compact() {
+    // Very narrow column forces most compact representation
+    let options = NumberFormatOptions {
+        use_comma: true,
+        use_human: false,
+        locale: "en".to_string(),
+        decimal_places: 2,
+    };
+
+    // In a 6-wide column: "1,000,000" (9 chars) → try human "1.00m" (5 chars) → fits!
+    assert_eq!(format_number_fit(1_000_000_u64, &options, 6), "1.00m");
+
+    // In a 4-wide column: "1.00m" (5 chars) → try "1.0m" (4 chars) → fits!
+    assert_eq!(format_number_fit(1_000_000_u64, &options, 4), "1.0m");
+
+    // In a 3-wide column: "1.0m" (4 chars) → try "1m" (2 chars) → fits!
+    assert_eq!(format_number_fit(1_000_000_u64, &options, 3), "1m");
+}
+
+#[test]
+fn test_format_number_fit_plain_digits_fallback() {
+    // When human format still too wide but plain digits fit
+    let options = NumberFormatOptions {
+        use_comma: true,
+        use_human: false,
+        locale: "en".to_string(),
+        decimal_places: 2,
+    };
+
+    // "10,000" = 6 chars; width=5. Human: "10.00k"=6 chars, "10.0k"=5 → fits!
+    assert_eq!(format_number_fit(10_000_u64, &options, 5), "10.0k");
+
+    // "1,500" = 5 chars; width=4. Human: "1.50k"=5, "1.5k"=4 → fits!
+    assert_eq!(format_number_fit(1_500_u64, &options, 4), "1.5k");
+}
+
+#[test]
+fn test_format_number_fit_u64_totals() {
+    // Large u64 totals that represent aggregated token counts
+    let options = NumberFormatOptions {
+        use_comma: true,
+        use_human: false,
+        locale: "en".to_string(),
+        decimal_places: 1,
+    };
+
+    // "48,057,854,897" = 14 chars → "48.1b" = 5 chars, fits in 12
+    assert_eq!(format_number_fit(48_057_854_897_u64, &options, 12), "48.1b");
+
+    // "193,069,111" = 11 chars, fits in 12
+    assert_eq!(
+        format_number_fit(193_069_111_u64, &options, 12),
+        "193,069,111"
+    );
+
+    // "1,245" = 5 chars, fits in 12
+    assert_eq!(format_number_fit(1_245_u64, &options, 12), "1,245");
+}
+
+#[test]
+fn test_format_number_fit_human_mode_passthrough() {
+    // When user already uses human format, it should just work
+    let options = NumberFormatOptions {
+        use_comma: false,
+        use_human: true,
+        locale: "en".to_string(),
+        decimal_places: 1,
+    };
+
+    assert_eq!(format_number_fit(1_500_000_u64, &options, 12), "1.5m");
+    assert_eq!(format_number_fit(1_500_000_000_u64, &options, 12), "1.5b");
+}
+
+#[test]
+fn test_format_number_fit_plain_mode_overflow() {
+    // Plain digits (no commas, no human) overflowing
+    let options = NumberFormatOptions {
+        use_comma: false,
+        use_human: false,
+        locale: "en".to_string(),
+        decimal_places: 1,
+    };
+
+    // "106529574" = 9 chars, fits in 12
+    assert_eq!(
+        format_number_fit(106_529_574_u64, &options, 12),
+        "106529574"
+    );
+
+    // "106529574" = 9 chars, doesn't fit in 8 → fallback to "106.5m" = 6 chars
+    assert_eq!(format_number_fit(106_529_574_u64, &options, 8), "106.5m");
+}
+
+#[test]
+fn test_format_number_fit_zero() {
+    let options = NumberFormatOptions {
+        use_comma: true,
+        use_human: false,
+        locale: "en".to_string(),
+        decimal_places: 1,
+    };
+    assert_eq!(format_number_fit(0_u64, &options, 12), "0");
+    assert_eq!(format_number_fit(0_u64, &options, 1), "0");
+}
+
+#[test]
+fn test_format_number_fit_exact_boundary() {
+    // Test values that are exactly at the column boundary
+    let options = NumberFormatOptions {
+        use_comma: false,
+        use_human: false,
+        locale: "en".to_string(),
+        decimal_places: 1,
+    };
+
+    // "99999999" = 8 chars, fits exactly in 8
+    assert_eq!(format_number_fit(99_999_999_u64, &options, 8), "99999999");
+
+    // "100000000" = 9 chars, doesn't fit in 8 → fallback "100.0m" = 6 chars
+    assert_eq!(format_number_fit(100_000_000_u64, &options, 8), "100.0m");
+}
+
 #[test]
 fn test_format_number_plain() {
     let options = NumberFormatOptions {
