@@ -506,6 +506,35 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
         is_estimated: false,
     },
+    "gemini-3.1-pro-preview" => ModelInfo {
+        pricing: PricingStructure::Tiered {
+            tiers: &[
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 2.0,
+                    output_per_1m: 12.0,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 4.0,
+                    output_per_1m: 18.0,
+                },
+            ],
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.20,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.40,
+                },
+            ],
+        },
+        is_estimated: false,
+    },
     "gemini-3-pro-preview-11-2025" => ModelInfo {
         pricing: PricingStructure::Tiered {
             tiers: &[
@@ -875,6 +904,8 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gemini-3-flash-preview" => "gemini-3-flash-preview",
     "gemini-3-flash-preview-12-2025" => "gemini-3-flash-preview",
     "gemini-3-flash" => "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview" => "gemini-3.1-pro-preview",
+    "gemini-3.1-pro" => "gemini-3.1-pro-preview",
     "gemini-3-pro-preview-11-2025" => "gemini-3-pro-preview-11-2025",
     "gemini-3-pro-preview" => "gemini-3-pro-preview-11-2025",
     "gemini-3-pro" => "gemini-3-pro-preview-11-2025",

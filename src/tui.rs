@@ -365,61 +365,59 @@ async fn run_app(
             }
 
             match key.code {
-                KeyCode::Left | KeyCode::Char('h') => {
-                    if *selected_tab > 0 {
-                        *selected_tab -= 1;
+                KeyCode::Left | KeyCode::Char('h') if *selected_tab > 0 => {
+                    *selected_tab -= 1;
 
-                        if let StatsViewMode::Session = *stats_view_mode
-                            && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some(view) = filtered_stats.get(*selected_tab)
+                    if let StatsViewMode::Session = *stats_view_mode
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(view) = filtered_stats.get(*selected_tab)
+                    {
+                        let view = view.read();
+                        let target_len = match session_day_filters
+                            .get(*selected_tab)
+                            .and_then(|f| f.as_ref())
                         {
-                            let view = view.read();
-                            let target_len = match session_day_filters
-                                .get(*selected_tab)
-                                .and_then(|f| f.as_ref())
-                            {
-                                Some(day) => view
-                                    .session_aggregates
-                                    .iter()
-                                    .filter(|s| &s.date == day)
-                                    .count(),
-                                None => view.session_aggregates.len(),
-                            };
-                            if target_len > 0 {
-                                table_state.select(Some(target_len.saturating_sub(1)));
-                            }
+                            Some(day) => view
+                                .session_aggregates
+                                .iter()
+                                .filter(|s| &s.date == day)
+                                .count(),
+                            None => view.session_aggregates.len(),
+                        };
+                        if target_len > 0 {
+                            table_state.select(Some(target_len.saturating_sub(1)));
                         }
-
-                        needs_redraw = true;
                     }
+
+                    needs_redraw = true;
                 }
-                KeyCode::Right | KeyCode::Char('l') => {
-                    if *selected_tab < filtered_stats.len().saturating_sub(1) {
-                        *selected_tab += 1;
+                KeyCode::Right | KeyCode::Char('l')
+                    if *selected_tab < filtered_stats.len().saturating_sub(1) =>
+                {
+                    *selected_tab += 1;
 
-                        if let StatsViewMode::Session = *stats_view_mode
-                            && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some(view) = filtered_stats.get(*selected_tab)
+                    if let StatsViewMode::Session = *stats_view_mode
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(view) = filtered_stats.get(*selected_tab)
+                    {
+                        let view = view.read();
+                        let target_len = match session_day_filters
+                            .get(*selected_tab)
+                            .and_then(|f| f.as_ref())
                         {
-                            let view = view.read();
-                            let target_len = match session_day_filters
-                                .get(*selected_tab)
-                                .and_then(|f| f.as_ref())
-                            {
-                                Some(day) => view
-                                    .session_aggregates
-                                    .iter()
-                                    .filter(|s| &s.date == day)
-                                    .count(),
-                                None => view.session_aggregates.len(),
-                            };
-                            if target_len > 0 {
-                                table_state.select(Some(target_len.saturating_sub(1)));
-                            }
+                            Some(day) => view
+                                .session_aggregates
+                                .iter()
+                                .filter(|s| &s.date == day)
+                                .count(),
+                            None => view.session_aggregates.len(),
+                        };
+                        if target_len > 0 {
+                            table_state.select(Some(target_len.saturating_sub(1)));
                         }
-
-                        needs_redraw = true;
                     }
+
+                    needs_redraw = true;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if let Some(table_state) = table_states.get_mut(*selected_tab)
@@ -629,43 +627,41 @@ async fn run_app(
                         needs_redraw = true;
                     }
                 }
-                KeyCode::Char('t') => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        *stats_view_mode = match *stats_view_mode {
-                            StatsViewMode::Daily => {
-                                session_day_filters[*selected_tab] = None;
-                                StatsViewMode::Session
-                            }
-                            StatsViewMode::Session => StatsViewMode::Daily,
-                        };
+                KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    *stats_view_mode = match *stats_view_mode {
+                        StatsViewMode::Daily => {
+                            session_day_filters[*selected_tab] = None;
+                            StatsViewMode::Session
+                        }
+                        StatsViewMode::Session => StatsViewMode::Daily,
+                    };
 
-                        date_jump_active = false;
-                        date_jump_buffer.clear();
+                    date_jump_active = false;
+                    date_jump_buffer.clear();
 
-                        if let StatsViewMode::Session = *stats_view_mode
-                            && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some(view) = filtered_stats.get(*selected_tab)
-                        {
-                            let v = view.read();
-                            if !v.session_aggregates.is_empty() {
-                                let target_len = session_day_filters
-                                    .get(*selected_tab)
-                                    .and_then(|f| f.as_ref())
-                                    .map(|day| {
-                                        v.session_aggregates
-                                            .iter()
-                                            .filter(|s| &s.date == day)
-                                            .count()
-                                    })
-                                    .unwrap_or_else(|| v.session_aggregates.len());
-                                if target_len > 0 {
-                                    table_state.select(Some(target_len.saturating_sub(1)));
-                                }
+                    if let StatsViewMode::Session = *stats_view_mode
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(view) = filtered_stats.get(*selected_tab)
+                    {
+                        let v = view.read();
+                        if !v.session_aggregates.is_empty() {
+                            let target_len = session_day_filters
+                                .get(*selected_tab)
+                                .and_then(|f| f.as_ref())
+                                .map(|day| {
+                                    v.session_aggregates
+                                        .iter()
+                                        .filter(|s| &s.date == day)
+                                        .count()
+                                })
+                                .unwrap_or_else(|| v.session_aggregates.len());
+                            if target_len > 0 {
+                                table_state.select(Some(target_len.saturating_sub(1)));
                             }
                         }
-
-                        needs_redraw = true;
                     }
+
+                    needs_redraw = true;
                 }
                 KeyCode::Enter => {
                     if let StatsViewMode::Daily = *stats_view_mode
