@@ -392,45 +392,45 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 session_name: effective_name,
                             });
                         }
-                        "assistant" => {
+                        "assistant"
                             // Token usage is now emitted immediately when processing token_count
                             // events. We still track assistant messages without additional stats
                             // to avoid double-counting when Codex emits separate reasoning/tool
                             // outputs.
-                            if !saw_token_usage {
-                                let model_state = session_model.clone().unwrap_or_else(|| {
-                                    let fallback = SessionModel::inferred(
-                                        DEFAULT_FALLBACK_MODEL.to_string(),
-                                    );
-                                    warn_once(format!(
-                                        "WARNING: session {file_path_str} missing model metadata; using fallback model {} for cost estimation.",
-                                        fallback.name
-                                    ));
-                                    session_model = Some(fallback.clone());
-                                    fallback
-                                });
+                            if !saw_token_usage =>
+                        {
+                            let model_state = session_model.clone().unwrap_or_else(|| {
+                                let fallback = SessionModel::inferred(
+                                    DEFAULT_FALLBACK_MODEL.to_string(),
+                                );
+                                warn_once(format!(
+                                    "WARNING: session {file_path_str} missing model metadata; using fallback model {} for cost estimation.",
+                                    fallback.name
+                                ));
+                                session_model = Some(fallback.clone());
+                                fallback
+                            });
 
-                                entries.push(ConversationMessage {
-                                    application: Application::CodexCli,
-                                    model: Some(model_state.name.clone()),
-                                    global_hash: hash_text(&format!(
-                                        "{}_{}_assistant_{}",
-                                        file_path_str,
-                                        wrapper.timestamp.to_rfc3339(),
-                                        entries.len()
-                                    )),
-                                    local_hash: None,
-                                    conversation_hash: hash_text(&file_path_str),
-                                    date: wrapper.timestamp,
-                                    project_hash: "".to_string(),
-                                    stats: Stats::default(),
-                                    role: MessageRole::Assistant,
-                                    uuid: None,
-                                    session_name: session_name
-                                        .clone()
-                                        .or_else(|| fallback_session_name.clone()),
-                                });
-                            }
+                            entries.push(ConversationMessage {
+                                application: Application::CodexCli,
+                                model: Some(model_state.name.clone()),
+                                global_hash: hash_text(&format!(
+                                    "{}_{}_assistant_{}",
+                                    file_path_str,
+                                    wrapper.timestamp.to_rfc3339(),
+                                    entries.len()
+                                )),
+                                local_hash: None,
+                                conversation_hash: hash_text(&file_path_str),
+                                date: wrapper.timestamp,
+                                project_hash: "".to_string(),
+                                stats: Stats::default(),
+                                role: MessageRole::Assistant,
+                                uuid: None,
+                                session_name: session_name
+                                    .clone()
+                                    .or_else(|| fallback_session_name.clone()),
+                            });
                         }
                         _ => {}
                     }
