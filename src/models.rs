@@ -344,6 +344,35 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::None,
         is_estimated: false,
     },
+    "gpt-5.4" => ModelInfo {
+        pricing: PricingStructure::Tiered {
+            tiers: &[
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 2.50,
+                    output_per_1m: 15.0,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 5.0,
+                    output_per_1m: 22.5,
+                },
+            ],
+        },
+        caching: CachingSupport::Google {
+            tiers: &[
+                CachingTier {
+                    max_tokens: Some(272_000),
+                    cached_input_per_1m: 0.25,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.50,
+                },
+            ],
+        },
+        is_estimated: false,
+    },
 
     // Anthropic Models
     "claude-opus-4-6" => ModelInfo {
@@ -809,6 +838,78 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::None,
         is_estimated: false,
     },
+
+    // Z.AI (Zhipu AI) - Additional Models
+    "glm-5" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.0,
+            output_per_1m: 3.2,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.2,
+        },
+        is_estimated: false,
+    },
+    "glm-5-code" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 1.2,
+            output_per_1m: 5.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.3,
+        },
+        is_estimated: false,
+    },
+    "glm-4.5-air" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.2,
+            output_per_1m: 1.1,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.03,
+        },
+        is_estimated: false,
+    },
+
+    // MiniMax Models
+    "minimax-m2.5" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.30,
+            output_per_1m: 1.10,
+        },
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
+
+    // StepFun Models
+    "step-3.5-flash" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.10,
+            output_per_1m: 0.30,
+        },
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
+
+    // Upstage Models
+    "solar-pro-3" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.15,
+            output_per_1m: 0.60,
+        },
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
+
+    // OpenRouter Models
+    "aurora-alpha" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.0,
+            output_per_1m: 0.0,
+        },
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
 };
 
 static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
@@ -943,18 +1044,87 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
 
     // Zhipu AI aliases
     "zai-glm-4.6" => "glm-4.6",
+    "glm-5-20260211" => "glm-5",
+    "glm-5-code" => "glm-5-code",
+    "glm-5-code-20260211" => "glm-5-code",
+    "glm-4.5-air-20260211" => "glm-4.5-air",
+
+    // OpenAI aliases (continued)
+    "gpt-5.4" => "gpt-5.4",
+    "gpt-5.4-2026-03-05" => "gpt-5.4",
+
+    // MiniMax aliases
+    "minimax-m2.5" => "minimax-m2.5",
+    "minimax-m2.5-20260211" => "minimax-m2.5",
+
+    // StepFun aliases
+    "step-3.5-flash" => "step-3.5-flash",
+
+    // Upstage aliases
+    "solar-pro-3" => "solar-pro-3",
+
+    // Aurora aliases
+    "aurora-alpha" => "aurora-alpha",
 };
 
-/// Get model info by any valid name (canonical or alias)
-pub fn get_model_info(model_name: &str) -> Option<&ModelInfo> {
-    // First try direct lookup in model index
-    if let Some(model_info) = MODEL_INDEX.get(model_name) {
+/// Free-tier model pricing for models accessed via OpenRouter's `:free` suffix
+/// or other free-tier naming patterns.
+static FREE_MODEL_INFO: ModelInfo = ModelInfo {
+    pricing: PricingStructure::Flat {
+        input_per_1m: 0.0,
+        output_per_1m: 0.0,
+    },
+    caching: CachingSupport::None,
+    is_estimated: false,
+};
+
+/// Look up a model name directly in the index and alias tables.
+fn lookup_model(name: &str) -> Option<&'static ModelInfo> {
+    if let Some(model_info) = MODEL_INDEX.get(name) {
         return Some(model_info);
     }
-
-    // Then try alias lookup
-    if let Some(&canonical_name) = MODEL_ALIASES.get(model_name) {
+    if let Some(&canonical_name) = MODEL_ALIASES.get(name) {
         return MODEL_INDEX.get(canonical_name);
+    }
+    None
+}
+
+/// Get model info by any valid name (canonical or alias).
+///
+/// Handles provider-prefixed model names (e.g. `minimax/minimax-m2.5`,
+/// `z-ai/glm-5`, `openrouter/aurora-alpha`) by stripping the prefix before
+/// lookup. Models with a `:free` suffix (OpenRouter free tier) always
+/// return $0 pricing.
+pub fn get_model_info(model_name: &str) -> Option<&'static ModelInfo> {
+    // Fast path: direct lookup
+    if let Some(info) = lookup_model(model_name) {
+        return Some(info);
+    }
+
+    // Normalize: strip provider prefix (everything before last `/`)
+    let after_slash = model_name
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(model_name);
+
+    // Handle `:free` suffix → always $0
+    if after_slash.strip_suffix(":free").is_some() {
+        return Some(&FREE_MODEL_INFO);
+    }
+
+    // Handle other suffixes like `:extended`
+    let base_name = after_slash.strip_suffix(":extended").unwrap_or(after_slash);
+
+    // Try the normalized name (only if different from original)
+    if base_name != model_name
+        && let Some(info) = lookup_model(base_name)
+    {
+        return Some(info);
+    }
+
+    // Also handle patterns like "minimax-m2.5-free" (without colon)
+    if base_name.strip_suffix("-free").is_some() {
+        return Some(&FREE_MODEL_INFO);
     }
 
     None
