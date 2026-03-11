@@ -266,7 +266,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
         is_estimated: false,
     },
-    // GPT-5.1 Codex models (estimated pricing - API not yet published)
+    // GPT-5.1 Codex models
     "gpt-5.1-codex" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 1.25,
@@ -325,7 +325,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
         is_estimated: false,
     },
-    // GPT-5.3 Codex (estimated pricing - API not yet published)
+    // GPT-5.3 Codex
     "gpt-5.3-codex" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 1.75,
@@ -334,7 +334,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.175,
         },
-        is_estimated: true,
+        is_estimated: false,
     },
     "gpt-5-pro" => ModelInfo {
         pricing: PricingStructure::Flat {
