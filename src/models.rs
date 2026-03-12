@@ -14,6 +14,14 @@ pub struct PricingTier {
     pub output_per_1m: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct TieredPricing {
+    /// Pricing tiers ordered from lowest threshold to highest.
+    pub tiers: &'static [PricingTier],
+    /// If true, bill the entire token count at the single matching tier's rate.
+    pub bracket_pricing: bool,
+}
+
 /// Different pricing structures supported by various model providers
 #[derive(Debug, Clone)]
 pub enum PricingStructure {
@@ -23,7 +31,7 @@ pub enum PricingStructure {
         output_per_1m: f64,
     },
     /// Tiered pricing (different costs based on token thresholds)
-    Tiered { tiers: &'static [PricingTier] },
+    Tiered(TieredPricing),
 }
 
 /// Caching tier for models with tiered cache pricing
@@ -33,6 +41,14 @@ pub struct CachingTier {
     pub max_tokens: Option<u64>,
     /// Cached input cost per 1M tokens
     pub cached_input_per_1m: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TieredCaching {
+    /// Cache tiers ordered from lowest threshold to highest.
+    pub tiers: &'static [CachingTier],
+    /// If true, bill the entire token count at the single matching tier's rate.
+    pub bracket_pricing: bool,
 }
 
 /// Different caching support models
@@ -48,7 +64,7 @@ pub enum CachingSupport {
         cache_read_per_1m: f64,
     },
     /// Google-style caching (may have tiers like input/output)
-    Google { tiers: &'static [CachingTier] },
+    Google(TieredCaching),
 }
 
 /// Complete model information with all pricing details
@@ -345,7 +361,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         is_estimated: false,
     },
     "gpt-5.4" => ModelInfo {
-        pricing: PricingStructure::Tiered {
+        pricing: PricingStructure::Tiered(TieredPricing {
             tiers: &[
                 PricingTier {
                     max_tokens: Some(272_000),
@@ -358,8 +374,9 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     output_per_1m: 22.5,
                 },
             ],
-        },
-        caching: CachingSupport::Google {
+            bracket_pricing: false,
+        }),
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: Some(272_000),
@@ -370,7 +387,8 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     cached_input_per_1m: 0.50,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
 
@@ -525,18 +543,19 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             input_per_1m: 0.5,
             output_per_1m: 3.0,
         },
-        caching: CachingSupport::Google {
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: None,
                     cached_input_per_1m: 0.05,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
     "gemini-3.1-pro-preview" => ModelInfo {
-        pricing: PricingStructure::Tiered {
+        pricing: PricingStructure::Tiered(TieredPricing {
             tiers: &[
                 PricingTier {
                     max_tokens: Some(200_000),
@@ -549,8 +568,9 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     output_per_1m: 18.0,
                 },
             ],
-        },
-        caching: CachingSupport::Google {
+            bracket_pricing: true,
+        }),
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: Some(200_000),
@@ -561,11 +581,12 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     cached_input_per_1m: 0.40,
                 },
             ],
-        },
+            bracket_pricing: true,
+        }),
         is_estimated: false,
     },
     "gemini-3-pro-preview-11-2025" => ModelInfo {
-        pricing: PricingStructure::Tiered {
+        pricing: PricingStructure::Tiered(TieredPricing {
             tiers: &[
                 PricingTier {
                     max_tokens: Some(200_000),
@@ -578,12 +599,13 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     output_per_1m: 18.0,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         caching: CachingSupport::None,
         is_estimated: false,
     },
     "gemini-2.5-pro" => ModelInfo {
-        pricing: PricingStructure::Tiered {
+        pricing: PricingStructure::Tiered(TieredPricing {
             tiers: &[
                 PricingTier {
                     max_tokens: Some(200_000),
@@ -596,8 +618,9 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     output_per_1m: 15.0,
                 },
             ],
-        },
-        caching: CachingSupport::Google {
+            bracket_pricing: false,
+        }),
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: Some(200_000),
@@ -608,7 +631,8 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     cached_input_per_1m: 0.625,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
     "gemini-2.5-flash" => ModelInfo {
@@ -616,14 +640,15 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             input_per_1m: 0.3,
             output_per_1m: 2.5,
         },
-        caching: CachingSupport::Google {
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: None,
                     cached_input_per_1m: 0.075,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
     "gemini-2.5-flash-lite" => ModelInfo {
@@ -631,14 +656,15 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             input_per_1m: 0.1,
             output_per_1m: 0.4,
         },
-        caching: CachingSupport::Google {
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: None,
                     cached_input_per_1m: 0.025,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
     "gemini-2.0-pro-exp-02-05" => ModelInfo {
@@ -646,14 +672,15 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             input_per_1m: 0.0,
             output_per_1m: 0.0,
         },
-        caching: CachingSupport::Google {
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: None,
                     cached_input_per_1m: 0.0,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
     "gemini-2.0-flash" => ModelInfo {
@@ -661,14 +688,15 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
             input_per_1m: 0.1,
             output_per_1m: 0.4,
         },
-        caching: CachingSupport::Google {
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: None,
                     cached_input_per_1m: 0.025,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
     "gemini-2.0-flash-lite" => ModelInfo {
@@ -680,7 +708,7 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         is_estimated: false,
     },
     "gemini-1.5-flash" => ModelInfo {
-        pricing: PricingStructure::Tiered {
+        pricing: PricingStructure::Tiered(TieredPricing {
             tiers: &[
                 PricingTier {
                     max_tokens: Some(128_000),
@@ -693,8 +721,9 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     output_per_1m: 0.6,
                 },
             ],
-        },
-        caching: CachingSupport::Google {
+            bracket_pricing: false,
+        }),
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: Some(128_000),
@@ -705,11 +734,12 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     cached_input_per_1m: 0.0375,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
     "gemini-1.5-flash-8b" => ModelInfo {
-        pricing: PricingStructure::Tiered {
+        pricing: PricingStructure::Tiered(TieredPricing {
             tiers: &[
                 PricingTier {
                     max_tokens: Some(128_000),
@@ -722,8 +752,9 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     output_per_1m: 0.3,
                 },
             ],
-        },
-        caching: CachingSupport::Google {
+            bracket_pricing: false,
+        }),
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: Some(128_000),
@@ -734,11 +765,12 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     cached_input_per_1m: 0.02,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
     "gemini-1.5-pro" => ModelInfo {
-        pricing: PricingStructure::Tiered {
+        pricing: PricingStructure::Tiered(TieredPricing {
             tiers: &[
                 PricingTier {
                     max_tokens: Some(128_000),
@@ -751,8 +783,9 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     output_per_1m: 10.0,
                 },
             ],
-        },
-        caching: CachingSupport::Google {
+            bracket_pricing: false,
+        }),
+        caching: CachingSupport::Google(TieredCaching {
             tiers: &[
                 CachingTier {
                     max_tokens: Some(128_000),
@@ -763,7 +796,8 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
                     cached_input_per_1m: 0.625,
                 },
             ],
-        },
+            bracket_pricing: false,
+        }),
         is_estimated: false,
     },
 
@@ -1144,7 +1178,9 @@ pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
             PricingStructure::Flat { input_per_1m, .. } => {
                 (input_tokens as f64 / 1_000_000.0) * input_per_1m
             }
-            PricingStructure::Tiered { tiers } => calculate_tiered_cost(input_tokens, tiers, true),
+            PricingStructure::Tiered(tiered) => {
+                calculate_tiered_cost(input_tokens, tiered.tiers, tiered.bracket_pricing, true)
+            }
         },
         None => {
             warn_once(format!(
@@ -1162,8 +1198,8 @@ pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
             PricingStructure::Flat { output_per_1m, .. } => {
                 (output_tokens as f64 / 1_000_000.0) * output_per_1m
             }
-            PricingStructure::Tiered { tiers } => {
-                calculate_tiered_cost(output_tokens, tiers, false)
+            PricingStructure::Tiered(tiered) => {
+                calculate_tiered_cost(output_tokens, tiered.tiers, tiered.bracket_pricing, false)
             }
         },
         None => {
@@ -1200,9 +1236,13 @@ pub fn calculate_cache_cost(
                     let read_cost = (cache_read_tokens as f64 / 1_000_000.0) * cache_read_per_1m;
                     creation_cost + read_cost
                 }
-                CachingSupport::Google { tiers } => {
+                CachingSupport::Google(tiered) => {
                     // Google only has read cost, calculate based on tiers
-                    calculate_tiered_cache_cost(cache_read_tokens, tiers)
+                    calculate_tiered_cache_cost(
+                        cache_read_tokens,
+                        tiered.tiers,
+                        tiered.bracket_pricing,
+                    )
                 }
             }
         }
@@ -1230,17 +1270,38 @@ pub fn calculate_total_cost(
     input_cost + output_cost + cache_cost
 }
 
-fn calculate_tiered_cost(tokens: u64, tiers: &[PricingTier], is_input: bool) -> f64 {
+fn calculate_tiered_cost(
+    tokens: u64,
+    tiers: &[PricingTier],
+    bracket_pricing: bool,
+    is_input: bool,
+) -> f64 {
+    if bracket_pricing {
+        if let Some(tier) = find_tier(tokens, tiers, |tier| tier.max_tokens) {
+            let rate = if is_input {
+                tier.input_per_1m
+            } else {
+                tier.output_per_1m
+            };
+
+            return (tokens as f64 / 1_000_000.0) * rate;
+        }
+
+        return 0.0;
+    }
+
     let mut total_cost = 0.0;
     let mut remaining_tokens = tokens;
+    let mut lower_bound = 0;
 
     for tier in tiers {
         if remaining_tokens == 0 {
             break;
         }
 
-        let tier_limit = tier.max_tokens.unwrap_or(u64::MAX);
-        let tokens_in_tier = remaining_tokens.min(tier_limit);
+        let upper_bound = tier.max_tokens.unwrap_or(u64::MAX);
+        let tier_width = upper_bound.saturating_sub(lower_bound);
+        let tokens_in_tier = remaining_tokens.min(tier_width);
 
         let rate = if is_input {
             tier.input_per_1m
@@ -1250,27 +1311,81 @@ fn calculate_tiered_cost(tokens: u64, tiers: &[PricingTier], is_input: bool) -> 
         total_cost += (tokens_in_tier as f64 / 1_000_000.0) * rate;
 
         remaining_tokens = remaining_tokens.saturating_sub(tokens_in_tier);
+        lower_bound = upper_bound;
     }
 
     total_cost
 }
 
-fn calculate_tiered_cache_cost(tokens: u64, tiers: &[CachingTier]) -> f64 {
+fn calculate_tiered_cache_cost(tokens: u64, tiers: &[CachingTier], bracket_pricing: bool) -> f64 {
+    if bracket_pricing {
+        if let Some(tier) = find_tier(tokens, tiers, |tier| tier.max_tokens) {
+            return (tokens as f64 / 1_000_000.0) * tier.cached_input_per_1m;
+        }
+
+        return 0.0;
+    }
+
     let mut total_cost = 0.0;
     let mut remaining_tokens = tokens;
+    let mut lower_bound = 0;
 
     for tier in tiers {
         if remaining_tokens == 0 {
             break;
         }
 
-        let tier_limit = tier.max_tokens.unwrap_or(u64::MAX);
-        let tokens_in_tier = remaining_tokens.min(tier_limit);
+        let upper_bound = tier.max_tokens.unwrap_or(u64::MAX);
+        let tier_width = upper_bound.saturating_sub(lower_bound);
+        let tokens_in_tier = remaining_tokens.min(tier_width);
 
         total_cost += (tokens_in_tier as f64 / 1_000_000.0) * tier.cached_input_per_1m;
 
         remaining_tokens = remaining_tokens.saturating_sub(tokens_in_tier);
+        lower_bound = upper_bound;
     }
 
     total_cost
+}
+
+fn find_tier<'a, T, F>(tokens: u64, tiers: &'a [T], max_tokens: F) -> Option<&'a T>
+where
+    F: Fn(&T) -> Option<u64>,
+{
+    for tier in tiers {
+        match max_tokens(tier) {
+            Some(limit) if tokens <= limit => return Some(tier),
+            None => return Some(tier),
+            _ => continue,
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{calculate_cache_cost, calculate_input_cost};
+
+    fn approx_eq(left: f64, right: f64) {
+        assert!((left - right).abs() < 1e-9, "left={left}, right={right}");
+    }
+
+    #[test]
+    fn gemini_3_1_pro_preview_uses_bracket_pricing_for_input() {
+        let cost = calculate_input_cost("gemini-3.1-pro-preview", 250_000);
+        approx_eq(cost, 1.0);
+    }
+
+    #[test]
+    fn gemini_3_1_pro_preview_uses_bracket_pricing_for_cache_reads() {
+        let cost = calculate_cache_cost("gemini-3.1-pro-preview", 0, 250_000);
+        approx_eq(cost, 0.1);
+    }
+
+    #[test]
+    fn gemini_2_5_pro_remains_progressive() {
+        let cost = calculate_input_cost("gemini-2.5-pro", 250_000);
+        approx_eq(cost, 0.375);
+    }
 }
