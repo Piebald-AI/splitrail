@@ -297,7 +297,8 @@ pub enum ContentBlock {
     },
     ToolResult {
         tool_use_id: String, // e.g. "toolu_01K7hbuwktKtti8mQb1wH2q8"
-        content: Content,    // e.g. "Found 4 files\nC:\\..."
+        #[serde(default)]
+        content: Option<Content>, // e.g. "Found 4 files\nC:\\..." — absent for empty results
     },
     Text {
         text: serde_bytes::ByteBuf,
@@ -309,6 +310,9 @@ pub enum ContentBlock {
     Image {
         source: ImageSource,
     },
+    // Catch-all for unknown/new content block types (e.g. tool_reference, redacted_thinking)
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,15 +328,25 @@ pub enum ImageSource {
     Base64 { media_type: String, data: String },
 }
 
+/// Deserializes a JSON value as u64, treating null as 0.
+/// Needed because some providers (e.g. OpenRouter) send `null` for token counts
+/// instead of omitting the field, and `#[serde(default)]` only handles missing fields.
+fn deserialize_u64_or_null<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or(0))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u64_or_null")]
     pub input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u64_or_null")]
     pub output_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u64_or_null")]
     pub cache_creation_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_u64_or_null")]
     pub cache_read_input_tokens: u64,
 }
 
@@ -411,6 +425,9 @@ enum ClaudeCodeEntry {
     QueueOperation(ClaudeCodeQueueOperationEntry),
     #[serde(rename = "progress")]
     Progress(ClaudeCodeProgressEntry),
+    // Catch-all for unknown/new entry types (e.g. last-prompt)
+    #[serde(other)]
+    Other,
 }
 
 pub mod tool_schema {
