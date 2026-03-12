@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.4] - 2026-03-11
+- fix: widen token columns and add overflow-safe formatting (#124) - mike1858
+- feat: add Gemini 3.1 Pro pricing and model aliases (#125) - mike1858
+- Fix JSONL parsing warnings and add missing model pricing (#127) - mike1858
+- feat: add Claude Sonnet 4.6 pricing (#121) - mike1858
+- Fix GPT-5.2 (#119) - mike1858
+
 ## [3.3.3] - 2026-02-13
 - fix: strip non-standard numeric format annotations from MCP JSON schemas (#114) - @mike1858
 - feat: add pricing for Gemini 3 Flash and GPT-5.3-Codex (#115) - @mike1858
