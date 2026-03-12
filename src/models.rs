@@ -1348,7 +1348,7 @@ fn calculate_tiered_cache_cost(tokens: u64, tiers: &[CachingTier], bracket_prici
     total_cost
 }
 
-fn find_tier<'a, T, F>(tokens: u64, tiers: &'a [T], max_tokens: F) -> Option<&'a T>
+fn find_tier<T, F>(tokens: u64, tiers: &[T], max_tokens: F) -> Option<&T>
 where
     F: Fn(&T) -> Option<u64>,
 {
