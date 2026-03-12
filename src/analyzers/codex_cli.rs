@@ -392,13 +392,11 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 session_name: effective_name,
                             });
                         }
-                        "assistant"
-                            // Token usage is now emitted immediately when processing token_count
-                            // events. We still track assistant messages without additional stats
-                            // to avoid double-counting when Codex emits separate reasoning/tool
-                            // outputs.
-                            if !saw_token_usage =>
-                        {
+                        // Token usage is now emitted immediately when processing token_count
+                        // events. We still track assistant messages without additional stats
+                        // to avoid double-counting when Codex emits separate reasoning/tool
+                        // outputs.
+                        "assistant" if !saw_token_usage => {
                             let model_state = session_model.clone().unwrap_or_else(|| {
                                 let fallback = SessionModel::inferred(
                                     DEFAULT_FALLBACK_MODEL.to_string(),

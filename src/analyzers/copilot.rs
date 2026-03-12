@@ -149,8 +149,8 @@ fn count_tokens(text: &str) -> u64 {
 // Recursively extract all text content from a nested JSON structure
 fn extract_text_from_value(value: &simd_json::OwnedValue, accumulated_text: &mut String) {
     match value {
+        // Only accumulate if it's a "text" field value, not metadata like URIs
         simd_json::OwnedValue::String(s)
-            // Only accumulate if it's a "text" field value, not metadata like URIs
             if !s.starts_with("vscode-")
                 && !s.starts_with("file://")
                 && !s.starts_with("ssh-remote") =>
