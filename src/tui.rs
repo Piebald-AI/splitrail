@@ -1021,15 +1021,15 @@ fn draw_daily_stats_table(
     // Find best values for highlighting
     // TODO: Let's refactor this.
 
-    let mut best_cost_cents: u32 = 0;
+    let mut best_cost_cents: u64 = 0;
     let mut best_cost_i = 0;
-    let mut best_cached_tokens: u32 = 0;
+    let mut best_cached_tokens: u64 = 0;
     let mut best_cached_tokens_i = 0;
-    let mut best_input_tokens: u32 = 0;
+    let mut best_input_tokens: u64 = 0;
     let mut best_input_tokens_i = 0;
-    let mut best_output_tokens: u32 = 0;
+    let mut best_output_tokens: u64 = 0;
     let mut best_output_tokens_i = 0;
-    let mut best_reasoning_tokens: u32 = 0;
+    let mut best_reasoning_tokens: u64 = 0;
     let mut best_reasoning_tokens_i = 0;
     let mut best_conversations = 0;
     let mut best_conversations_i = 0;
@@ -1089,11 +1089,11 @@ fn draw_daily_stats_table(
             continue;
         }
 
-        total_cost_cents += day_stats.stats.cost_cents as u64;
-        total_cached += day_stats.stats.cached_tokens as u64;
-        total_input += day_stats.stats.input_tokens as u64;
-        total_output += day_stats.stats.output_tokens as u64;
-        total_reasoning += day_stats.stats.reasoning_tokens as u64;
+        total_cost_cents += day_stats.stats.cost_cents;
+        total_cached += day_stats.stats.cached_tokens;
+        total_input += day_stats.stats.input_tokens;
+        total_output += day_stats.stats.output_tokens;
+        total_reasoning += day_stats.stats.reasoning_tokens;
         total_tool_calls += day_stats.stats.tool_calls as u64;
         total_conversations += day_stats.conversations as u64;
 
@@ -1607,11 +1607,11 @@ fn draw_session_stats_table(
             best_tool_calls_i = Some(idx);
         }
 
-        total_cost_cents += session.stats.cost_cents as u64;
-        total_input_tokens += session.stats.input_tokens as u64;
-        total_output_tokens += session.stats.output_tokens as u64;
-        total_cached_tokens += session.stats.cached_tokens as u64;
-        total_reasoning_tokens += session.stats.reasoning_tokens as u64;
+        total_cost_cents += session.stats.cost_cents;
+        total_input_tokens += session.stats.input_tokens;
+        total_output_tokens += session.stats.output_tokens;
+        total_cached_tokens += session.stats.cached_tokens;
+        total_reasoning_tokens += session.stats.reasoning_tokens;
         total_tool_calls += session.stats.tool_calls as u64;
 
         for &(model, _) in session.models.iter() {
@@ -1921,11 +1921,11 @@ fn draw_summary_stats(
                 continue;
             }
 
-            total_cost_cents += day_stats.stats.cost_cents as u64;
-            total_cached += day_stats.stats.cached_tokens as u64;
-            total_input += day_stats.stats.input_tokens as u64;
-            total_output += day_stats.stats.output_tokens as u64;
-            total_reasoning += day_stats.stats.reasoning_tokens as u64;
+            total_cost_cents += day_stats.stats.cost_cents;
+            total_cached += day_stats.stats.cached_tokens;
+            total_input += day_stats.stats.input_tokens;
+            total_output += day_stats.stats.output_tokens;
+            total_reasoning += day_stats.stats.reasoning_tokens;
             total_tool_calls += day_stats.stats.tool_calls as u64;
 
             // Collect unique days across all tools that have actual data

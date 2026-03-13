@@ -118,11 +118,11 @@ impl PackedStatsDate {
     #[inline]
     pub fn to_tui_stats(self) -> TuiStats {
         TuiStats {
-            input_tokens: self.input_tokens(),
-            output_tokens: self.output_tokens(),
-            reasoning_tokens: self.reasoning_tokens(),
-            cached_tokens: self.cached_tokens(),
-            cost_cents: self.cost_cents() as u32,
+            input_tokens: self.input_tokens() as u64,
+            output_tokens: self.output_tokens() as u64,
+            reasoning_tokens: self.reasoning_tokens() as u64,
+            cached_tokens: self.cached_tokens() as u64,
+            cost_cents: self.cost_cents() as u64,
             tool_calls: self.tool_calls() as u32,
         }
     }

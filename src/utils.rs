@@ -223,19 +223,19 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 daily_stats_entry.stats.input_tokens = daily_stats_entry
                     .stats
                     .input_tokens
-                    .saturating_add(entry.stats.input_tokens as u32);
+                    .saturating_add(entry.stats.input_tokens);
                 daily_stats_entry.stats.output_tokens = daily_stats_entry
                     .stats
                     .output_tokens
-                    .saturating_add(entry.stats.output_tokens as u32);
+                    .saturating_add(entry.stats.output_tokens);
                 daily_stats_entry.stats.reasoning_tokens = daily_stats_entry
                     .stats
                     .reasoning_tokens
-                    .saturating_add(entry.stats.reasoning_tokens as u32);
+                    .saturating_add(entry.stats.reasoning_tokens);
                 daily_stats_entry.stats.cached_tokens = daily_stats_entry
                     .stats
                     .cached_tokens
-                    .saturating_add(entry.stats.cached_tokens as u32);
+                    .saturating_add(entry.stats.cached_tokens);
                 daily_stats_entry.stats.tool_calls = daily_stats_entry
                     .stats
                     .tool_calls

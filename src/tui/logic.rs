@@ -8,12 +8,10 @@ pub use crate::types::SessionAggregate;
 /// Accumulate TUI-relevant stats from a full Stats into a TuiStats.
 /// Only copies the 6 fields displayed in the TUI.
 pub fn accumulate_tui_stats(dst: &mut TuiStats, src: &Stats) {
-    dst.input_tokens = dst.input_tokens.saturating_add(src.input_tokens as u32);
-    dst.output_tokens = dst.output_tokens.saturating_add(src.output_tokens as u32);
-    dst.reasoning_tokens = dst
-        .reasoning_tokens
-        .saturating_add(src.reasoning_tokens as u32);
-    dst.cached_tokens = dst.cached_tokens.saturating_add(src.cached_tokens as u32);
+    dst.input_tokens = dst.input_tokens.saturating_add(src.input_tokens);
+    dst.output_tokens = dst.output_tokens.saturating_add(src.output_tokens);
+    dst.reasoning_tokens = dst.reasoning_tokens.saturating_add(src.reasoning_tokens);
+    dst.cached_tokens = dst.cached_tokens.saturating_add(src.cached_tokens);
     dst.add_cost(src.cost);
     dst.tool_calls = dst.tool_calls.saturating_add(src.tool_calls);
 }

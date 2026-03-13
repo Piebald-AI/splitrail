@@ -459,11 +459,11 @@ impl std::ops::SubAssign for Stats {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TuiStats {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub reasoning_tokens: u32,
-    pub cached_tokens: u32,
-    pub cost_cents: u32, // Store as cents to avoid f32 precision issues
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cost_cents: u64, // Store as cents to avoid f32 precision issues
     pub tool_calls: u32,
 }
 
@@ -477,7 +477,7 @@ impl TuiStats {
     /// Set cost from f64 dollars
     #[inline]
     pub fn set_cost(&mut self, dollars: f64) {
-        self.cost_cents = (dollars * 100.0).round() as u32;
+        self.cost_cents = (dollars * 100.0).round() as u64;
     }
 
     /// Add cost from f64 dollars
@@ -485,18 +485,18 @@ impl TuiStats {
     pub fn add_cost(&mut self, dollars: f64) {
         self.cost_cents = self
             .cost_cents
-            .saturating_add((dollars * 100.0).round() as u32);
+            .saturating_add((dollars * 100.0).round() as u64);
     }
 }
 
 impl From<&Stats> for TuiStats {
     fn from(s: &Stats) -> Self {
         TuiStats {
-            input_tokens: s.input_tokens as u32,
-            output_tokens: s.output_tokens as u32,
-            reasoning_tokens: s.reasoning_tokens as u32,
-            cached_tokens: s.cached_tokens as u32,
-            cost_cents: (s.cost * 100.0).round() as u32,
+            input_tokens: s.input_tokens,
+            output_tokens: s.output_tokens,
+            reasoning_tokens: s.reasoning_tokens,
+            cached_tokens: s.cached_tokens,
+            cost_cents: (s.cost * 100.0).round() as u64,
             tool_calls: s.tool_calls,
         }
     }

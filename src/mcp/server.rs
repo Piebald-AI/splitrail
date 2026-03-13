@@ -349,7 +349,7 @@ impl SplitrailMcpServer {
                     .sum();
                 let total_tokens: u64 = filtered_stats
                     .iter()
-                    .map(|(_, ds)| (ds.stats.input_tokens as u64) + (ds.stats.output_tokens as u64))
+                    .map(|(_, ds)| ds.stats.input_tokens + ds.stats.output_tokens)
                     .sum();
                 let total_tool_calls: u32 = filtered_stats
                     .iter()
