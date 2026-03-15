@@ -453,7 +453,7 @@ impl std::ops::SubAssign for Stats {
     }
 }
 
-/// Lightweight stats for TUI display only (24 bytes vs 320 bytes for full Stats).
+/// Lightweight stats for TUI display only (40 bytes vs 320 bytes for full Stats).
 /// Contains only fields actually rendered in the UI.
 /// Uses u32 for memory efficiency - sufficient for per-session and per-day values.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -463,7 +463,7 @@ pub struct TuiStats {
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
     pub cached_tokens: u64,
-    pub cost_cents: u64, // Store as cents to avoid f32 precision issues
+    pub cost_cents: u32, // Store as cents to avoid f32 precision issues
     pub tool_calls: u32,
 }
 
@@ -477,7 +477,7 @@ impl TuiStats {
     /// Set cost from f64 dollars
     #[inline]
     pub fn set_cost(&mut self, dollars: f64) {
-        self.cost_cents = (dollars * 100.0).round() as u64;
+        self.cost_cents = (dollars * 100.0).round() as u32;
     }
 
     /// Add cost from f64 dollars
@@ -485,7 +485,7 @@ impl TuiStats {
     pub fn add_cost(&mut self, dollars: f64) {
         self.cost_cents = self
             .cost_cents
-            .saturating_add((dollars * 100.0).round() as u64);
+            .saturating_add((dollars * 100.0).round() as u32);
     }
 }
 
@@ -496,7 +496,7 @@ impl From<&Stats> for TuiStats {
             output_tokens: s.output_tokens,
             reasoning_tokens: s.reasoning_tokens,
             cached_tokens: s.cached_tokens,
-            cost_cents: (s.cost * 100.0).round() as u64,
+            cost_cents: (s.cost * 100.0).round() as u32,
             tool_calls: s.tool_calls,
         }
     }

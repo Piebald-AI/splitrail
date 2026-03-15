@@ -1021,7 +1021,7 @@ fn draw_daily_stats_table(
     // Find best values for highlighting
     // TODO: Let's refactor this.
 
-    let mut best_cost_cents: u64 = 0;
+    let mut best_cost_cents: u32 = 0;
     let mut best_cost_i = 0;
     let mut best_cached_tokens: u64 = 0;
     let mut best_cached_tokens_i = 0;
@@ -1089,7 +1089,7 @@ fn draw_daily_stats_table(
             continue;
         }
 
-        total_cost_cents += day_stats.stats.cost_cents;
+        total_cost_cents += day_stats.stats.cost_cents as u64;
         total_cached += day_stats.stats.cached_tokens;
         total_input += day_stats.stats.input_tokens;
         total_output += day_stats.stats.output_tokens;
@@ -1607,7 +1607,7 @@ fn draw_session_stats_table(
             best_tool_calls_i = Some(idx);
         }
 
-        total_cost_cents += session.stats.cost_cents;
+        total_cost_cents += session.stats.cost_cents as u64;
         total_input_tokens += session.stats.input_tokens;
         total_output_tokens += session.stats.output_tokens;
         total_cached_tokens += session.stats.cached_tokens;
@@ -1921,7 +1921,7 @@ fn draw_summary_stats(
                 continue;
             }
 
-            total_cost_cents += day_stats.stats.cost_cents;
+            total_cost_cents += day_stats.stats.cost_cents as u64;
             total_cached += day_stats.stats.cached_tokens;
             total_input += day_stats.stats.input_tokens;
             total_output += day_stats.stats.output_tokens;
