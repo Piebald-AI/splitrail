@@ -6,24 +6,24 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
-/// Analyzer for [OpenCode](https://opencode.ai) — a terminal-based AI coding
-/// agent.  Delegates to the shared [`OpenCodeFormatAnalyzer`] with
-/// OpenCode-specific paths and identity.
-pub struct OpenCodeAnalyzer(OpenCodeFormatAnalyzer);
+/// Analyzer for [Kilo Code CLI](https://kilocode.ai) — a terminal-based AI
+/// coding agent forked from OpenCode.  Delegates to the shared
+/// [`OpenCodeFormatAnalyzer`] with Kilo-specific paths and identity.
+pub struct KiloCliAnalyzer(OpenCodeFormatAnalyzer);
 
-impl OpenCodeAnalyzer {
+impl KiloCliAnalyzer {
     pub fn new() -> Self {
         Self(OpenCodeFormatAnalyzer::new(OpenCodeFormatConfig {
-            display_name: "OpenCode",
-            application: Application::OpenCode,
-            hash_prefix: "opencode",
-            storage_subdir: "opencode",
+            display_name: "Kilo CLI",
+            application: Application::KiloCli,
+            hash_prefix: "kilo_cli",
+            storage_subdir: "kilo",
         }))
     }
 }
 
 #[async_trait]
-impl Analyzer for OpenCodeAnalyzer {
+impl Analyzer for KiloCliAnalyzer {
     fn display_name(&self) -> &'static str {
         self.0.display_name()
     }
