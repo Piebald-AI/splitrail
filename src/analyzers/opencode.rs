@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use glob::glob;
 use rayon::prelude::*;
+use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use simd_json::OwnedValue;
 use simd_json::prelude::*;
@@ -23,10 +24,52 @@ impl OpenCodeAnalyzer {
         Self
     }
 
+    /// `~/.local/share/opencode/storage/message` — legacy JSON message files.
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".local/share/opencode/storage/message"))
     }
+
+    /// `~/.local/share/opencode/storage` — legacy JSON storage root.
+    fn storage_root() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".local/share/opencode/storage"))
+    }
+
+    /// `~/.local/share/opencode/opencode.db` — new SQLite database.
+    fn db_path() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".local/share/opencode/opencode.db"))
+    }
+
+    /// `~/.local/share/opencode` — parent directory (for watching the DB).
+    fn app_dir() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".local/share/opencode"))
+    }
+
+    /// Check if the SQLite database file exists on disk.
+    fn has_sqlite_db() -> bool {
+        Self::db_path().is_some_and(|p| p.exists())
+    }
+
+    /// Check if the legacy JSON message directory has any files.
+    fn has_json_messages() -> bool {
+        Self::data_dir()
+            .filter(|d| d.is_dir())
+            .into_iter()
+            .flat_map(|message_dir| {
+                WalkDir::new(message_dir)
+                    .min_depth(2)
+                    .max_depth(2)
+                    .into_iter()
+            })
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "json")
+            })
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Serde types — mirrors the on-disk JSON schema produced by OpenCode
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -39,7 +82,8 @@ struct OpenCodeProjectTime {
 struct OpenCodeProject {
     id: String,
     worktree: String,
-    vcs: String,
+    #[serde(default)]
+    vcs: Option<String>,
     time: OpenCodeProjectTime,
 }
 
@@ -68,9 +112,11 @@ struct OpenCodeSession {
     #[serde(rename = "projectID")]
     project_id: String,
     directory: String,
-    title: String,
+    #[serde(default)]
+    title: Option<String>,
     time: OpenCodeSessionTime,
-    summary: OpenCodeSessionSummary,
+    #[serde(default)]
+    summary: Option<OpenCodeSessionSummary>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -141,12 +187,20 @@ struct OpenCodeMessagePath {
     root: Option<String>,
 }
 
+/// Represents a single message from the OpenCode on-disk format.
+///
+/// Works for both the legacy JSON files (where `id`/`sessionID` are in the JSON)
+/// and the new SQLite database (where they come from DB columns and the `data`
+/// JSON blob omits them).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
 struct OpenCodeMessage {
+    #[serde(default)]
     id: String,
     #[serde(rename = "sessionID")]
+    #[serde(default)]
     session_id: String,
+    #[serde(default)]
     role: String,
     #[serde(default)]
     time: OpenCodeMessageTime,
@@ -193,12 +247,105 @@ impl OpenCodeMessage {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
 fn ms_to_datetime(ms: Option<i64>) -> DateTime<Utc> {
     let ms = ms.unwrap_or(0);
     Utc.timestamp_millis_opt(ms)
         .single()
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap())
 }
+
+/// Compute stats from an [`OpenCodeMessage`], optionally merging in pre-loaded
+/// tool-call stats (from parts data).
+fn compute_message_stats(msg: &OpenCodeMessage, tool_stats: Stats) -> Stats {
+    if msg.role != "assistant" {
+        return Stats::default();
+    }
+
+    let mut s = tool_stats;
+
+    if let Some(tokens) = &msg.tokens {
+        s.input_tokens = tokens.input;
+        s.output_tokens = tokens.output;
+        s.reasoning_tokens = tokens.reasoning;
+        s.cache_creation_tokens = tokens.cache.write;
+        s.cache_read_tokens = tokens.cache.read;
+        s.cached_tokens = tokens.cache.read;
+
+        if let Some(model_name) = msg.model_name() {
+            s.cost = calculate_total_cost(
+                &model_name,
+                s.input_tokens,
+                s.output_tokens,
+                s.cache_creation_tokens,
+                s.cache_read_tokens,
+            );
+        }
+    }
+
+    if let Some(cost) = msg.cost
+        && cost > 0.0
+    {
+        s.cost = cost;
+    }
+
+    // Ensure tool_calls is at least 1 when a model call happened
+    if s.tool_calls == 0
+        && let Some(tokens) = &msg.tokens
+        && (tokens.input > 0 || tokens.output > 0)
+    {
+        s.tool_calls = 1;
+    }
+
+    s
+}
+
+/// Build a [`ConversationMessage`] from an [`OpenCodeMessage`] and pre-computed stats.
+fn build_conversation_message(
+    msg: OpenCodeMessage,
+    session_title: Option<String>,
+    project_worktree: Option<&str>,
+    fallback_project_hash: Option<&str>,
+    stats: Stats,
+) -> ConversationMessage {
+    let project_hash = if let Some(worktree) = project_worktree {
+        hash_text(worktree)
+    } else if let Some(fallback) = fallback_project_hash {
+        hash_text(fallback)
+    } else {
+        hash_text(&msg.session_id)
+    };
+
+    let conversation_hash = hash_text(&msg.session_id);
+    let local_hash = Some(msg.id.clone());
+    let global_hash = hash_text(&format!("opencode_{}_{}", msg.session_id, msg.id));
+    let date = ms_to_datetime(msg.time.created);
+
+    ConversationMessage {
+        application: Application::OpenCode,
+        date,
+        project_hash,
+        conversation_hash,
+        local_hash,
+        global_hash,
+        model: msg.model_name(),
+        stats,
+        role: if msg.role == "user" {
+            MessageRole::User
+        } else {
+            MessageRole::Assistant
+        },
+        uuid: None,
+        session_name: session_title,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy JSON file helpers
+// ---------------------------------------------------------------------------
 
 fn load_projects(project_root: &Path) -> HashMap<String, OpenCodeProject> {
     let mut projects = HashMap::new();
@@ -268,6 +415,33 @@ fn load_sessions(session_root: &Path) -> HashMap<String, OpenCodeSession> {
     sessions
 }
 
+/// Accumulate a single tool-call part into `stats`.
+///
+/// Shared between the legacy filesystem path ([`extract_tool_stats_from_parts`])
+/// and the SQLite path ([`batch_load_tool_stats_from_db`]) so the counting logic
+/// stays in one place.
+fn accumulate_tool_stat(stats: &mut Stats, tool_name: &str, value: &OwnedValue) {
+    stats.tool_calls += 1;
+
+    match tool_name {
+        "read" => {
+            stats.files_read += 1;
+        }
+        "glob" => {
+            stats.file_searches += 1;
+            if let Some(count) = value
+                .get("state")
+                .and_then(|s| s.get("metadata"))
+                .and_then(|m| m.get("count"))
+                .and_then(|c| c.as_u64())
+            {
+                stats.files_read += count;
+            }
+        }
+        _ => {}
+    }
+}
+
 fn extract_tool_stats_from_parts(part_root: &Path, message_id: &str) -> Stats {
     let mut stats = Stats::default();
 
@@ -309,31 +483,15 @@ fn extract_tool_stats_from_parts(part_root: &Path, message_id: &str) -> Stats {
             continue;
         };
 
-        stats.tool_calls += 1;
-
-        match tool_name {
-            "read" => {
-                stats.files_read += 1;
-            }
-            "glob" => {
-                stats.file_searches += 1;
-                if let Some(count) = value
-                    .get("state")
-                    .and_then(|s| s.get("metadata"))
-                    .and_then(|m| m.get("count"))
-                    .and_then(|c| c.as_u64())
-                {
-                    stats.files_read += count;
-                }
-            }
-            _ => {}
-        }
+        accumulate_tool_stat(&mut stats, tool_name, &value);
     }
 
     stats
 }
 
-fn to_conversation_message(
+/// Convert a legacy JSON message to a [`ConversationMessage`], reading parts
+/// from the filesystem.
+fn json_to_conversation_message(
     msg: OpenCodeMessage,
     sessions: &HashMap<String, OpenCodeSession>,
     projects: &HashMap<String, OpenCodeProject>,
@@ -342,82 +500,230 @@ fn to_conversation_message(
     let session = sessions.get(&msg.session_id);
     let project = session.and_then(|s| projects.get(&s.project_id));
 
-    let project_hash = if let Some(project) = project {
-        hash_text(&project.worktree)
-    } else if let Some(session) = session {
-        hash_text(&session.id)
-    } else {
-        hash_text(&msg.session_id)
-    };
-
-    let conversation_hash = hash_text(&msg.session_id);
-
-    let local_hash = Some(msg.id.clone());
-    let global_hash = hash_text(&format!("opencode_{}_{}", msg.session_id, msg.id));
-
-    let date = ms_to_datetime(msg.time.created);
-
-    let mut stats = if msg.role == "assistant" {
-        let mut s = extract_tool_stats_from_parts(part_root, &msg.id);
-
-        if let Some(tokens) = &msg.tokens {
-            s.input_tokens = tokens.input;
-            s.output_tokens = tokens.output;
-            s.reasoning_tokens = tokens.reasoning;
-            s.cache_creation_tokens = tokens.cache.write;
-            s.cache_read_tokens = tokens.cache.read;
-            s.cached_tokens = tokens.cache.read;
-
-            if let Some(model_name) = msg.model_name() {
-                s.cost = calculate_total_cost(
-                    &model_name,
-                    s.input_tokens,
-                    s.output_tokens,
-                    s.cache_creation_tokens,
-                    s.cache_read_tokens,
-                );
-            }
-        }
-
-        if let Some(cost) = msg.cost {
-            // Prefer explicit cost from OpenCode if present
-            if cost > 0.0 {
-                s.cost = cost;
-            }
-        }
-
-        s
+    let tool_stats = if msg.role == "assistant" {
+        extract_tool_stats_from_parts(part_root, &msg.id)
     } else {
         Stats::default()
     };
 
-    if msg.role == "assistant"
-        && stats.tool_calls == 0
-        && let Some(tokens) = &msg.tokens
-        && (tokens.input > 0 || tokens.output > 0)
-    {
-        // Ensure tool_calls is at least 1 when we had a model call
-        stats.tool_calls = 1;
+    let stats = compute_message_stats(&msg, tool_stats);
+
+    let session_title = session.and_then(|s| s.title.clone());
+    let worktree = project.map(|p| p.worktree.as_str());
+    let fallback = session.map(|s| s.id.as_str());
+
+    build_conversation_message(msg, session_title, worktree, fallback, stats)
+}
+
+// ---------------------------------------------------------------------------
+// SQLite database helpers
+// ---------------------------------------------------------------------------
+
+/// Open the OpenCode SQLite database in read-only mode with WAL support.
+fn open_db(path: &Path) -> Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(conn)
+}
+
+/// Lightweight project data from the `project` table.
+struct DbProject {
+    worktree: String,
+}
+
+/// Lightweight session data from the `session` table.
+struct DbSession {
+    project_id: String,
+    title: String,
+}
+
+/// Load projects from the SQLite `project` table.
+fn load_projects_from_db(conn: &Connection) -> HashMap<String, DbProject> {
+    let mut map = HashMap::new();
+
+    let Ok(mut stmt) = conn.prepare("SELECT id, worktree FROM project") else {
+        return map;
+    };
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                DbProject {
+                    worktree: row.get(1)?,
+                },
+            ))
+        })
+        .ok();
+
+    if let Some(rows) = rows {
+        for row in rows.flatten() {
+            map.insert(row.0, row.1);
+        }
     }
 
-    ConversationMessage {
-        application: Application::OpenCode,
-        date,
-        project_hash,
-        conversation_hash,
-        local_hash,
-        global_hash,
-        model: msg.model_name(),
-        stats,
-        role: if msg.role == "user" {
-            MessageRole::User
-        } else {
-            MessageRole::Assistant
-        },
-        uuid: None,
-        session_name: session.map(|s| s.title.clone()),
-    }
+    map
 }
+
+/// Load sessions from the SQLite `session` table.
+fn load_sessions_from_db(conn: &Connection) -> HashMap<String, DbSession> {
+    let mut map = HashMap::new();
+
+    let Ok(mut stmt) = conn.prepare("SELECT id, project_id, title FROM session") else {
+        return map;
+    };
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                DbSession {
+                    project_id: row.get(1)?,
+                    title: row.get(2)?,
+                },
+            ))
+        })
+        .ok();
+
+    if let Some(rows) = rows {
+        for row in rows.flatten() {
+            map.insert(row.0, row.1);
+        }
+    }
+
+    map
+}
+
+/// Batch-load tool call stats from the SQLite `part` table.
+///
+/// Returns a map of `message_id → Stats` with tool call counts.
+/// Only loads parts that contain tool-type data (uses a LIKE filter
+/// to avoid deserializing non-tool parts).
+///
+/// **Assumption**: OpenCode serialises JSON with `JSON.stringify()` (no
+/// pretty-printing), so the `type` key is always immediately followed by
+/// its value without extra whitespace.  The two LIKE patterns cover the
+/// standard `"type":"tool"` form and the `"type": "tool"` variant (single
+/// space after colon).  Rows that match the LIKE but aren't actually tool
+/// parts are safely filtered out by the Rust-side `part_type != "tool"`
+/// check, so false positives are harmless.
+fn batch_load_tool_stats_from_db(conn: &Connection) -> HashMap<String, Stats> {
+    let mut map: HashMap<String, Stats> = HashMap::new();
+
+    // Use LIKE to pre-filter for tool-type parts — avoids deserializing text,
+    // reasoning, step-start, etc. parts which are typically much larger.
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT message_id, data FROM part WHERE data LIKE '%\"type\":\"tool\"%' OR data LIKE '%\"type\": \"tool\"%'",
+    ) else {
+        return map;
+    };
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .ok();
+
+    let Some(rows) = rows else { return map };
+
+    for row in rows.flatten() {
+        let (message_id, data) = row;
+
+        let mut bytes = data.into_bytes();
+        let Ok(value) = simd_json::from_slice::<OwnedValue>(&mut bytes) else {
+            continue;
+        };
+
+        let Some(part_type) = value.get("type").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        if part_type != "tool" {
+            continue;
+        }
+
+        let Some(tool_name) = value.get("tool").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let stats = map.entry(message_id).or_default();
+        accumulate_tool_stat(stats, tool_name, &value);
+    }
+
+    map
+}
+
+/// Parse all messages from the OpenCode SQLite database.
+///
+/// Reads from the `message`, `session`, `project`, and `part` tables.
+/// The `message.data` column is a JSON blob matching [`OpenCodeMessage`]
+/// (minus `id` and `sessionID`, which come from the row columns).
+fn parse_sqlite_messages(db_path: &Path) -> Result<Vec<ConversationMessage>> {
+    let conn = open_db(db_path)?;
+
+    let db_projects = load_projects_from_db(&conn);
+    let db_sessions = load_sessions_from_db(&conn);
+    let tool_stats_map = batch_load_tool_stats_from_db(&conn);
+
+    let mut stmt = conn.prepare("SELECT id, session_id, time_created, data FROM message")?;
+
+    let messages: Vec<ConversationMessage> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .filter_map(|(id, session_id, time_created, data)| {
+            // Parse the JSON data blob into an OpenCodeMessage.
+            // The `id` and `sessionID` fields are not in the blob — inject
+            // them from the DB columns after deserialization.
+            let mut bytes = data.into_bytes();
+            let mut msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
+
+            msg.id = id.clone();
+            msg.session_id = session_id.clone();
+
+            // Use DB column timestamp as the canonical creation time, falling
+            // back to whatever the JSON blob contained.
+            if msg.time.created.is_none() || msg.time.created == Some(0) {
+                msg.time.created = Some(time_created);
+            }
+
+            // Resolve session/project metadata
+            let session = db_sessions.get(&session_id);
+            let project = session.and_then(|s| db_projects.get(&s.project_id));
+
+            let tool_stats = tool_stats_map.get(&id).cloned().unwrap_or_default();
+            let stats = compute_message_stats(&msg, tool_stats);
+
+            let session_title = session.map(|s| s.title.clone());
+            let worktree = project.map(|p| p.worktree.as_str());
+            // Use session_id as fallback (consistent with the JSON path which
+            // uses session.id — NOT project_id — so deduplication produces the
+            // same project_hash regardless of which source a message came from).
+            let fallback = Some(session_id.as_str());
+
+            Some(build_conversation_message(
+                msg,
+                session_title,
+                worktree,
+                fallback,
+                stats,
+            ))
+        })
+        .collect();
+
+    Ok(messages)
+}
+
+// ---------------------------------------------------------------------------
+// Analyzer trait implementation
+// ---------------------------------------------------------------------------
 
 #[async_trait]
 impl Analyzer for OpenCodeAnalyzer {
@@ -430,57 +736,60 @@ impl Analyzer for OpenCodeAnalyzer {
 
         if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
-            // Message JSON files – presence of at least one indicates OpenCode usage.
+            // Legacy JSON message files.
             patterns.push(format!(
                 "{home_str}/.local/share/opencode/storage/message/*/*.json"
             ));
+            // New SQLite database.
+            patterns.push(format!("{home_str}/.local/share/opencode/opencode.db"));
         }
 
         patterns
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::data_dir()
-            .filter(|d| d.is_dir())
-            .into_iter()
-            .flat_map(|message_dir| {
-                WalkDir::new(message_dir)
-                    .min_depth(2)
-                    .max_depth(2)
-                    .into_iter()
-            })
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "json")
-            })
-            .map(|e| DataSource {
-                path: e.into_path(),
-            })
-            .collect();
+        let mut sources: Vec<DataSource> = Vec::new();
+
+        // Discover legacy JSON message files.
+        if let Some(data_dir) = Self::data_dir()
+            && data_dir.is_dir()
+        {
+            let json_sources = WalkDir::new(data_dir)
+                .min_depth(2)
+                .max_depth(2)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "json")
+                })
+                .map(|e| DataSource {
+                    path: e.into_path(),
+                });
+            sources.extend(json_sources);
+        }
+
+        // Discover the SQLite database.
+        if let Some(db) = Self::db_path()
+            && db.exists()
+        {
+            sources.push(DataSource { path: db });
+        }
 
         Ok(sources)
     }
 
     fn is_available(&self) -> bool {
-        Self::data_dir()
-            .filter(|d| d.is_dir())
-            .into_iter()
-            .flat_map(|message_dir| {
-                WalkDir::new(message_dir)
-                    .min_depth(2)
-                    .max_depth(2)
-                    .into_iter()
-            })
-            .filter_map(|e| e.ok())
-            .any(|e| {
-                e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "json")
-            })
+        Self::has_sqlite_db() || Self::has_json_messages()
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
-        // For single-file parsing (incremental updates), load context fresh
-        let home_dir = dirs::home_dir().context("Could not find home directory")?;
-        let storage_root = home_dir.join(".local/share/opencode/storage");
+        // SQLite database — return all messages at once.
+        if source.path.extension().is_some_and(|ext| ext == "db") {
+            return parse_sqlite_messages(&source.path);
+        }
+
+        // Legacy JSON message file — load context and parse single file.
+        let storage_root = Self::storage_root().context("Could not determine storage root")?;
         let project_root = storage_root.join("project");
         let session_root = storage_root.join("session");
         let part_root = storage_root.join("part");
@@ -492,82 +801,90 @@ impl Analyzer for OpenCodeAnalyzer {
         let mut bytes = content.into_bytes();
         let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes)?;
 
-        Ok(vec![to_conversation_message(
+        Ok(vec![json_to_conversation_message(
             msg, &sessions, &projects, &part_root,
         )])
     }
 
-    // Load shared context once, then process all files in parallel.
-    // Returns messages grouped by source path for file contribution caching.
+    /// Load shared context once, then process all JSON files in parallel.
+    /// SQLite sources are handled separately since the DB query is already fast.
     fn parse_sources_parallel_with_paths(
         &self,
         sources: &[DataSource],
     ) -> Vec<(PathBuf, Vec<ConversationMessage>)> {
-        let Some(home_dir) = dirs::home_dir() else {
-            eprintln!("Could not find home directory for OpenCode");
-            return Vec::new();
-        };
+        // Partition sources into JSON files and DB files.
+        let (db_sources, json_sources): (Vec<_>, Vec<_>) = sources
+            .iter()
+            .partition(|s| s.path.extension().is_some_and(|ext| ext == "db"));
 
-        let storage_root = home_dir.join(".local/share/opencode/storage");
-        let project_root = storage_root.join("project");
-        let session_root = storage_root.join("session");
-        let part_root = storage_root.join("part");
+        let mut results: Vec<(PathBuf, Vec<ConversationMessage>)> = Vec::new();
 
-        // Load shared context once
-        let projects = load_projects(&project_root);
-        let sessions = load_sessions(&session_root);
+        // --- JSON sources: load shared context once, parse in parallel ---
+        if !json_sources.is_empty()
+            && let Some(storage_root) = Self::storage_root()
+        {
+            let project_root = storage_root.join("project");
+            let session_root = storage_root.join("session");
+            let part_root = storage_root.join("part");
 
-        // Read, parse, and convert all files in parallel
-        // Each source file produces exactly one message
-        sources
-            .par_iter()
-            .filter_map(|source| {
-                let content = fs::read_to_string(&source.path).ok()?;
-                let mut bytes = content.into_bytes();
-                let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
-                let conversation_msg =
-                    to_conversation_message(msg, &sessions, &projects, &part_root);
-                Some((source.path.clone(), vec![conversation_msg]))
-            })
-            .collect()
+            let projects = load_projects(&project_root);
+            let sessions = load_sessions(&session_root);
+
+            let json_results: Vec<_> = json_sources
+                .par_iter()
+                .filter_map(|source| {
+                    let content = fs::read_to_string(&source.path).ok()?;
+                    let mut bytes = content.into_bytes();
+                    let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
+                    let conversation_msg =
+                        json_to_conversation_message(msg, &sessions, &projects, &part_root);
+                    Some((source.path.clone(), vec![conversation_msg]))
+                })
+                .collect();
+
+            results.extend(json_results);
+        }
+
+        // --- SQLite sources: parse each DB ---
+        for source in db_sources {
+            match parse_sqlite_messages(&source.path) {
+                Ok(messages) if !messages.is_empty() => {
+                    results.push((source.path.clone(), messages));
+                }
+                Ok(_) => {} // empty DB
+                Err(e) => {
+                    eprintln!(
+                        "Failed to parse OpenCode SQLite DB {:?}: {}",
+                        source.path, e
+                    );
+                }
+            }
+        }
+
+        results
     }
 
-    // OpenCode doesn't need deduplication - each message file is unique.
+    /// Parse all sources and deduplicate.
+    ///
+    /// Deduplication is necessary because messages may exist in both the legacy
+    /// JSON files and the SQLite database during the migration period.
     fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
-        self.parse_sources_parallel_with_paths(sources)
+        let all: Vec<ConversationMessage> = self
+            .parse_sources_parallel_with_paths(sources)
             .into_iter()
             .flat_map(|(_, msgs)| msgs)
-            .collect()
+            .collect();
+        crate::utils::deduplicate_by_global_hash(all)
     }
 
-    // Override get_stats_with_sources to load shared context once for efficiency
+    /// Reuses `parse_sources_parallel` for the shared partition → parse → dedup
+    /// pipeline, then aggregates into stats.
     fn get_stats_with_sources(
         &self,
         sources: Vec<DataSource>,
     ) -> Result<crate::types::AgenticCodingToolStats> {
-        let home_dir = dirs::home_dir().context("Could not find home directory")?;
-        let storage_root = home_dir.join(".local/share/opencode/storage");
-        let project_root = storage_root.join("project");
-        let session_root = storage_root.join("session");
-        let part_root = storage_root.join("part");
+        let messages = self.parse_sources_parallel(&sources);
 
-        let projects = load_projects(&project_root);
-        let sessions = load_sessions(&session_root);
-
-        // Parse all files in parallel
-        let messages: Vec<ConversationMessage> = sources
-            .par_iter()
-            .filter_map(|source| {
-                let content = fs::read_to_string(&source.path).ok()?;
-                let mut bytes = content.into_bytes();
-                let msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
-                Some(to_conversation_message(
-                    msg, &sessions, &projects, &part_root,
-                ))
-            })
-            .collect();
-
-        // Aggregate stats
         let mut daily_stats = crate::utils::aggregate_by_date(&messages);
         daily_stats.retain(|date, _| date != "unknown");
         let num_conversations = daily_stats
@@ -584,18 +901,35 @@ impl Analyzer for OpenCodeAnalyzer {
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
-        Self::data_dir()
-            .filter(|d| d.is_dir())
-            .into_iter()
-            .collect()
+        let mut dirs = Vec::new();
+
+        // Watch the legacy JSON message directory.
+        if let Some(data_dir) = Self::data_dir()
+            && data_dir.is_dir()
+        {
+            dirs.push(data_dir);
+        }
+
+        // Watch the parent app directory for SQLite DB changes.
+        if let Some(app_dir) = Self::app_dir()
+            && app_dir.is_dir()
+        {
+            dirs.push(app_dir);
+        }
+
+        dirs
     }
 
     fn is_valid_data_path(&self, path: &Path) -> bool {
-        // Must be a file with .json extension
+        // Accept the SQLite database file.
+        if path.is_file() && path.file_name().is_some_and(|n| n == "opencode.db") {
+            return true;
+        }
+
+        // Accept legacy JSON message files at depth 2 from the data_dir.
         if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
             return false;
         }
-        // Must be at depth 2 from data_dir (session_id/message_id.json)
         if let Some(data_dir) = Self::data_dir()
             && let Ok(relative) = path.strip_prefix(&data_dir)
         {
@@ -604,15 +938,28 @@ impl Analyzer for OpenCodeAnalyzer {
         false
     }
 
-    // Each OpenCode message file contains exactly one message
+    /// When a SQLite database is present it contains many messages in a single
+    /// file, so [`MultiSession`](ContributionStrategy::MultiSession) is the
+    /// correct caching strategy. When only legacy JSON files exist, each file
+    /// maps to a single message.
     fn contribution_strategy(&self) -> ContributionStrategy {
-        ContributionStrategy::SingleMessage
+        if Self::has_sqlite_db() {
+            ContributionStrategy::MultiSession
+        } else {
+            ContributionStrategy::SingleMessage
+        }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- JSON message parsing tests ----
 
     // The `summary` field in OpenCode messages has 3 valid states observed in real data:
     //
@@ -620,7 +967,6 @@ mod tests {
     // 2. Boolean - `"summary": true` (indicates a summary message; `false` not observed)
     // 3. Object - `"summary": { "title": "...", "body": "...", "diffs": [...] }`
     //
-    // Test data below is from real OpenCode message files, shortened for brevity.
     // See: https://github.com/Piebald-AI/splitrail/issues/82
 
     #[test]
@@ -677,5 +1023,542 @@ mod tests {
         let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).expect("should parse");
         assert_eq!(msg.id, "msg_929a16848001TDUN2qM31WbRp6");
         assert!(msg.summary.is_none());
+    }
+
+    // ---- SQLite data blob parsing tests ----
+    //
+    // The `message.data` JSON blob in the SQLite DB omits `id` and `sessionID`
+    // (those come from DB columns). These tests verify we can parse such blobs.
+
+    #[test]
+    fn test_parse_sqlite_assistant_data_blob() {
+        // Data blob as stored in `message.data` (no id/sessionID fields).
+        let json = r#"{
+            "role": "assistant",
+            "time": { "created": 1771083156415, "completed": 1771083174019 },
+            "parentID": "msg_parent",
+            "modelID": "claude-sonnet-4-20250514",
+            "providerID": "anthropic",
+            "agent": "coder",
+            "cost": 0.0123,
+            "tokens": {
+                "total": 5000,
+                "input": 3000,
+                "output": 1500,
+                "reasoning": 200,
+                "cache": { "read": 2000, "write": 1000 }
+            },
+            "finish": "stop"
+        }"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let mut msg: OpenCodeMessage =
+            simd_json::from_slice(&mut bytes).expect("should parse data blob");
+
+        // Inject DB columns.
+        msg.id = "msg_test_id".to_string();
+        msg.session_id = "ses_test_session".to_string();
+
+        assert_eq!(msg.id, "msg_test_id");
+        assert_eq!(msg.session_id, "ses_test_session");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.model_name().unwrap(), "claude-sonnet-4-20250514");
+        assert_eq!(msg.cost, Some(0.0123));
+
+        let tokens = msg.tokens.as_ref().unwrap();
+        assert_eq!(tokens.input, 3000);
+        assert_eq!(tokens.output, 1500);
+        assert_eq!(tokens.reasoning, 200);
+        assert_eq!(tokens.cache.read, 2000);
+        assert_eq!(tokens.cache.write, 1000);
+    }
+
+    #[test]
+    fn test_parse_sqlite_user_data_blob() {
+        let json = r#"{
+            "role": "user",
+            "time": { "created": 1771083156409 },
+            "agent": "coder",
+            "model": { "providerID": "anthropic", "modelID": "claude-sonnet-4-20250514" }
+        }"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let mut msg: OpenCodeMessage =
+            simd_json::from_slice(&mut bytes).expect("should parse user data blob");
+
+        msg.id = "msg_user".to_string();
+        msg.session_id = "ses_test".to_string();
+
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.model_name().unwrap(), "claude-sonnet-4-20250514");
+        assert!(msg.tokens.is_none());
+    }
+
+    #[test]
+    fn test_parse_sqlite_minimal_data_blob() {
+        // Minimal blob with just the role field.
+        let json = r#"{ "role": "user" }"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let msg: OpenCodeMessage =
+            simd_json::from_slice(&mut bytes).expect("should parse minimal blob");
+        assert_eq!(msg.role, "user");
+        assert!(msg.id.is_empty());
+        assert!(msg.session_id.is_empty());
+    }
+
+    // ---- Stats computation tests ----
+
+    #[test]
+    fn test_compute_message_stats_assistant_with_cost() {
+        let msg = OpenCodeMessage {
+            role: "assistant".to_string(),
+            cost: Some(0.05),
+            tokens: Some(OpenCodeTokens {
+                input: 1000,
+                output: 500,
+                reasoning: 100,
+                cache: OpenCodeCacheTokens {
+                    read: 2000,
+                    write: 500,
+                },
+            }),
+            model_id: Some("claude-sonnet-4-20250514".to_string()),
+            ..Default::default()
+        };
+        let stats = compute_message_stats(&msg, Stats::default());
+        assert_eq!(stats.input_tokens, 1000);
+        assert_eq!(stats.output_tokens, 500);
+        assert_eq!(stats.reasoning_tokens, 100);
+        assert_eq!(stats.cache_read_tokens, 2000);
+        assert_eq!(stats.cache_creation_tokens, 500);
+        // Explicit cost wins.
+        assert!((stats.cost - 0.05).abs() < f64::EPSILON);
+        assert_eq!(stats.tool_calls, 1); // at least 1 for model call
+    }
+
+    #[test]
+    fn test_compute_message_stats_user() {
+        let msg = OpenCodeMessage {
+            role: "user".to_string(),
+            ..Default::default()
+        };
+        let stats = compute_message_stats(&msg, Stats::default());
+        assert_eq!(stats.input_tokens, 0);
+        assert_eq!(stats.output_tokens, 0);
+        assert_eq!(stats.cost, 0.0);
+    }
+
+    #[test]
+    fn test_compute_message_stats_preserves_tool_stats() {
+        let msg = OpenCodeMessage {
+            role: "assistant".to_string(),
+            tokens: Some(OpenCodeTokens {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            }),
+            model_id: Some("test-model".to_string()),
+            ..Default::default()
+        };
+        let tool_stats = Stats {
+            tool_calls: 5,
+            files_read: 3,
+            ..Default::default()
+        };
+
+        let stats = compute_message_stats(&msg, tool_stats);
+        assert_eq!(stats.tool_calls, 5);
+        assert_eq!(stats.files_read, 3);
+    }
+
+    // ---- build_conversation_message tests ----
+
+    #[test]
+    fn test_build_conversation_message_with_project() {
+        let msg = OpenCodeMessage {
+            id: "msg_123".to_string(),
+            session_id: "ses_456".to_string(),
+            role: "assistant".to_string(),
+            time: OpenCodeMessageTime {
+                created: Some(1700000000000),
+                ..Default::default()
+            },
+            model_id: Some("claude-sonnet-4-20250514".to_string()),
+            ..Default::default()
+        };
+
+        let conv = build_conversation_message(
+            msg,
+            Some("Test Session".to_string()),
+            Some("/home/user/project"),
+            None,
+            Stats::default(),
+        );
+
+        assert_eq!(conv.application, Application::OpenCode);
+        assert_eq!(conv.role, MessageRole::Assistant);
+        assert_eq!(conv.session_name.as_deref(), Some("Test Session"));
+        assert_eq!(conv.project_hash, hash_text("/home/user/project"));
+        assert_eq!(conv.conversation_hash, hash_text("ses_456"));
+        assert_eq!(conv.global_hash, hash_text("opencode_ses_456_msg_123"));
+        assert_eq!(conv.model.as_deref(), Some("claude-sonnet-4-20250514"));
+    }
+
+    #[test]
+    fn test_build_conversation_message_fallback_project_hash() {
+        let msg = OpenCodeMessage {
+            id: "msg_a".to_string(),
+            session_id: "ses_b".to_string(),
+            role: "user".to_string(),
+            ..Default::default()
+        };
+
+        let conv = build_conversation_message(msg, None, None, Some("ses_b"), Stats::default());
+        assert_eq!(conv.project_hash, hash_text("ses_b"));
+    }
+
+    #[test]
+    fn test_build_conversation_message_session_id_fallback() {
+        let msg = OpenCodeMessage {
+            id: "msg_a".to_string(),
+            session_id: "ses_c".to_string(),
+            role: "user".to_string(),
+            ..Default::default()
+        };
+
+        // No worktree, no fallback — uses session_id.
+        let conv = build_conversation_message(msg, None, None, None, Stats::default());
+        assert_eq!(conv.project_hash, hash_text("ses_c"));
+    }
+
+    // ---- global_hash consistency test (JSON ↔ SQLite) ----
+
+    #[test]
+    fn test_global_hash_matches_json_and_sqlite_paths() {
+        // The global_hash for a message must be identical whether parsed from
+        // a JSON file or from the SQLite database, so deduplication works.
+        let session_id = "ses_3a33896dbffeieFOLryTAxfy7D";
+        let message_id = "msg_c5cc84bbf001a3bQs6VdR97IUK";
+
+        let expected = hash_text(&format!("opencode_{session_id}_{message_id}"));
+
+        // Simulate JSON path.
+        let json_msg = OpenCodeMessage {
+            id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "assistant".to_string(),
+            ..Default::default()
+        };
+        let json_conv = build_conversation_message(json_msg, None, None, None, Stats::default());
+
+        // Simulate SQLite path (id and session_id injected from DB columns).
+        let mut sqlite_msg = OpenCodeMessage {
+            role: "assistant".to_string(),
+            ..Default::default()
+        };
+        sqlite_msg.id = message_id.to_string();
+        sqlite_msg.session_id = session_id.to_string();
+        let sqlite_conv =
+            build_conversation_message(sqlite_msg, None, None, None, Stats::default());
+
+        assert_eq!(json_conv.global_hash, expected);
+        assert_eq!(sqlite_conv.global_hash, expected);
+        assert_eq!(json_conv.global_hash, sqlite_conv.global_hash);
+    }
+
+    // ---- SQLite helper tests ----
+
+    #[test]
+    fn test_ms_to_datetime_valid() {
+        let dt = ms_to_datetime(Some(1771083156415));
+        assert_eq!(dt.timestamp_millis(), 1771083156415);
+    }
+
+    #[test]
+    fn test_ms_to_datetime_none() {
+        let dt = ms_to_datetime(None);
+        assert_eq!(dt.timestamp(), 0);
+    }
+
+    #[test]
+    fn test_load_projects_nonexistent_dir() {
+        let projects = load_projects(Path::new("/nonexistent/path"));
+        assert!(projects.is_empty());
+    }
+
+    #[test]
+    fn test_load_sessions_nonexistent_dir() {
+        let sessions = load_sessions(Path::new("/nonexistent/path"));
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_extract_tool_stats_nonexistent_dir() {
+        let stats = extract_tool_stats_from_parts(Path::new("/nonexistent"), "msg_fake");
+        assert_eq!(stats.tool_calls, 0);
+        assert_eq!(stats.files_read, 0);
+    }
+
+    // ---- In-memory SQLite integration tests ----
+
+    fn create_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+
+        conn.execute_batch(
+            "
+            CREATE TABLE project (
+                id TEXT PRIMARY KEY,
+                worktree TEXT NOT NULL,
+                vcs TEXT,
+                name TEXT,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL
+            );
+
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES project(id),
+                title TEXT NOT NULL,
+                directory TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL
+            );
+
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES session(id),
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL REFERENCES message(id),
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+
+        conn
+    }
+
+    #[test]
+    fn test_load_projects_from_db() {
+        let conn = create_test_db();
+        conn.execute(
+            "INSERT INTO project (id, worktree, vcs, time_created, time_updated) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["proj_1", "/home/user/myproject", "git", 1700000000000i64, 1700000000000i64],
+        )
+        .unwrap();
+
+        let projects = load_projects_from_db(&conn);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects["proj_1"].worktree, "/home/user/myproject");
+    }
+
+    #[test]
+    fn test_load_sessions_from_db() {
+        let conn = create_test_db();
+        conn.execute(
+            "INSERT INTO project (id, worktree, time_created, time_updated) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["proj_1", "/home/user/proj", 1700000000000i64, 1700000000000i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, project_id, title, directory, time_created, time_updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params!["ses_1", "proj_1", "My Session", "/home/user/proj", 1700000000000i64, 1700000000000i64],
+        )
+        .unwrap();
+
+        let sessions = load_sessions_from_db(&conn);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions["ses_1"].title, "My Session");
+        assert_eq!(sessions["ses_1"].project_id, "proj_1");
+    }
+
+    #[test]
+    fn test_batch_load_tool_stats_from_db() {
+        let conn = create_test_db();
+
+        // Insert project + session + message first (for FK constraints).
+        conn.execute(
+            "INSERT INTO project (id, worktree, time_created, time_updated) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["proj_1", "/tmp", 0i64, 0i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, project_id, title, directory, time_created, time_updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params!["ses_1", "proj_1", "s", "/tmp", 0i64, 0i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["msg_1", "ses_1", 0i64, 0i64, r#"{"role":"assistant"}"#],
+        )
+        .unwrap();
+
+        // Insert tool parts.
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_1", "msg_1", "ses_1", 0i64, 0i64,
+                r#"{"type":"tool","tool":"read","callID":"c1","state":{"status":"completed","input":{},"output":"contents","title":"Read file","metadata":{},"time":{"start":0,"end":1}}}"#
+            ],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_2", "msg_1", "ses_1", 0i64, 0i64,
+                r#"{"type":"tool","tool":"glob","callID":"c2","state":{"status":"completed","input":{},"output":"files","title":"Glob","metadata":{"count":5},"time":{"start":0,"end":1}}}"#
+            ],
+        ).unwrap();
+        // Non-tool part (should be ignored).
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_3", "msg_1", "ses_1", 0i64, 0i64,
+                r#"{"type":"text","text":"Hello world"}"#
+            ],
+        ).unwrap();
+
+        let stats = batch_load_tool_stats_from_db(&conn);
+        let msg_stats = &stats["msg_1"];
+        assert_eq!(msg_stats.tool_calls, 2);
+        assert_eq!(msg_stats.files_read, 6); // 1 from read + 5 from glob count
+        assert_eq!(msg_stats.file_searches, 1);
+    }
+
+    #[test]
+    fn test_batch_load_tool_stats_empty_db() {
+        let conn = create_test_db();
+        let stats = batch_load_tool_stats_from_db(&conn);
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn test_sqlite_end_to_end_in_memory() {
+        // Build a full in-memory DB and verify message conversion.
+        let conn = create_test_db();
+
+        conn.execute(
+            "INSERT INTO project (id, worktree, vcs, time_created, time_updated) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["proj_abc", "/home/dev/myrepo", "git", 1700000000000i64, 1700000000000i64],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO session (id, project_id, title, directory, time_created, time_updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params!["ses_xyz", "proj_abc", "Implement feature", "/home/dev/myrepo", 1700000000000i64, 1700001000000i64],
+        ).unwrap();
+
+        // User message (data blob has no id/sessionID).
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "msg_user1", "ses_xyz", 1700000100000i64, 1700000100000i64,
+                r#"{"role":"user","time":{"created":1700000100000},"agent":"coder","model":{"providerID":"anthropic","modelID":"claude-sonnet-4-20250514"}}"#
+            ],
+        ).unwrap();
+
+        // Assistant message with tokens and cost.
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "msg_asst1", "ses_xyz", 1700000200000i64, 1700000210000i64,
+                r#"{"role":"assistant","time":{"created":1700000200000,"completed":1700000210000},"modelID":"claude-sonnet-4-20250514","providerID":"anthropic","cost":0.0042,"tokens":{"total":2500,"input":1500,"output":800,"reasoning":200,"cache":{"read":1000,"write":500}},"finish":"stop"}"#
+            ],
+        ).unwrap();
+
+        // A tool part for the assistant message.
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_tool1", "msg_asst1", "ses_xyz", 1700000201000i64, 1700000202000i64,
+                r#"{"type":"tool","tool":"read","callID":"call_1","state":{"status":"completed","input":{"path":"/tmp/foo.rs"},"output":"fn main(){}","title":"Read /tmp/foo.rs","metadata":{},"time":{"start":1700000201000,"end":1700000202000}}}"#
+            ],
+        ).unwrap();
+
+        // Query and convert using our helpers.
+        let db_projects = load_projects_from_db(&conn);
+        let db_sessions = load_sessions_from_db(&conn);
+        let tool_stats_map = batch_load_tool_stats_from_db(&conn);
+
+        assert_eq!(db_projects.len(), 1);
+        assert_eq!(db_sessions.len(), 1);
+        assert_eq!(tool_stats_map.len(), 1);
+
+        // Parse messages.
+        let mut stmt = conn
+            .prepare("SELECT id, session_id, time_created, data FROM message ORDER BY time_created")
+            .unwrap();
+        let messages: Vec<ConversationMessage> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0).unwrap(),
+                    row.get::<_, String>(1).unwrap(),
+                    row.get::<_, i64>(2).unwrap(),
+                    row.get::<_, String>(3).unwrap(),
+                ))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, session_id, time_created, data)| {
+                let mut bytes = data.into_bytes();
+                let mut msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
+                msg.id = id.clone();
+                msg.session_id = session_id.clone();
+                if msg.time.created.is_none() || msg.time.created == Some(0) {
+                    msg.time.created = Some(time_created);
+                }
+
+                let session = db_sessions.get(&session_id);
+                let project = session.and_then(|s| db_projects.get(&s.project_id));
+                let tool_stats = tool_stats_map.get(&id).cloned().unwrap_or_default();
+                let stats = compute_message_stats(&msg, tool_stats);
+                let session_title = session.map(|s| s.title.clone());
+                let worktree = project.map(|p| p.worktree.as_str());
+                let fallback = Some(session_id.as_str());
+
+                Some(build_conversation_message(
+                    msg,
+                    session_title,
+                    worktree,
+                    fallback,
+                    stats,
+                ))
+            })
+            .collect();
+
+        assert_eq!(messages.len(), 2);
+
+        // Verify user message.
+        let user_msg = &messages[0];
+        assert_eq!(user_msg.role, MessageRole::User);
+        assert_eq!(user_msg.application, Application::OpenCode);
+        assert_eq!(user_msg.session_name.as_deref(), Some("Implement feature"));
+        assert_eq!(user_msg.project_hash, hash_text("/home/dev/myrepo"));
+        assert_eq!(user_msg.stats.input_tokens, 0);
+
+        // Verify assistant message.
+        let asst_msg = &messages[1];
+        assert_eq!(asst_msg.role, MessageRole::Assistant);
+        assert_eq!(asst_msg.model.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(asst_msg.stats.input_tokens, 1500);
+        assert_eq!(asst_msg.stats.output_tokens, 800);
+        assert_eq!(asst_msg.stats.reasoning_tokens, 200);
+        assert_eq!(asst_msg.stats.cache_read_tokens, 1000);
+        assert_eq!(asst_msg.stats.cache_creation_tokens, 500);
+        assert!((asst_msg.stats.cost - 0.0042).abs() < f64::EPSILON);
+        // 1 tool call from the "read" part.
+        assert_eq!(asst_msg.stats.tool_calls, 1);
+        assert_eq!(asst_msg.stats.files_read, 1);
+
+        // Verify global hash matches the expected format.
+        assert_eq!(
+            asst_msg.global_hash,
+            hash_text("opencode_ses_xyz_msg_asst1")
+        );
     }
 }
