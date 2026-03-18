@@ -119,6 +119,26 @@ fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
     Ok(messages)
 }
 
+/// Query tool call counts per message.
+///
+/// Joins `message_parts` → `message_part_tool_call` to count how many tool calls
+/// each message made. Returns a map from message ID to tool call count.
+fn query_tool_call_counts(conn: &Connection) -> Result<HashMap<i64, u32>> {
+    let mut stmt = conn.prepare(
+        "SELECT mp.parent_chat_message_id, COUNT(*) as tool_call_count
+         FROM message_parts mp
+         JOIN message_part_tool_call tc ON tc.message_part_id = mp.id
+         GROUP BY mp.parent_chat_message_id",
+    )?;
+
+    let counts = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u32>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(counts)
+}
+
 /// Parse a timestamp string from Piebald's database.
 ///
 /// Piebald stores timestamps in RFC3339 format with timezone (e.g., "2025-12-10T15:55:48.819321712+00:00").
@@ -134,6 +154,7 @@ fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
 fn convert_messages(
     chats: &[PiebaldChat],
     messages: Vec<PiebaldMessage>,
+    tool_call_counts: &HashMap<i64, u32>,
 ) -> Vec<ConversationMessage> {
     // Build chat lookup map for O(1) access
     let chat_map: HashMap<i64, &PiebaldChat> = chats.iter().map(|c| (c.id, c)).collect();
@@ -194,6 +215,9 @@ fn convert_messages(
                 0.0
             };
 
+            // Look up tool call count for this message
+            let tool_calls = tool_call_counts.get(&msg.id).copied().unwrap_or(0);
+
             let stats = Stats {
                 input_tokens,
                 output_tokens,
@@ -202,6 +226,7 @@ fn convert_messages(
                 cache_read_tokens,
                 cached_tokens: cache_read_tokens + cache_creation_tokens,
                 cost,
+                tool_calls,
                 ..Default::default()
             };
 
@@ -251,7 +276,8 @@ impl Analyzer for PiebaldAnalyzer {
         let conn = open_piebald_db(&source.path)?;
         let chats = query_chats(&conn)?;
         let messages = query_messages(&conn)?;
-        Ok(convert_messages(&chats, messages))
+        let tool_call_counts = query_tool_call_counts(&conn)?;
+        Ok(convert_messages(&chats, messages, &tool_call_counts))
     }
 
     fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
