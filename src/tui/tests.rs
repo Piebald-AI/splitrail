@@ -1,9 +1,14 @@
-use crate::tui::logic::{accumulate_tui_stats, date_matches_buffer};
-use crate::tui::{
-    create_upload_progress_callback, show_upload_error, show_upload_success, update_day_filters,
-    update_table_states, update_window_offsets,
+/// Tests for TUI components: table state management, upload progress, date matching, and stats accumulation.
+use crate::tui::logic::{
+    accumulate_tui_stats, aggregate_daily_stats_by_month, date_matches_buffer,
 };
-use crate::types::{AgenticCodingToolStats, CompactDate, MultiAnalyzerStats, Stats, TuiStats};
+use crate::tui::{
+    create_upload_progress_callback, format_month_for_display, show_upload_error,
+    show_upload_success, update_day_filters, update_table_states, update_window_offsets,
+};
+use crate::types::{
+    AgenticCodingToolStats, CompactDate, DailyStats, MultiAnalyzerStats, Stats, TuiStats,
+};
 use ratatui::widgets::TableState;
 use std::collections::BTreeMap;
 
@@ -36,6 +41,28 @@ fn make_tool_stats(name: &str, has_data: bool) -> AgenticCodingToolStats {
         num_conversations: if has_data { 1 } else { 0 },
         messages: vec![],
         analyzer_name: name.to_string(),
+    }
+}
+
+fn make_daily_stats(
+    date: &str,
+    input_tokens: u64,
+    cost_cents: u32,
+    conversations: u32,
+) -> DailyStats {
+    DailyStats {
+        date: CompactDate::from_str(date).unwrap(),
+        user_messages: 0,
+        ai_messages: conversations,
+        conversations,
+        models: BTreeMap::from([("model-a".to_string(), conversations)]),
+        stats: TuiStats {
+            input_tokens,
+            cost_cents,
+            tool_calls: conversations,
+            ..TuiStats::default()
+        },
+        model_stats: BTreeMap::new(),
     }
 }
 
@@ -404,6 +431,56 @@ fn test_date_filter_exact_day_and_month() {
 fn test_date_filter_year_month() {
     assert!(date_matches_buffer("2025-06-15", "2025-06"));
     assert!(date_matches_buffer("2024-12-01", "2024-12"));
+}
+
+#[test]
+fn test_date_filter_monthly_keys() {
+    assert!(date_matches_buffer("2025-06", "2025-06"));
+    assert!(date_matches_buffer("2025-06", "6"));
+    assert!(date_matches_buffer("2025-06", "jun"));
+    assert!(date_matches_buffer("2025-06", "6/2025"));
+    assert!(date_matches_buffer("2025-06", "2025"));
+    assert!(!date_matches_buffer("2025-06", "6-15"));
+}
+
+#[test]
+fn test_aggregate_daily_stats_by_month_rolls_up_days() {
+    let mut daily_stats = BTreeMap::new();
+    daily_stats.insert(
+        "2025-01-02".to_string(),
+        make_daily_stats("2025-01-02", 100, 125, 1),
+    );
+    daily_stats.insert(
+        "2025-01-20".to_string(),
+        make_daily_stats("2025-01-20", 300, 225, 2),
+    );
+    daily_stats.insert(
+        "2025-02-01".to_string(),
+        make_daily_stats("2025-02-01", 50, 75, 1),
+    );
+
+    let monthly = aggregate_daily_stats_by_month(&daily_stats);
+
+    assert_eq!(monthly.len(), 2);
+
+    let january = monthly.get("2025-01").unwrap();
+    assert_eq!(january.date, CompactDate::from_parts(2025, 1, 1));
+    assert_eq!(january.stats.input_tokens, 400);
+    assert_eq!(january.stats.cost_cents, 350);
+    assert_eq!(january.conversations, 3);
+    assert_eq!(january.models.get("model-a"), Some(&3));
+
+    let february = monthly.get("2025-02").unwrap();
+    assert_eq!(february.stats.input_tokens, 50);
+    assert_eq!(february.stats.cost_cents, 75);
+    assert_eq!(february.conversations, 1);
+}
+
+#[test]
+fn test_format_month_for_display_formats_month_and_year() {
+    assert_eq!(format_month_for_display("unknown"), "Unknown");
+    assert_eq!(format_month_for_display("invalid"), "invalid");
+    assert_eq!(format_month_for_display("2025-02"), "2/2025");
 }
 
 #[test]
