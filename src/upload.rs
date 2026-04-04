@@ -71,6 +71,7 @@ where
     }
 
     let upload_debug = upload_debug_enabled();
+    let max_retries = config.upload.retry_attempts.max(1) as usize;
 
     if upload_debug {
         // Printed once per run, and early, so users see it even if the TUI is busy.
@@ -99,7 +100,17 @@ where
 
     let client = get_http_client();
 
-    let chunks: Vec<_> = messages.chunks(CHUNK_SIZE).collect();
+    // Sort messages by date before chunking so that earlier chunks contain
+    // older messages.  This allows us to save incremental progress: after each
+    // successful chunk we persist the latest message timestamp, so a retry
+    // only re-sends the remaining newer messages instead of everything.
+    let mut sorted_messages: Vec<&ConversationMessage> = messages.iter().collect();
+    sorted_messages.sort_by_key(|m| m.date);
+
+    let chunks: Vec<Vec<&ConversationMessage>> = sorted_messages
+        .chunks(CHUNK_SIZE)
+        .map(|c| c.to_vec())
+        .collect();
     let total_messages = messages.len();
     let mut messages_processed = 0;
 
@@ -118,115 +129,234 @@ where
             ));
         }
 
-        // Run fast counter with non-blocking HTTP request
-        let mut current_count = chunk_start;
-        let target_count = chunk_start + messages_in_chunk;
+        // Retry loop for this chunk with exponential backoff
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                // Exponential backoff: 2s, 4s, 8s, ...
+                let backoff = Duration::from_secs(2u64.saturating_pow(attempt as u32));
+                if upload_debug {
+                    upload_debug_log(format!(
+                        "[splitrail upload] chunk {}/{} retry {}/{} after {:.1}s backoff",
+                        chunk_index + 1,
+                        chunks.len(),
+                        attempt + 1,
+                        max_retries,
+                        backoff.as_secs_f64(),
+                    ));
+                }
+                tokio::time::sleep(backoff).await;
+            }
 
-        // Start the HTTP request
-        let timezone = utils::get_local_timezone();
-        let prep_start = Instant::now();
-        let mut http_request = Box::pin(
-            client
-                .post(format!("{}/api/upload-stats", config.server.url))
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", config.server.api_token),
-                )
-                .header("Content-Type", "application/json")
-                .header("X-Timezone", &timezone)
-                .simd_json(chunk)
-                .send(),
-        );
-        let prep_ms = prep_start.elapsed().as_millis();
-        let wait_start = Instant::now();
-
-        // Counter animation loop
-        loop {
-            tokio::select! {
-                // HTTP request completed
-                response = &mut http_request => {
-                    let response = response?;
-                    let wait_ms = wait_start.elapsed().as_millis();
-
-                    if upload_debug {
-                        upload_debug_log(format!(
-                            "[splitrail upload] chunk {}/{} response: status={} prep_ms={} wait_ms={} (see {})",
-                            chunk_index + 1,
-                            chunks.len(),
-                            response.status(),
-                            prep_ms,
-                            wait_ms,
-                            upload_log_path().display(),
-                        ));
-                    }
-
-                    // Process response
-                    if response.status().is_success() {
-                        let parse_start = Instant::now();
-                        let upload_response: UploadResponse =
-                            response.simd_json().await.context("Failed to parse response")?;
-                        let parse_ms = parse_start.elapsed().as_millis();
-
-                        if upload_debug {
-                            upload_debug_log(format!(
-                                "[splitrail upload] chunk {}/{} parsed: success={} parse_ms={} (see {})",
-                                chunk_index + 1,
-                                chunks.len(),
-                                upload_response.success,
-                                parse_ms,
-                                upload_log_path().display(),
-                            ));
-                        }
-
-                        if !upload_response.success {
-                            anyhow::bail!(
-                                "Server returned error: {}",
-                                upload_response
-                                    .error
-                                    .unwrap_or_else(|| "Unknown error".to_string())
-                            );
-                        }
-                    } else {
-                        let error_text = response
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Unknown error".to_string());
-
-                        if let Ok(error_res) = simd_json::from_slice::<ErrorResponse>(&mut error_text.clone().into_bytes()) {
-                            anyhow::bail!("{}", error_res.error);
-                        }
-
-                        anyhow::bail!("{}", error_text);
-                    }
-
-                    // Show final state and exit
-                    progress_callback(target_count, total_messages);
+            let ctx = ChunkContext {
+                chunk_index,
+                total_chunks: chunks.len(),
+                chunk_start,
+                total_messages,
+                upload_debug,
+            };
+            match upload_single_chunk(client, config, chunk, &ctx, &mut progress_callback).await {
+                Ok(()) => {
+                    last_err = None;
                     break;
                 }
-
-                // Counter animation tick
-                _ = tokio::time::sleep(Duration::from_micros(100)) => {
-                    if current_count < target_count {
-                        // Jump multiple messages at once for very fast counting
-                        let jump_size = ((target_count - current_count) / 50).clamp(1, 100);
-                        current_count = (current_count + jump_size).min(target_count);
-                        progress_callback(current_count, total_messages);
-                    } else {
-                        // Reached target, show animated dots while waiting for HTTP
-                        progress_callback(current_count, total_messages);
-                        // Continue calling the callback to keep dots animating
-                        // (TUI handles the actual dots animation timing)
+                Err(e) => {
+                    if upload_debug {
+                        upload_debug_log(format!(
+                            "[splitrail upload] chunk {}/{} attempt {}/{} failed: {e:#}",
+                            chunk_index + 1,
+                            chunks.len(),
+                            attempt + 1,
+                            max_retries,
+                        ));
                     }
+                    last_err = Some(e);
                 }
             }
         }
 
+        // If all retries failed, save whatever progress we made and bail
+        if let Some(err) = last_err {
+            // Save progress for any chunks that already succeeded
+            if messages_processed > 0 {
+                save_chunk_progress(config, &sorted_messages, messages_processed, upload_debug);
+            }
+            return Err(err);
+        }
+
         messages_processed += messages_in_chunk;
+
+        // Save incremental progress after each successful chunk so that a
+        // later failure (or a manual re-run) only re-uploads the remaining
+        // messages instead of re-sending everything from scratch.
+        save_chunk_progress(config, &sorted_messages, messages_processed, upload_debug);
     }
 
+    // Final save: mark everything up to now as uploaded.
     let date = chrono::Utc::now().timestamp_millis();
     config.set_last_date_uploaded(date);
     config.save(true)?;
+
+    Ok(())
+}
+
+/// Save incremental upload progress by recording the latest message timestamp
+/// from the successfully uploaded portion.  On the next upload run, only
+/// messages newer than this timestamp will be re-sent.
+fn save_chunk_progress(
+    config: &mut Config,
+    sorted_messages: &[&ConversationMessage],
+    messages_processed: usize,
+    upload_debug: bool,
+) {
+    if messages_processed == 0 {
+        return;
+    }
+    // sorted_messages is sorted by date, so the last processed message has the
+    // latest timestamp.  We add 1ms so that `get_messages_later_than` (which
+    // uses >=) doesn't re-include this exact message.
+    if let Some(last_msg) = sorted_messages.get(messages_processed - 1) {
+        let checkpoint = last_msg.date.timestamp_millis() + 1;
+        config.set_last_date_uploaded(checkpoint);
+        if let Err(e) = config.save(true) {
+            if upload_debug {
+                upload_debug_log(format!(
+                    "[splitrail upload] warning: failed to save chunk progress: {e:#}"
+                ));
+            }
+        } else if upload_debug {
+            upload_debug_log(format!(
+                "[splitrail upload] saved progress: last_date_uploaded={checkpoint} ({messages_processed} messages)"
+            ));
+        }
+    }
+}
+
+/// Context for a single chunk upload — groups the progress/display parameters
+/// to keep the function signature clean.
+struct ChunkContext {
+    chunk_index: usize,
+    total_chunks: usize,
+    chunk_start: usize,
+    total_messages: usize,
+    upload_debug: bool,
+}
+
+/// Upload a single chunk to the server, with animated progress counter.
+/// Returns Ok(()) on success, or an error if the upload failed.
+#[allow(clippy::needless_pass_by_ref_mut)] // progress_callback is FnMut
+async fn upload_single_chunk<F>(
+    client: &reqwest::Client,
+    config: &Config,
+    chunk: &[&ConversationMessage],
+    ctx: &ChunkContext,
+    progress_callback: &mut F,
+) -> Result<()>
+where
+    F: FnMut(usize, usize),
+{
+    let messages_in_chunk = chunk.len();
+    let mut current_count = ctx.chunk_start;
+    let target_count = ctx.chunk_start + messages_in_chunk;
+
+    // Start the HTTP request
+    let timezone = utils::get_local_timezone();
+    let prep_start = Instant::now();
+    let mut http_request = Box::pin(
+        client
+            .post(format!("{}/api/upload-stats", config.server.url))
+            .header(
+                "Authorization",
+                format!("Bearer {}", config.server.api_token),
+            )
+            .header("Content-Type", "application/json")
+            .header("X-Timezone", &timezone)
+            .simd_json(chunk)
+            .send(),
+    );
+    let prep_ms = prep_start.elapsed().as_millis();
+    let wait_start = Instant::now();
+
+    // Counter animation loop
+    loop {
+        tokio::select! {
+            // HTTP request completed
+            response = &mut http_request => {
+                let response = response?;
+                let wait_ms = wait_start.elapsed().as_millis();
+
+                if ctx.upload_debug {
+                    upload_debug_log(format!(
+                        "[splitrail upload] chunk {}/{} response: status={} prep_ms={} wait_ms={} (see {})",
+                        ctx.chunk_index + 1,
+                        ctx.total_chunks,
+                        response.status(),
+                        prep_ms,
+                        wait_ms,
+                        upload_log_path().display(),
+                    ));
+                }
+
+                // Process response
+                if response.status().is_success() {
+                    let parse_start = Instant::now();
+                    let upload_response: UploadResponse =
+                        response.simd_json().await.context("Failed to parse response")?;
+                    let parse_ms = parse_start.elapsed().as_millis();
+
+                    if ctx.upload_debug {
+                        upload_debug_log(format!(
+                            "[splitrail upload] chunk {}/{} parsed: success={} parse_ms={} (see {})",
+                            ctx.chunk_index + 1,
+                            ctx.total_chunks,
+                            upload_response.success,
+                            parse_ms,
+                            upload_log_path().display(),
+                        ));
+                    }
+
+                    if !upload_response.success {
+                        anyhow::bail!(
+                            "Server returned error: {}",
+                            upload_response
+                                .error
+                                .unwrap_or_else(|| "Unknown error".to_string())
+                        );
+                    }
+                } else {
+                    let error_text = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+
+                    if let Ok(error_res) = simd_json::from_slice::<ErrorResponse>(&mut error_text.clone().into_bytes()) {
+                        anyhow::bail!("{}", error_res.error);
+                    }
+
+                    anyhow::bail!("{}", error_text);
+                }
+
+                // Show final state and exit
+                progress_callback(target_count, ctx.total_messages);
+                break;
+            }
+
+            // Counter animation tick
+            _ = tokio::time::sleep(Duration::from_micros(100)) => {
+                if current_count < target_count {
+                    // Jump multiple messages at once for very fast counting
+                    let jump_size = ((target_count - current_count) / 50).clamp(1, 100);
+                    current_count = (current_count + jump_size).min(target_count);
+                    progress_callback(current_count, ctx.total_messages);
+                } else {
+                    // Reached target, show animated dots while waiting for HTTP
+                    progress_callback(current_count, ctx.total_messages);
+                    // Continue calling the callback to keep dots animating
+                    // (TUI handles the actual dots animation timing)
+                }
+            }
+        }
+    }
 
     Ok(())
 }

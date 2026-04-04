@@ -193,6 +193,8 @@ async fn upload_message_stats_server_error_plain_text_propagates_message() {
     let mut config = Config::default();
     config.server.url = base_url;
     config.server.api_token = "TEST_TOKEN".to_string();
+    // Disable retries so the test only expects a single request.
+    config.upload.retry_attempts = 1;
 
     let messages = vec![make_test_message("c1")];
 
@@ -231,6 +233,8 @@ async fn upload_message_stats_server_error_json_uses_error_field() {
     let mut config = Config::default();
     config.server.url = base_url;
     config.server.api_token = "TEST_TOKEN".to_string();
+    // Disable retries so the test only expects a single request.
+    config.upload.retry_attempts = 1;
 
     let messages = vec![make_test_message("c1")];
 
@@ -362,6 +366,8 @@ async fn perform_background_upload_propagates_upload_errors_to_status() {
     let mut config = Config::default();
     config.server.url = base_url;
     config.server.api_token = "TEST_TOKEN".to_string();
+    // Disable retries so the test only expects a single request.
+    config.upload.retry_attempts = 1;
     config
         .save(true)
         .expect("save configured config for background upload");
@@ -386,4 +392,73 @@ async fn perform_background_upload_propagates_upload_errors_to_status() {
         }
         other => panic!("expected Failed status, got: {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn upload_message_stats_retries_on_failure_then_succeeds() {
+    let (_dir, _path) = setup_test_config();
+
+    // The server will fail on the first request and succeed on the second.
+    // We use a shared counter so the server knows which response to give.
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(l) => l,
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            eprintln!("Skipping test: unable to bind local HTTP server");
+            return;
+        }
+        Err(e) => panic!("failed to bind: {e}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+
+    let request_counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = request_counter.clone();
+
+    tokio::spawn(async move {
+        // Handle 2 requests: first fails, second succeeds.
+        for i in 0..2 {
+            let (mut socket, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => return,
+            };
+            let mut buf = [0u8; 65536];
+            let _ = socket.read(&mut buf).await;
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+
+            let (status, body) = if i == 0 {
+                (
+                    "500 Internal Server Error",
+                    r#"{"error":"transient failure"}"#,
+                )
+            } else {
+                ("200 OK", r#"{"success":true}"#)
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {len}\r\nContent-Type: application/json\r\n\r\n{body}",
+                len = body.len(),
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let mut config = Config::default();
+    config.server.url = base_url;
+    config.server.api_token = "TEST_TOKEN".to_string();
+    config.upload.retry_attempts = 2; // allow 2 attempts
+
+    let messages = vec![make_test_message("retry-c1")];
+
+    upload_message_stats(&messages, &mut config, |_c, _t| {})
+        .await
+        .expect("upload should succeed after retry");
+
+    assert_eq!(
+        request_counter.load(Ordering::SeqCst),
+        2,
+        "expected 2 requests: first fails, second succeeds"
+    );
+    assert!(
+        config.upload.last_date_uploaded > 0,
+        "last_date_uploaded should be updated after successful retry"
+    );
 }
