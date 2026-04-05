@@ -4,21 +4,24 @@ mod tests;
 
 use crate::models::is_model_estimated;
 use crate::types::{
-    AnalyzerStatsView, CompactDate, MultiAnalyzerStatsView, SharedAnalyzerView, resolve_model,
+    AnalyzerStatsView, CompactDate, DailyStats, MultiAnalyzerStatsView, SharedAnalyzerView,
+    resolve_model,
 };
 use crate::utils::{
     NumberFormatOptions, format_date_for_display, format_number, format_number_fit,
 };
 use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
 use anyhow::Result;
-use chrono::Local;
+use chrono::{Datelike, Local};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::style::{Print, ResetColor, SetForegroundColor};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{ExecutableCommand, execute};
-use logic::{SessionAggregate, date_matches_buffer, has_data_shared};
+use logic::{
+    SessionAggregate, aggregate_daily_stats_by_month, date_matches_buffer, has_data_shared,
+};
 use parking_lot::Mutex;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -26,7 +29,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Write, stdout};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -49,8 +52,14 @@ pub enum UploadStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StatsViewMode {
+enum AggregateViewMode {
     Daily,
+    Monthly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatsViewMode {
+    Aggregate,
     Session,
 }
 
@@ -84,10 +93,132 @@ where
     }
 }
 
+enum AggregateStatsData<'a> {
+    Borrowed(&'a BTreeMap<String, DailyStats>),
+    Owned(BTreeMap<String, DailyStats>),
+}
+
+impl AggregateStatsData<'_> {
+    fn as_map(&self) -> &BTreeMap<String, DailyStats> {
+        match self {
+            Self::Borrowed(stats) => stats,
+            Self::Owned(stats) => stats,
+        }
+    }
+}
+
+fn get_aggregate_stats<'a>(
+    view: &'a AnalyzerStatsView,
+    aggregate_view_mode: AggregateViewMode,
+) -> AggregateStatsData<'a> {
+    match aggregate_view_mode {
+        AggregateViewMode::Daily => AggregateStatsData::Borrowed(&view.daily_stats),
+        AggregateViewMode::Monthly => {
+            AggregateStatsData::Owned(aggregate_daily_stats_by_month(&view.daily_stats))
+        }
+    }
+}
+
+fn aggregate_total_rows(view: &AnalyzerStatsView, aggregate_view_mode: AggregateViewMode) -> usize {
+    get_aggregate_stats(view, aggregate_view_mode)
+        .as_map()
+        .len()
+        + 2
+}
+
+fn find_matching_aggregate_index(
+    view: &AnalyzerStatsView,
+    aggregate_view_mode: AggregateViewMode,
+    buffer: &str,
+    sort_reversed: bool,
+) -> Option<usize> {
+    let aggregate_stats = get_aggregate_stats(view, aggregate_view_mode);
+    let stats = aggregate_stats.as_map();
+
+    if sort_reversed {
+        stats
+            .iter()
+            .rev()
+            .enumerate()
+            .find(|(_, (period, _))| date_matches_buffer(period, buffer))
+            .map(|(index, _)| index)
+    } else {
+        stats
+            .iter()
+            .enumerate()
+            .find(|(_, (period, _))| date_matches_buffer(period, buffer))
+            .map(|(index, _)| index)
+    }
+}
+
+fn aggregate_key_at(
+    view: &AnalyzerStatsView,
+    aggregate_view_mode: AggregateViewMode,
+    index: usize,
+    sort_reversed: bool,
+) -> Option<String> {
+    let aggregate_stats = get_aggregate_stats(view, aggregate_view_mode);
+    let stats = aggregate_stats.as_map();
+
+    if sort_reversed {
+        stats.iter().rev().nth(index).map(|(key, _)| key.clone())
+    } else {
+        stats.iter().nth(index).map(|(key, _)| key.clone())
+    }
+}
+
+fn clamp_table_selection(table_state: &mut TableState, total_rows: usize) {
+    if total_rows == 0 {
+        table_state.select(None);
+        return;
+    }
+
+    let selected = table_state.selected().unwrap_or(0);
+    table_state.select(Some(selected.min(total_rows.saturating_sub(1))));
+}
+
+fn format_month_for_display(month_key: &str) -> String {
+    if month_key == "unknown" {
+        return "Unknown".to_string();
+    }
+
+    let mut parts = month_key.split('-');
+    let Some(year) = parts.next().and_then(|part| part.parse::<i32>().ok()) else {
+        return month_key.to_string();
+    };
+    let Some(month) = parts.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return month_key.to_string();
+    };
+
+    if parts.next().is_some() {
+        return month_key.to_string();
+    }
+
+    let formatted = format!("{month}/{year}");
+    let today = Local::now().date_naive();
+
+    if today.year() == year && today.month() == month {
+        format!("{formatted}*")
+    } else {
+        formatted
+    }
+}
+
+fn format_aggregate_period_for_display(
+    period: &str,
+    aggregate_view_mode: AggregateViewMode,
+) -> String {
+    match aggregate_view_mode {
+        AggregateViewMode::Daily => format_date_for_display(period),
+        AggregateViewMode::Monthly => format_month_for_display(period),
+    }
+}
+
 struct UiState<'a> {
     table_states: &'a mut [TableState],
     _scroll_offset: usize,
     selected_tab: usize,
+    aggregate_view_mode: AggregateViewMode,
     stats_view_mode: StatsViewMode,
     session_window_offsets: &'a mut [usize],
     session_day_filters: &'a mut [Option<CompactDate>],
@@ -123,7 +254,8 @@ pub fn run_tui(
 
     let mut selected_tab = 0;
     let mut scroll_offset = 0;
-    let mut stats_view_mode = StatsViewMode::Daily;
+    let mut aggregate_view_mode = AggregateViewMode::Daily;
+    let mut stats_view_mode = StatsViewMode::Aggregate;
 
     let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel::<WatcherEvent>();
 
@@ -144,6 +276,7 @@ pub fn run_tui(
             format_options,
             &mut selected_tab,
             &mut scroll_offset,
+            &mut aggregate_view_mode,
             &mut stats_view_mode,
             upload_status,
             update_status,
@@ -164,6 +297,7 @@ async fn run_app(
     format_options: &NumberFormatOptions,
     selected_tab: &mut usize,
     scroll_offset: &mut usize,
+    aggregate_view_mode: &mut AggregateViewMode,
     stats_view_mode: &mut StatsViewMode,
     upload_status: Arc<Mutex<UploadStatus>>,
     update_status: Arc<Mutex<crate::version_check::UpdateStatus>>,
@@ -272,6 +406,7 @@ async fn run_app(
                     table_states: &mut table_states,
                     _scroll_offset: *scroll_offset,
                     selected_tab: *selected_tab,
+                    aggregate_view_mode: *aggregate_view_mode,
                     stats_view_mode: *stats_view_mode,
                     session_window_offsets: &mut session_window_offsets,
                     session_day_filters: &mut session_day_filters,
@@ -335,16 +470,17 @@ async fn run_app(
                 match key.code {
                     KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '-' || c == '/' => {
                         date_jump_buffer.push(c);
-                        // Auto-jump to first matching date
+                        // Auto-jump to first matching date or month.
                         if let Some(current_stats) = filtered_stats.get(*selected_tab)
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
                         {
                             let stats = current_stats.read();
-                            if let Some((index, _)) =
-                                stats.daily_stats.iter().enumerate().find(|(_, (day, _))| {
-                                    date_matches_buffer(day, &date_jump_buffer)
-                                })
-                            {
+                            if let Some(index) = find_matching_aggregate_index(
+                                &stats,
+                                *aggregate_view_mode,
+                                &date_jump_buffer,
+                                sort_reversed,
+                            ) {
                                 table_state.select(Some(index));
                             }
                         }
@@ -357,11 +493,12 @@ async fn run_app(
                             && let Some(table_state) = table_states.get_mut(*selected_tab)
                         {
                             let stats = current_stats.read();
-                            if let Some((index, _)) =
-                                stats.daily_stats.iter().enumerate().find(|(_, (day, _))| {
-                                    date_matches_buffer(day, &date_jump_buffer)
-                                })
-                            {
+                            if let Some(index) = find_matching_aggregate_index(
+                                &stats,
+                                *aggregate_view_mode,
+                                &date_jump_buffer,
+                                sort_reversed,
+                            ) {
                                 table_state.select(Some(index));
                             }
                         }
@@ -437,13 +574,19 @@ async fn run_app(
                         && let Some(selected) = table_state.selected()
                     {
                         match *stats_view_mode {
-                            StatsViewMode::Daily => {
+                            StatsViewMode::Aggregate => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                                     let view = current_stats.read();
-                                    let total_rows = view.daily_stats.len();
-                                    if selected < total_rows.saturating_add(1) {
+                                    let data_rows =
+                                        aggregate_total_rows(&view, *aggregate_view_mode)
+                                            .saturating_sub(2);
+                                    let last_row = if data_rows > 0 { data_rows + 1 } else { 1 };
+
+                                    if selected < last_row {
                                         table_state.select(Some(
-                                            if selected == total_rows.saturating_sub(1) {
+                                            if data_rows > 0
+                                                && selected == data_rows.saturating_sub(1)
+                                            {
                                                 selected + 2
                                             } else {
                                                 selected + 1
@@ -492,11 +635,14 @@ async fn run_app(
                         && selected > 0
                     {
                         match *stats_view_mode {
-                            StatsViewMode::Daily => {
+                            StatsViewMode::Aggregate => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                                     let view = current_stats.read();
+                                    let data_rows =
+                                        aggregate_total_rows(&view, *aggregate_view_mode)
+                                            .saturating_sub(2);
                                     table_state.select(Some(selected.saturating_sub(
-                                        if selected == view.daily_stats.len() + 1 {
+                                        if data_rows > 0 && selected == data_rows + 1 {
                                             2
                                         } else {
                                             1
@@ -545,10 +691,11 @@ async fn run_app(
                 KeyCode::End => {
                     if let Some(table_state) = table_states.get_mut(*selected_tab) {
                         match *stats_view_mode {
-                            StatsViewMode::Daily => {
+                            StatsViewMode::Aggregate => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                                     let view = current_stats.read();
-                                    let total_rows = view.daily_stats.len() + 2;
+                                    let total_rows =
+                                        aggregate_total_rows(&view, *aggregate_view_mode);
                                     table_state.select(Some(total_rows.saturating_sub(1)));
                                     needs_redraw = true;
                                 }
@@ -585,10 +732,11 @@ async fn run_app(
                         && let Some(selected) = table_state.selected()
                     {
                         match *stats_view_mode {
-                            StatsViewMode::Daily => {
+                            StatsViewMode::Aggregate => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                                     let view = current_stats.read();
-                                    let total_rows = view.daily_stats.len() + 2;
+                                    let total_rows =
+                                        aggregate_total_rows(&view, *aggregate_view_mode);
                                     let new_selected =
                                         (selected + 10).min(total_rows.saturating_sub(1));
                                     table_state.select(Some(new_selected));
@@ -634,19 +782,44 @@ async fn run_app(
                     }
                 }
                 KeyCode::Char('/') => {
-                    if let StatsViewMode::Daily = *stats_view_mode {
+                    if let StatsViewMode::Aggregate = *stats_view_mode {
                         date_jump_active = true;
                         date_jump_buffer.clear();
                         needs_redraw = true;
                     }
                 }
+                KeyCode::Char('m') => {
+                    *aggregate_view_mode = match *aggregate_view_mode {
+                        AggregateViewMode::Daily => AggregateViewMode::Monthly,
+                        AggregateViewMode::Monthly => AggregateViewMode::Daily,
+                    };
+
+                    if matches!(*stats_view_mode, StatsViewMode::Session) {
+                        *stats_view_mode = StatsViewMode::Aggregate;
+                    }
+
+                    date_jump_active = false;
+                    date_jump_buffer.clear();
+
+                    if let Some(current_stats) = filtered_stats.get(*selected_tab)
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                    {
+                        let view = current_stats.read();
+                        clamp_table_selection(
+                            table_state,
+                            aggregate_total_rows(&view, *aggregate_view_mode),
+                        );
+                    }
+
+                    needs_redraw = true;
+                }
                 KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     *stats_view_mode = match *stats_view_mode {
-                        StatsViewMode::Daily => {
+                        StatsViewMode::Aggregate => {
                             session_day_filters[*selected_tab] = None;
                             StatsViewMode::Session
                         }
-                        StatsViewMode::Session => StatsViewMode::Daily,
+                        StatsViewMode::Session => StatsViewMode::Aggregate,
                     };
 
                     date_jump_active = false;
@@ -677,19 +850,25 @@ async fn run_app(
                     needs_redraw = true;
                 }
                 KeyCode::Enter => {
-                    if let StatsViewMode::Daily = *stats_view_mode
+                    if let StatsViewMode::Aggregate = *stats_view_mode
+                        && matches!(*aggregate_view_mode, AggregateViewMode::Daily)
                         && let Some(current_stats) = filtered_stats.get(*selected_tab)
                         && let Some(table_state) = table_states.get_mut(*selected_tab)
                         && let Some(selected_idx) = table_state.selected()
                     {
                         let view = current_stats.read();
-                        if selected_idx < view.daily_stats.len() {
-                            let day_key = if sort_reversed {
-                                view.daily_stats.iter().rev().nth(selected_idx)
-                            } else {
-                                view.daily_stats.iter().nth(selected_idx)
-                            }
-                            .and_then(|(k, _)| CompactDate::from_str(k));
+                        if selected_idx
+                            < aggregate_total_rows(&view, AggregateViewMode::Daily)
+                                .saturating_sub(2)
+                        {
+                            let day_key = aggregate_key_at(
+                                &view,
+                                AggregateViewMode::Daily,
+                                selected_idx,
+                                sort_reversed,
+                            )
+                            .and_then(|key| CompactDate::from_str(&key));
+
                             if let Some(day_key) = day_key {
                                 session_day_filters[*selected_tab] = Some(day_key);
                                 *stats_view_mode = StatsViewMode::Session;
@@ -837,13 +1016,14 @@ fn draw_ui(
             let has_estimated_models = {
                 let view = current_stats.read();
                 match ui_state.stats_view_mode {
-                    StatsViewMode::Daily => {
-                        let (_, has_estimated) = draw_daily_stats_table(
+                    StatsViewMode::Aggregate => {
+                        let (_, has_estimated) = draw_aggregate_stats_table(
                             frame,
                             chunks[2 + chunk_offset],
                             &view,
                             format_options,
                             current_table_state,
+                            ui_state.aggregate_view_mode,
                             if ui_state.date_jump_active {
                                 ui_state.date_jump_buffer
                             } else {
@@ -879,7 +1059,7 @@ fn draw_ui(
                         .get(ui_state.selected_tab)
                         .copied()
                         .flatten(),
-                    StatsViewMode::Daily => None,
+                    StatsViewMode::Aggregate => None,
                 };
                 draw_summary_stats(
                     frame,
@@ -904,18 +1084,31 @@ fn draw_ui(
             .split(help_area);
 
             let base_help_text = match ui_state.stats_view_mode {
-                StatsViewMode::Daily => {
-                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • s to toggle summary • / for date jump • Enter to drill into day • Ctrl+T for per-session view • q/Esc to quit"
+                StatsViewMode::Aggregate => {
+                    let jump_label = match ui_state.aggregate_view_mode {
+                        AggregateViewMode::Daily => "date jump",
+                        AggregateViewMode::Monthly => "month jump",
+                    };
+                    let drill_hint = if matches!(ui_state.aggregate_view_mode, AggregateViewMode::Daily)
+                    {
+                        " • Enter to drill into day"
+                    } else {
+                        ""
+                    };
+
+                    format!(
+                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • s to toggle summary • / for {jump_label} • m to toggle daily/monthly{drill_hint} • Ctrl+T for per-session view • q/Esc to quit"
+                    )
                 }
                 StatsViewMode::Session => {
-                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • s to toggle summary • Ctrl+T for per-day view • q/Esc to quit"
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • s to toggle summary • m to toggle daily/monthly • Ctrl+T for per-period view • q/Esc to quit".to_string()
                 }
             };
 
             let help_text = if has_estimated_models {
                 format!("{} • * = estimated pricing", base_help_text)
             } else {
-                base_help_text.to_string()
+                base_help_text
             };
 
             let help = Paragraph::new(help_text)
@@ -993,18 +1186,29 @@ fn draw_ui(
     }
 }
 
-fn draw_daily_stats_table(
+#[allow(clippy::too_many_arguments)]
+fn draw_aggregate_stats_table(
     frame: &mut Frame,
     area: Rect,
     stats: &AnalyzerStatsView,
     format_options: &NumberFormatOptions,
     table_state: &mut TableState,
+    aggregate_view_mode: AggregateViewMode,
     date_filter: &str,
     sort_reversed: bool,
 ) -> (usize, bool) {
+    let period_header = match aggregate_view_mode {
+        AggregateViewMode::Daily => "Date",
+        AggregateViewMode::Monthly => "Month",
+    };
+
+    let aggregate_stats = get_aggregate_stats(stats, aggregate_view_mode);
+    let aggregate_stats = aggregate_stats.as_map();
+    clamp_table_selection(table_state, aggregate_stats.len() + 2);
+
     let header = Row::new(vec![
         Cell::new(""),
-        Cell::new("Date"),
+        Cell::new(period_header),
         Cell::new(Text::from("Cost").right_aligned()),
         Cell::new(Text::from("Cached Tks").right_aligned()),
         Cell::new(Text::from("Inp Tks").right_aligned()),
@@ -1036,33 +1240,33 @@ fn draw_daily_stats_table(
     let mut best_tool_calls: u32 = 0;
     let mut best_tool_calls_i = 0;
 
-    for (i, day_stats) in stats.daily_stats.values().enumerate() {
-        if day_stats.stats.cost_cents > best_cost_cents {
-            best_cost_cents = day_stats.stats.cost_cents;
+    for (i, period_stats) in aggregate_stats.values().enumerate() {
+        if period_stats.stats.cost_cents > best_cost_cents {
+            best_cost_cents = period_stats.stats.cost_cents;
             best_cost_i = i;
         }
-        if day_stats.stats.cached_tokens > best_cached_tokens {
-            best_cached_tokens = day_stats.stats.cached_tokens;
+        if period_stats.stats.cached_tokens > best_cached_tokens {
+            best_cached_tokens = period_stats.stats.cached_tokens;
             best_cached_tokens_i = i;
         }
-        if day_stats.stats.input_tokens > best_input_tokens {
-            best_input_tokens = day_stats.stats.input_tokens;
+        if period_stats.stats.input_tokens > best_input_tokens {
+            best_input_tokens = period_stats.stats.input_tokens;
             best_input_tokens_i = i;
         }
-        if day_stats.stats.output_tokens > best_output_tokens {
-            best_output_tokens = day_stats.stats.output_tokens;
+        if period_stats.stats.output_tokens > best_output_tokens {
+            best_output_tokens = period_stats.stats.output_tokens;
             best_output_tokens_i = i;
         }
-        if day_stats.stats.reasoning_tokens > best_reasoning_tokens {
-            best_reasoning_tokens = day_stats.stats.reasoning_tokens;
+        if period_stats.stats.reasoning_tokens > best_reasoning_tokens {
+            best_reasoning_tokens = period_stats.stats.reasoning_tokens;
             best_reasoning_tokens_i = i;
         }
-        if day_stats.conversations > best_conversations {
-            best_conversations = day_stats.conversations;
+        if period_stats.conversations > best_conversations {
+            best_conversations = period_stats.conversations;
             best_conversations_i = i;
         }
-        if day_stats.stats.tool_calls > best_tool_calls {
-            best_tool_calls = day_stats.stats.tool_calls;
+        if period_stats.stats.tool_calls > best_tool_calls {
+            best_tool_calls = period_stats.stats.tool_calls;
             best_tool_calls_i = i;
         }
     }
@@ -1078,33 +1282,33 @@ fn draw_daily_stats_table(
 
     // Use EitherIter to avoid allocation when reversing
     let items_to_render = if sort_reversed {
-        EitherIter::Right(stats.daily_stats.iter().rev())
+        EitherIter::Right(aggregate_stats.iter().rev())
     } else {
-        EitherIter::Left(stats.daily_stats.iter())
+        EitherIter::Left(aggregate_stats.iter())
     };
 
-    for (i, (date, day_stats)) in items_to_render.enumerate() {
+    for (i, (period, period_stats)) in items_to_render.enumerate() {
         // Filter rows based on date search
-        if !date_filter.is_empty() && !date_matches_buffer(date, date_filter) {
+        if !date_filter.is_empty() && !date_matches_buffer(period, date_filter) {
             continue;
         }
 
-        total_cost_cents += day_stats.stats.cost_cents as u64;
-        total_cached += day_stats.stats.cached_tokens;
-        total_input += day_stats.stats.input_tokens;
-        total_output += day_stats.stats.output_tokens;
-        total_reasoning += day_stats.stats.reasoning_tokens;
-        total_tool_calls += day_stats.stats.tool_calls as u64;
-        total_conversations += day_stats.conversations as u64;
+        total_cost_cents += period_stats.stats.cost_cents as u64;
+        total_cached += period_stats.stats.cached_tokens;
+        total_input += period_stats.stats.input_tokens;
+        total_output += period_stats.stats.output_tokens;
+        total_reasoning += period_stats.stats.reasoning_tokens;
+        total_tool_calls += period_stats.stats.tool_calls as u64;
+        total_conversations += period_stats.conversations as u64;
 
-        let mut models_vec: Vec<String> = day_stats
+        let mut models_vec: Vec<String> = period_stats
             .models
             .keys()
-            .map(|m| {
-                if is_model_estimated(m) {
-                    format!("{}*", m)
+            .map(|model| {
+                if is_model_estimated(model) {
+                    format!("{}*", model)
                 } else {
-                    m.clone()
+                    model.clone()
                 }
             })
             .collect();
@@ -1112,39 +1316,40 @@ fn draw_daily_stats_table(
         let models = models_vec.join(", ");
 
         // Check if this is an empty row
-        let is_empty_row = day_stats.stats.cost_cents == 0
-            && day_stats.stats.cached_tokens == 0
-            && day_stats.stats.input_tokens == 0
-            && day_stats.stats.output_tokens == 0
-            && day_stats.stats.reasoning_tokens == 0
-            && day_stats.conversations == 0
-            && day_stats.user_messages == 0
-            && day_stats.ai_messages == 0
-            && day_stats.stats.tool_calls == 0;
+        let is_empty_row = period_stats.stats.cost_cents == 0
+            && period_stats.stats.cached_tokens == 0
+            && period_stats.stats.input_tokens == 0
+            && period_stats.stats.output_tokens == 0
+            && period_stats.stats.reasoning_tokens == 0
+            && period_stats.conversations == 0
+            && period_stats.user_messages == 0
+            && period_stats.ai_messages == 0
+            && period_stats.stats.tool_calls == 0;
 
         // Create styled cells with colors matching original implementation
-        let date_cell = if is_empty_row {
+        let period_text = format_aggregate_period_for_display(period, aggregate_view_mode);
+        let period_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_date_for_display(date),
+                period_text,
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else {
-            Line::from(Span::raw(format_date_for_display(date)))
+            Line::from(Span::raw(period_text))
         };
 
         let cost_cell = if is_empty_row {
             Line::from(Span::styled(
-                format!("${:.2}", day_stats.stats.cost()),
+                format!("${:.2}", period_stats.stats.cost()),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_cost_i {
             Line::from(Span::styled(
-                format!("${:.2}", day_stats.stats.cost()),
+                format!("${:.2}", period_stats.stats.cost()),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::styled(
-                format!("${:.2}", day_stats.stats.cost()),
+                format!("${:.2}", period_stats.stats.cost()),
                 Style::default().fg(Color::Yellow),
             ))
         }
@@ -1154,17 +1359,17 @@ fn draw_daily_stats_table(
 
         let cached_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number_fit(day_stats.stats.cached_tokens, format_options, tw),
+                format_number_fit(period_stats.stats.cached_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_cached_tokens_i {
             Line::from(Span::styled(
-                format_number_fit(day_stats.stats.cached_tokens, format_options, tw),
+                format_number_fit(period_stats.stats.cached_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::styled(
-                format_number_fit(day_stats.stats.cached_tokens, format_options, tw),
+                format_number_fit(period_stats.stats.cached_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         }
@@ -1172,17 +1377,17 @@ fn draw_daily_stats_table(
 
         let input_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number_fit(day_stats.stats.input_tokens, format_options, tw),
+                format_number_fit(period_stats.stats.input_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_input_tokens_i {
             Line::from(Span::styled(
-                format_number_fit(day_stats.stats.input_tokens, format_options, tw),
+                format_number_fit(period_stats.stats.input_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::raw(format_number_fit(
-                day_stats.stats.input_tokens,
+                period_stats.stats.input_tokens,
                 format_options,
                 tw,
             )))
@@ -1191,17 +1396,17 @@ fn draw_daily_stats_table(
 
         let output_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number_fit(day_stats.stats.output_tokens, format_options, tw),
+                format_number_fit(period_stats.stats.output_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_output_tokens_i {
             Line::from(Span::styled(
-                format_number_fit(day_stats.stats.output_tokens, format_options, tw),
+                format_number_fit(period_stats.stats.output_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::raw(format_number_fit(
-                day_stats.stats.output_tokens,
+                period_stats.stats.output_tokens,
                 format_options,
                 tw,
             )))
@@ -1210,17 +1415,17 @@ fn draw_daily_stats_table(
 
         let reasoning_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number_fit(day_stats.stats.reasoning_tokens, format_options, tw),
+                format_number_fit(period_stats.stats.reasoning_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_reasoning_tokens_i {
             Line::from(Span::styled(
-                format_number_fit(day_stats.stats.reasoning_tokens, format_options, tw),
+                format_number_fit(period_stats.stats.reasoning_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::raw(format_number_fit(
-                day_stats.stats.reasoning_tokens,
+                period_stats.stats.reasoning_tokens,
                 format_options,
                 tw,
             )))
@@ -1229,17 +1434,17 @@ fn draw_daily_stats_table(
 
         let conv_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.conversations as u64, format_options),
+                format_number(period_stats.conversations as u64, format_options),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_conversations_i {
             Line::from(Span::styled(
-                format_number(day_stats.conversations as u64, format_options),
+                format_number(period_stats.conversations as u64, format_options),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::raw(format_number(
-                day_stats.conversations as u64,
+                period_stats.conversations as u64,
                 format_options,
             )))
         }
@@ -1247,17 +1452,17 @@ fn draw_daily_stats_table(
 
         let tool_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.stats.tool_calls as u64, format_options),
+                format_number(period_stats.stats.tool_calls as u64, format_options),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_tool_calls_i {
             Line::from(Span::styled(
-                format_number(day_stats.stats.tool_calls as u64, format_options),
+                format_number(period_stats.stats.tool_calls as u64, format_options),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::styled(
-                format_number(day_stats.stats.tool_calls as u64, format_options),
+                format_number(period_stats.stats.tool_calls as u64, format_options),
                 Style::default().fg(Color::Green),
             ))
         }
@@ -1280,9 +1485,9 @@ fn draw_daily_stats_table(
             Line::from(Span::raw(""))
         };
 
-        let row = Row::new(vec![
+        rows.push(Row::new(vec![
             arrow_cell,
-            date_cell,
+            period_cell,
             cost_cell,
             cached_cell,
             input_cell,
@@ -1290,31 +1495,29 @@ fn draw_daily_stats_table(
             reasoning_cell,
             conv_cell,
             tool_cell,
-            // lines_cell,
             models_cell,
-        ]);
-
-        rows.push(row);
+        ]));
     }
 
     // Collect all unique models for the totals row
     let mut all_models = HashSet::new();
     let mut has_estimated_models = false;
-    for day_stats in stats.daily_stats.values() {
-        for model in day_stats.models.keys() {
+    for period_stats in aggregate_stats.values() {
+        for model in period_stats.models.keys() {
             all_models.insert(model);
             if is_model_estimated(model) {
                 has_estimated_models = true;
             }
         }
     }
+
     let mut all_models_vec: Vec<String> = all_models
         .iter()
-        .map(|k| {
-            if is_model_estimated(k) {
-                format!("{}*", k)
+        .map(|model| {
+            if is_model_estimated(model) {
+                format!("{}*", model)
             } else {
-                k.to_string()
+                model.to_string()
             }
         })
         .collect();
@@ -1323,7 +1526,7 @@ fn draw_daily_stats_table(
 
     // Add separator row before totals
     let token_sep = "─".repeat(TOKEN_COL_WIDTH as usize);
-    let separator_row = Row::new(vec![
+    rows.push(Row::new(vec![
         Line::from(Span::styled(
             "",
             Style::default().add_modifier(Modifier::DIM),
@@ -1364,14 +1567,12 @@ fn draw_daily_stats_table(
             "─".repeat(all_models_text.len().max(18)),
             Style::default().add_modifier(Modifier::DIM),
         )),
-    ]);
-    rows.push(separator_row);
+    ]));
 
     // Add totals row
     let total_cost = total_cost_cents as f64 / 100.0;
-
     let tw = TOKEN_COL_WIDTH as usize;
-    let totals_row = Row::new(vec![
+    rows.push(Row::new(vec![
         // Arrow indicator for totals row when selected
         if table_state.selected() == Some(rows.len()) {
             Line::from(Span::styled(
@@ -1384,7 +1585,10 @@ fn draw_daily_stats_table(
             Line::from(Span::raw(""))
         },
         Line::from(Span::styled(
-            format!("Total ({}d)", stats.daily_stats.len()),
+            match aggregate_view_mode {
+                AggregateViewMode::Daily => format!("Total ({}d)", aggregate_stats.len()),
+                AggregateViewMode::Monthly => format!("Total ({}m)", aggregate_stats.len()),
+            },
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
@@ -1432,9 +1636,7 @@ fn draw_daily_stats_table(
             all_models_text,
             Style::default().add_modifier(Modifier::DIM),
         )),
-    ]);
-
-    rows.push(totals_row);
+    ]));
 
     // Save the row count before moving rows into the table
     let total_rows = rows.len();
@@ -1443,7 +1645,7 @@ fn draw_daily_stats_table(
         rows,
         [
             Constraint::Length(1),               // Arrow
-            Constraint::Length(11),              // Date
+            Constraint::Length(11),              // Date/Month
             Constraint::Length(10),              // Cost
             Constraint::Length(TOKEN_COL_WIDTH), // Cached
             Constraint::Length(TOKEN_COL_WIDTH), // Input
@@ -2015,6 +2217,10 @@ fn draw_summary_stats(
     frame.render_widget(summary_widget, area);
 }
 
+/// Initialize or resize table states to match the number of analyzers with data.
+///
+/// Preserves existing table states when resizing and creates new states for
+/// newly discovered analyzers. Clamps `selected_tab` to valid bounds.
 fn update_table_states(
     table_states: &mut Vec<TableState>,
     current_stats: &MultiAnalyzerStatsView,
@@ -2049,6 +2255,9 @@ fn update_table_states(
     }
 }
 
+/// Resize the session window offsets vector to match the filtered analyzer count.
+///
+/// Preserves existing offset values when growing; new entries start at offset 0.
 fn update_window_offsets(window_offsets: &mut Vec<usize>, filtered_count: &usize) {
     let old = window_offsets.clone();
     window_offsets.clear();
@@ -2062,6 +2271,9 @@ fn update_window_offsets(window_offsets: &mut Vec<usize>, filtered_count: &usize
     }
 }
 
+/// Resize the day filter vector to match the filtered analyzer count.
+///
+/// Preserves existing filter values when growing; new entries default to `None`.
 fn update_day_filters(filters: &mut Vec<Option<CompactDate>>, filtered_count: &usize) {
     let old_len = filters.len();
     filters.resize(*filtered_count, None);
@@ -2070,6 +2282,10 @@ fn update_day_filters(filters: &mut Vec<Option<CompactDate>>, filtered_count: &u
     }
 }
 
+/// Build a callback that prints upload progress to stdout with animated dots.
+///
+/// The callback takes `(current, total)` message counts and prints a status line
+/// that updates in place. Dots animate every 500ms to show activity.
 pub fn create_upload_progress_callback(
     format_options: &NumberFormatOptions,
 ) -> impl Fn(usize, usize) + '_ {
@@ -2116,6 +2332,9 @@ pub fn create_upload_progress_callback(
     }
 }
 
+/// Print a success message after upload completes.
+///
+/// Displays a checkmark and the total number of messages uploaded in green.
 pub fn show_upload_success(total: usize, format_options: &NumberFormatOptions) {
     let _ = execute!(
         stdout(),
@@ -2129,6 +2348,9 @@ pub fn show_upload_success(total: usize, format_options: &NumberFormatOptions) {
     );
 }
 
+/// Print an error message when upload fails.
+///
+/// Displays an X mark and the error message in red.
 pub fn show_upload_error(error: &str) {
     let _ = execute!(
         stdout(),
