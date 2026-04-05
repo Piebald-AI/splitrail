@@ -34,19 +34,43 @@ impl OpenCodeAnalyzer {
         dirs::home_dir().map(|h| h.join(".local/share/opencode/storage"))
     }
 
-    /// `~/.local/share/opencode/opencode.db` — new SQLite database.
-    fn db_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".local/share/opencode/opencode.db"))
-    }
-
     /// `~/.local/share/opencode` — parent directory (for watching the DB).
     fn app_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".local/share/opencode"))
     }
 
-    /// Check if the SQLite database file exists on disk.
+    /// Discover all OpenCode SQLite database files.
+    ///
+    /// OpenCode stores data in `opencode.db` for the default/latest/beta channel,
+    /// and `opencode-{channel}.db` for other channels (e.g. `opencode-canary.db`).
+    fn discover_db_files() -> Vec<PathBuf> {
+        let Some(app_dir) = Self::app_dir() else {
+            return Vec::new();
+        };
+        if !app_dir.is_dir() {
+            return Vec::new();
+        }
+
+        let pattern = app_dir.join("opencode*.db");
+        let pattern_str = pattern.to_string_lossy().to_string();
+
+        glob(&pattern_str)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|p| {
+                // Accept "opencode.db" and "opencode-{channel}.db", but reject
+                // WAL/SHM journal files and unrelated matches.
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                name == "opencode.db" || (name.starts_with("opencode-") && name.ends_with(".db"))
+            })
+            .collect()
+    }
+
+    /// Check if any SQLite database file exists on disk.
     fn has_sqlite_db() -> bool {
-        Self::db_path().is_some_and(|p| p.exists())
+        !Self::discover_db_files().is_empty()
     }
 
     /// Check if the legacy JSON message directory has any files.
@@ -654,6 +678,79 @@ fn batch_load_tool_stats_from_db(conn: &Connection) -> HashMap<String, Stats> {
     map
 }
 
+/// Batch-load step-finish token/cost data from the SQLite `part` table.
+///
+/// Returns a map of `message_id → StepFinishAgg` with aggregated token counts
+/// and costs across all `step-finish` parts for that message. This is used as a
+/// fallback when the message-level `data` blob has zero tokens (which can happen
+/// in newer OpenCode versions where per-step accounting is the primary source).
+#[derive(Debug, Clone, Default)]
+struct StepFinishAgg {
+    input: u64,
+    output: u64,
+    reasoning: u64,
+    cache_read: u64,
+    cache_write: u64,
+    cost: f64,
+}
+
+fn batch_load_step_finish_from_db(conn: &Connection) -> HashMap<String, StepFinishAgg> {
+    let mut map: HashMap<String, StepFinishAgg> = HashMap::new();
+
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT message_id, data FROM part \
+         WHERE data LIKE '%\"type\":\"step-finish\"%' \
+            OR data LIKE '%\"type\": \"step-finish\"%'",
+    ) else {
+        return map;
+    };
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .ok();
+
+    let Some(rows) = rows else { return map };
+
+    for row in rows.flatten() {
+        let (message_id, data) = row;
+
+        let mut bytes = data.into_bytes();
+        let Ok(value) = simd_json::from_slice::<OwnedValue>(&mut bytes) else {
+            continue;
+        };
+
+        let Some(part_type) = value.get("type").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if part_type != "step-finish" {
+            continue;
+        }
+
+        let agg = map.entry(message_id).or_default();
+
+        if let Some(tokens) = value.get("tokens") {
+            agg.input += tokens.get("input").and_then(|v| v.as_u64()).unwrap_or(0);
+            agg.output += tokens.get("output").and_then(|v| v.as_u64()).unwrap_or(0);
+            agg.reasoning += tokens
+                .get("reasoning")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if let Some(cache) = tokens.get("cache") {
+                agg.cache_read += cache.get("read").and_then(|v| v.as_u64()).unwrap_or(0);
+                agg.cache_write += cache.get("write").and_then(|v| v.as_u64()).unwrap_or(0);
+            }
+        }
+
+        if let Some(cost) = value.get("cost").and_then(|v| v.as_f64()) {
+            agg.cost += cost;
+        }
+    }
+
+    map
+}
+
 /// Parse all messages from the OpenCode SQLite database.
 ///
 /// Reads from the `message`, `session`, `project`, and `part` tables.
@@ -665,6 +762,7 @@ fn parse_sqlite_messages(db_path: &Path) -> Result<Vec<ConversationMessage>> {
     let db_projects = load_projects_from_db(&conn);
     let db_sessions = load_sessions_from_db(&conn);
     let tool_stats_map = batch_load_tool_stats_from_db(&conn);
+    let step_finish_map = batch_load_step_finish_from_db(&conn);
 
     let mut stmt = conn.prepare("SELECT id, session_id, time_created, data FROM message")?;
 
@@ -692,6 +790,34 @@ fn parse_sqlite_messages(db_path: &Path) -> Result<Vec<ConversationMessage>> {
             // back to whatever the JSON blob contained.
             if msg.time.created.is_none() || msg.time.created == Some(0) {
                 msg.time.created = Some(time_created);
+            }
+
+            // If the message-level tokens are all zero but step-finish parts
+            // have token data, use the aggregated step-finish data instead.
+            // This handles newer OpenCode versions where per-step accounting
+            // is the primary data source.
+            if msg.role == "assistant" {
+                let msg_has_tokens = msg
+                    .tokens
+                    .as_ref()
+                    .is_some_and(|t| t.input > 0 || t.output > 0);
+                if !msg_has_tokens
+                    && let Some(agg) = step_finish_map.get(&id)
+                    && (agg.input > 0 || agg.output > 0)
+                {
+                    msg.tokens = Some(OpenCodeTokens {
+                        input: agg.input,
+                        output: agg.output,
+                        reasoning: agg.reasoning,
+                        cache: OpenCodeCacheTokens {
+                            read: agg.cache_read,
+                            write: agg.cache_write,
+                        },
+                    });
+                    if agg.cost > 0.0 && msg.cost.is_none_or(|c| c == 0.0) {
+                        msg.cost = Some(agg.cost);
+                    }
+                }
             }
 
             // Resolve session/project metadata
@@ -740,8 +866,10 @@ impl Analyzer for OpenCodeAnalyzer {
             patterns.push(format!(
                 "{home_str}/.local/share/opencode/storage/message/*/*.json"
             ));
-            // New SQLite database.
+            // Default SQLite database.
             patterns.push(format!("{home_str}/.local/share/opencode/opencode.db"));
+            // Channel-specific SQLite databases (e.g. opencode-canary.db).
+            patterns.push(format!("{home_str}/.local/share/opencode/opencode-*.db"));
         }
 
         patterns
@@ -768,10 +896,8 @@ impl Analyzer for OpenCodeAnalyzer {
             sources.extend(json_sources);
         }
 
-        // Discover the SQLite database.
-        if let Some(db) = Self::db_path()
-            && db.exists()
-        {
+        // Discover all SQLite databases (default + channel-specific).
+        for db in Self::discover_db_files() {
             sources.push(DataSource { path: db });
         }
 
@@ -921,9 +1047,12 @@ impl Analyzer for OpenCodeAnalyzer {
     }
 
     fn is_valid_data_path(&self, path: &Path) -> bool {
-        // Accept the SQLite database file.
-        if path.is_file() && path.file_name().is_some_and(|n| n == "opencode.db") {
-            return true;
+        // Accept any OpenCode SQLite database file (opencode.db or opencode-{channel}.db).
+        if path.is_file() {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name == "opencode.db" || (name.starts_with("opencode-") && name.ends_with(".db")) {
+                return true;
+            }
         }
 
         // Accept legacy JSON message files at depth 2 from the data_dir.
@@ -1299,6 +1428,8 @@ mod tests {
 
     // ---- In-memory SQLite integration tests ----
 
+    /// Create an in-memory DB matching the **initial** OpenCode SQLite schema
+    /// (v1.1.53, migration `20260127222353_familiar_lady_ursula`).
     fn create_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
 
@@ -1309,22 +1440,38 @@ mod tests {
                 worktree TEXT NOT NULL,
                 vcs TEXT,
                 name TEXT,
+                icon_url TEXT,
+                icon_color TEXT,
                 time_created INTEGER NOT NULL,
-                time_updated INTEGER NOT NULL
+                time_updated INTEGER NOT NULL,
+                time_initialized INTEGER,
+                sandboxes TEXT NOT NULL DEFAULT '[]'
             );
 
             CREATE TABLE session (
                 id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL REFERENCES project(id),
-                title TEXT NOT NULL,
+                project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+                parent_id TEXT,
+                slug TEXT NOT NULL DEFAULT '',
                 directory TEXT NOT NULL,
+                title TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT '',
+                share_url TEXT,
+                summary_additions INTEGER,
+                summary_deletions INTEGER,
+                summary_files INTEGER,
+                summary_diffs TEXT,
+                revert TEXT,
+                permission TEXT,
                 time_created INTEGER NOT NULL,
-                time_updated INTEGER NOT NULL
+                time_updated INTEGER NOT NULL,
+                time_compacting INTEGER,
+                time_archived INTEGER
             );
 
             CREATE TABLE message (
                 id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL REFERENCES session(id),
+                session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
                 time_created INTEGER NOT NULL,
                 time_updated INTEGER NOT NULL,
                 data TEXT NOT NULL
@@ -1332,12 +1479,106 @@ mod tests {
 
             CREATE TABLE part (
                 id TEXT PRIMARY KEY,
-                message_id TEXT NOT NULL REFERENCES message(id),
+                message_id TEXT NOT NULL REFERENCES message(id) ON DELETE CASCADE,
                 session_id TEXT NOT NULL,
                 time_created INTEGER NOT NULL,
                 time_updated INTEGER NOT NULL,
                 data TEXT NOT NULL
             );
+
+            CREATE INDEX message_session_idx ON message (session_id);
+            CREATE INDEX part_message_idx ON part (message_id);
+            CREATE INDEX part_session_idx ON part (session_id);
+            CREATE INDEX session_project_idx ON session (project_id);
+            CREATE INDEX session_parent_idx ON session (parent_id);
+            ",
+        )
+        .unwrap();
+
+        conn
+    }
+
+    /// Create an in-memory DB matching the **current** OpenCode SQLite schema
+    /// (after all migrations through `20260323234822_events`).
+    ///
+    /// This includes the `commands` column on `project`, the `workspace_id`
+    /// column on `session`, the `workspace` table, and the updated composite
+    /// indexes on `message` and `part`.
+    fn create_test_db_v2() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+
+        conn.execute_batch(
+            "
+            CREATE TABLE project (
+                id TEXT PRIMARY KEY,
+                worktree TEXT NOT NULL,
+                vcs TEXT,
+                name TEXT,
+                icon_url TEXT,
+                icon_color TEXT,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_initialized INTEGER,
+                sandboxes TEXT NOT NULL DEFAULT '[]',
+                commands TEXT
+            );
+
+            CREATE TABLE workspace (
+                id TEXT PRIMARY KEY,
+                branch TEXT,
+                project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+                type TEXT NOT NULL,
+                name TEXT,
+                directory TEXT,
+                extra TEXT
+            );
+
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+                workspace_id TEXT,
+                parent_id TEXT,
+                slug TEXT NOT NULL DEFAULT '',
+                directory TEXT NOT NULL,
+                title TEXT NOT NULL,
+                version TEXT NOT NULL DEFAULT '',
+                share_url TEXT,
+                summary_additions INTEGER,
+                summary_deletions INTEGER,
+                summary_files INTEGER,
+                summary_diffs TEXT,
+                revert TEXT,
+                permission TEXT,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                time_compacting INTEGER,
+                time_archived INTEGER
+            );
+
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+
+            CREATE INDEX message_session_time_created_id_idx
+                ON message (session_id, time_created, id);
+            CREATE INDEX part_message_id_id_idx ON part (message_id, id);
+            CREATE INDEX part_session_idx ON part (session_id);
+            CREATE INDEX session_project_idx ON session (project_id);
+            CREATE INDEX session_workspace_idx ON session (workspace_id);
+            CREATE INDEX session_parent_idx ON session (parent_id);
             ",
         )
         .unwrap();
@@ -1560,5 +1801,500 @@ mod tests {
             asst_msg.global_hash,
             hash_text("opencode_ses_xyz_msg_asst1")
         );
+    }
+
+    // ---- New SQLite schema (v2) tests ----
+    //
+    // These tests exercise the updated schema with workspace_id,
+    // channel-specific databases, step-finish token aggregation,
+    // and the "global" project_id fallback.
+
+    #[test]
+    fn test_v2_schema_load_projects() {
+        let conn = create_test_db_v2();
+        conn.execute(
+            "INSERT INTO project (id, worktree, vcs, name, icon_color, sandboxes, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "a1b2c3d4e5",
+                "/code/myproject",
+                "git",
+                "My Project",
+                "blue",
+                "[]",
+                1770000000000i64,
+                1770000000000i64,
+            ],
+        )
+        .unwrap();
+
+        let projects = load_projects_from_db(&conn);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects["a1b2c3d4e5"].worktree, "/code/myproject");
+    }
+
+    #[test]
+    fn test_v2_schema_load_sessions_with_workspace() {
+        let conn = create_test_db_v2();
+
+        conn.execute(
+            "INSERT INTO project (id, worktree, sandboxes, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["proj_hash", "/code/proj", "[]", 0i64, 0i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workspace (id, project_id, type, name) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["ws_1", "proj_hash", "branch", "feat-x"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, project_id, workspace_id, slug, directory, title, version, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                "ses_ws",
+                "proj_hash",
+                "ws_1",
+                "cool-hawk",
+                "/code/proj",
+                "Feature work",
+                "1.2.20",
+                1770000000000i64,
+                1770001000000i64,
+            ],
+        )
+        .unwrap();
+
+        let sessions = load_sessions_from_db(&conn);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions["ses_ws"].title, "Feature work");
+        assert_eq!(sessions["ses_ws"].project_id, "proj_hash");
+    }
+
+    #[test]
+    fn test_v2_schema_global_project_id() {
+        // Sessions with project_id = "global" should still parse correctly;
+        // the project lookup returns None and we fall back to session_id
+        // for the project hash.
+        let conn = create_test_db_v2();
+
+        // Insert a project that isn't "global" so FK isn't violated.
+        conn.execute(
+            "INSERT INTO project (id, worktree, sandboxes, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["global", "/", "[]", 0i64, 0i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "ses_global",
+                "global",
+                "eager-fox",
+                "/code",
+                "Greeting",
+                "1.2.16",
+                1770000000000i64,
+                1770000000000i64,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "msg_g1",
+                "ses_global",
+                1770000100000i64,
+                1770000100000i64,
+                r#"{"role":"user","time":{"created":1770000100000},"agent":"build","model":{"providerID":"anthropic","modelID":"claude-opus-4-5"}}"#
+            ],
+        )
+        .unwrap();
+
+        let db_projects = load_projects_from_db(&conn);
+        let db_sessions = load_sessions_from_db(&conn);
+
+        let session = db_sessions.get("ses_global").unwrap();
+        let project = db_projects.get(&session.project_id);
+        // The "global" project's worktree is "/" which is a valid but
+        // non-meaningful path — we still use it as the project hash source.
+        assert_eq!(project.unwrap().worktree, "/");
+    }
+
+    #[test]
+    fn test_batch_load_step_finish_from_db() {
+        let conn = create_test_db_v2();
+
+        // Scaffold project/session/message.
+        conn.execute(
+            "INSERT INTO project (id, worktree, sandboxes, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["p1", "/tmp", "[]", 0i64, 0i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params!["s1", "p1", "slug", "/tmp", "t", "1.0", 0i64, 0i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["msg_sf", "s1", 0i64, 0i64, r#"{"role":"assistant"}"#],
+        )
+        .unwrap();
+
+        // Two step-finish parts with token data.
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_sf1",
+                "msg_sf",
+                "s1",
+                0i64,
+                0i64,
+                r#"{"type":"step-finish","reason":"tool-calls","cost":0.01,"tokens":{"total":5000,"input":1000,"output":500,"reasoning":100,"cache":{"read":3000,"write":400}}}"#
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_sf2",
+                "msg_sf",
+                "s1",
+                0i64,
+                0i64,
+                r#"{"type":"step-finish","reason":"stop","cost":0.02,"tokens":{"total":3000,"input":800,"output":300,"reasoning":50,"cache":{"read":1500,"write":350}}}"#
+            ],
+        )
+        .unwrap();
+        // Non-step-finish part (should be ignored).
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_text",
+                "msg_sf",
+                "s1",
+                0i64,
+                0i64,
+                r#"{"type":"text","text":"hello"}"#
+            ],
+        )
+        .unwrap();
+
+        let agg = batch_load_step_finish_from_db(&conn);
+        let msg_agg = &agg["msg_sf"];
+        assert_eq!(msg_agg.input, 1800); // 1000 + 800
+        assert_eq!(msg_agg.output, 800); // 500 + 300
+        assert_eq!(msg_agg.reasoning, 150); // 100 + 50
+        assert_eq!(msg_agg.cache_read, 4500); // 3000 + 1500
+        assert_eq!(msg_agg.cache_write, 750); // 400 + 350
+        assert!((msg_agg.cost - 0.03).abs() < f64::EPSILON); // 0.01 + 0.02
+    }
+
+    #[test]
+    fn test_step_finish_fallback_when_message_has_zero_tokens() {
+        let conn = create_test_db_v2();
+
+        conn.execute(
+            "INSERT INTO project (id, worktree, sandboxes, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["p1", "/code/test", "[]", 0i64, 0i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params!["s1", "p1", "slug", "/code/test", "t", "1.2.20", 0i64, 0i64],
+        )
+        .unwrap();
+
+        // Assistant message with zero tokens at message level.
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "msg_z",
+                "s1",
+                1770000100000i64,
+                1770000110000i64,
+                r#"{"role":"assistant","time":{"created":1770000100000,"completed":1770000110000},"modelID":"claude-opus-4-6","providerID":"anthropic","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"finish":"stop"}"#
+            ],
+        )
+        .unwrap();
+
+        // Step-finish part with actual token data.
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_sf",
+                "msg_z",
+                "s1",
+                0i64,
+                0i64,
+                r#"{"type":"step-finish","reason":"stop","cost":0.05,"tokens":{"total":10000,"input":5000,"output":3000,"reasoning":500,"cache":{"read":1000,"write":500}}}"#
+            ],
+        )
+        .unwrap();
+
+        // Query and convert using our helpers — simulating parse_sqlite_messages logic.
+        let db_projects = load_projects_from_db(&conn);
+        let db_sessions = load_sessions_from_db(&conn);
+        let tool_stats_map = batch_load_tool_stats_from_db(&conn);
+        let step_finish_map = batch_load_step_finish_from_db(&conn);
+
+        let mut stmt = conn
+            .prepare("SELECT id, session_id, time_created, data FROM message")
+            .unwrap();
+
+        let messages: Vec<ConversationMessage> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0).unwrap(),
+                    row.get::<_, String>(1).unwrap(),
+                    row.get::<_, i64>(2).unwrap(),
+                    row.get::<_, String>(3).unwrap(),
+                ))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, session_id, _time_created, data)| {
+                let mut bytes = data.into_bytes();
+                let mut msg = simd_json::from_slice::<OpenCodeMessage>(&mut bytes).ok()?;
+                msg.id = id.clone();
+                msg.session_id = session_id.clone();
+
+                // Apply step-finish fallback (same logic as parse_sqlite_messages).
+                if msg.role == "assistant" {
+                    let msg_has_tokens = msg
+                        .tokens
+                        .as_ref()
+                        .is_some_and(|t| t.input > 0 || t.output > 0);
+                    if !msg_has_tokens
+                        && let Some(agg) = step_finish_map.get(&id)
+                        && (agg.input > 0 || agg.output > 0)
+                    {
+                        msg.tokens = Some(OpenCodeTokens {
+                            input: agg.input,
+                            output: agg.output,
+                            reasoning: agg.reasoning,
+                            cache: OpenCodeCacheTokens {
+                                read: agg.cache_read,
+                                write: agg.cache_write,
+                            },
+                        });
+                        if agg.cost > 0.0 && msg.cost.is_none_or(|c| c == 0.0) {
+                            msg.cost = Some(agg.cost);
+                        }
+                    }
+                }
+
+                let session = db_sessions.get(&session_id);
+                let project = session.and_then(|s| db_projects.get(&s.project_id));
+                let tool_stats = tool_stats_map.get(&id).cloned().unwrap_or_default();
+                let stats = compute_message_stats(&msg, tool_stats);
+                let session_title = session.map(|s| s.title.clone());
+                let worktree = project.map(|p| p.worktree.as_str());
+                let fallback = Some(session_id.as_str());
+
+                Some(build_conversation_message(
+                    msg,
+                    session_title,
+                    worktree,
+                    fallback,
+                    stats,
+                ))
+            })
+            .collect();
+
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        // Tokens should come from step-finish fallback.
+        assert_eq!(msg.stats.input_tokens, 5000);
+        assert_eq!(msg.stats.output_tokens, 3000);
+        assert_eq!(msg.stats.reasoning_tokens, 500);
+        assert_eq!(msg.stats.cache_read_tokens, 1000);
+        assert_eq!(msg.stats.cache_creation_tokens, 500);
+        assert!((msg.stats.cost - 0.05).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_v2_schema_end_to_end() {
+        // Full end-to-end test with the v2 schema including workspace,
+        // hash-based project IDs, and new-format data blobs.
+        let conn = create_test_db_v2();
+
+        // SHA-hash project IDs (as in real OpenCode data).
+        conn.execute(
+            "INSERT INTO project (id, worktree, vcs, name, icon_color, sandboxes, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "0b4651dc870efaaf627a2dadd5613224e4343b32",
+                "/code/tweakcc",
+                "git",
+                "tweakcc",
+                "purple",
+                "[]",
+                1764038326711i64,
+                1773863312475i64,
+            ],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "ses_real1",
+                "0b4651dc870efaaf627a2dadd5613224e4343b32",
+                "clever-hawk",
+                "/code/tweakcc",
+                "Exploring tweakcc codebase",
+                "1.2.16",
+                1766190800000i64,
+                1766191000000i64,
+            ],
+        )
+        .unwrap();
+
+        // User message with the newer format (has model object, tools, variant).
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "msg_u1",
+                "ses_real1",
+                1766190934946i64,
+                1766190934946i64,
+                r#"{"role":"user","time":{"created":1766190934946},"summary":{"title":"Exploring tweakcc codebase","diffs":[]},"agent":"explore","model":{"providerID":"anthropic","modelID":"claude-opus-4-5"},"tools":{"todowrite":false,"todoread":false}}"#
+            ],
+        )
+        .unwrap();
+
+        // Assistant message with all new fields (parentID, mode, path, etc.).
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "msg_a1",
+                "ses_real1",
+                1766190946687i64,
+                1766190953244i64,
+                r#"{"role":"assistant","time":{"created":1766190946687,"completed":1766190953244},"parentID":"msg_u1","modelID":"claude-opus-4-5","providerID":"anthropic","mode":"explore","agent":"explore","path":{"cwd":"/code/tweakcc","root":"/code/tweakcc"},"cost":0.042,"tokens":{"total":23335,"input":0,"output":232,"reasoning":0,"cache":{"read":23103,"write":27398}},"finish":"tool-calls"}"#
+            ],
+        )
+        .unwrap();
+
+        // Tool part.
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_t1",
+                "msg_a1",
+                "ses_real1",
+                1766190947000i64,
+                1766190948000i64,
+                r#"{"type":"tool","tool":"read","callID":"toolu_01","state":{"status":"completed","input":{"filePath":"/code/tweakcc/package.json"},"output":"...","title":"Read file","metadata":{},"time":{"start":1766190947000,"end":1766190948000}}}"#
+            ],
+        )
+        .unwrap();
+
+        // Step-finish part (tokens duplicate message-level, which is normal).
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                "prt_sf1",
+                "msg_a1",
+                "ses_real1",
+                1766190953000i64,
+                1766190953244i64,
+                r#"{"type":"step-finish","reason":"tool-calls","cost":0.042,"tokens":{"total":23335,"input":0,"output":232,"reasoning":0,"cache":{"read":23103,"write":27398}}}"#
+            ],
+        )
+        .unwrap();
+
+        // Query using our helpers.
+        let db_projects = load_projects_from_db(&conn);
+        let db_sessions = load_sessions_from_db(&conn);
+        let tool_stats_map = batch_load_tool_stats_from_db(&conn);
+
+        assert_eq!(db_projects.len(), 1);
+        assert_eq!(
+            db_projects["0b4651dc870efaaf627a2dadd5613224e4343b32"].worktree,
+            "/code/tweakcc"
+        );
+        assert_eq!(db_sessions.len(), 1);
+        assert_eq!(db_sessions["ses_real1"].title, "Exploring tweakcc codebase");
+        assert_eq!(tool_stats_map["msg_a1"].tool_calls, 1);
+        assert_eq!(tool_stats_map["msg_a1"].files_read, 1);
+    }
+
+    #[test]
+    fn test_parse_message_with_tools_field() {
+        // User messages in the newer format include a `tools` object.
+        let json = r#"{
+            "role": "user",
+            "time": { "created": 1770000000000 },
+            "agent": "build",
+            "model": { "providerID": "anthropic", "modelID": "claude-opus-4-5" },
+            "tools": { "todowrite": false, "todoread": false, "task": false, "edit": false, "write": false }
+        }"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).expect("should parse");
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.model_name().unwrap(), "claude-opus-4-5");
+    }
+
+    #[test]
+    fn test_parse_message_with_total_tokens_field() {
+        // Newer messages include a `total` field in the tokens object.
+        let json = r#"{
+            "role": "assistant",
+            "time": { "created": 1770000000000, "completed": 1770000010000 },
+            "modelID": "minimax-m2.5-free",
+            "providerID": "opencode",
+            "cost": 0,
+            "tokens": { "total": 112793, "input": 849, "output": 1896, "reasoning": 0, "cache": { "write": 0, "read": 110048 } },
+            "finish": "stop"
+        }"#;
+        let mut bytes = json.as_bytes().to_vec();
+        let msg: OpenCodeMessage = simd_json::from_slice(&mut bytes).expect("should parse");
+        assert_eq!(msg.role, "assistant");
+        let tokens = msg.tokens.as_ref().unwrap();
+        assert_eq!(tokens.input, 849);
+        assert_eq!(tokens.output, 1896);
+        assert_eq!(tokens.cache.read, 110048);
+    }
+
+    #[test]
+    fn test_is_valid_data_path_channel_db() {
+        let analyzer = OpenCodeAnalyzer::new();
+
+        // Channel-specific DB files should be accepted.
+        let tmp = std::env::temp_dir().join("opencode-canary.db");
+        std::fs::write(&tmp, "fake").unwrap();
+        assert!(analyzer.is_valid_data_path(&tmp));
+        std::fs::remove_file(&tmp).unwrap();
+
+        let tmp2 = std::env::temp_dir().join("opencode.db");
+        std::fs::write(&tmp2, "fake").unwrap();
+        assert!(analyzer.is_valid_data_path(&tmp2));
+        std::fs::remove_file(&tmp2).unwrap();
+
+        // Reject non-matching patterns.
+        let tmp3 = std::env::temp_dir().join("opencode.db-wal");
+        std::fs::write(&tmp3, "fake").unwrap();
+        assert!(!analyzer.is_valid_data_path(&tmp3));
+        std::fs::remove_file(&tmp3).unwrap();
     }
 }
