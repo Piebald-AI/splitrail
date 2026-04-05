@@ -192,10 +192,10 @@ where
         save_chunk_progress(config, &sorted_messages, messages_processed, upload_debug);
     }
 
-    // Final save: mark everything up to now as uploaded.
-    let date = chrono::Utc::now().timestamp_millis();
-    config.set_last_date_uploaded(date);
-    config.save(true)?;
+    // No additional save needed here — save_chunk_progress already persisted
+    // the checkpoint after each chunk (including the last one), anchored to
+    // the last uploaded message timestamp + 1ms.  Using Utc::now() would risk
+    // skipping messages created during the upload window.
 
     Ok(())
 }
