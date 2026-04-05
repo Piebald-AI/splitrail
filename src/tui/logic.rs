@@ -87,6 +87,12 @@ pub fn date_matches_buffer(day: &str, buffer: &str) -> bool {
                 return day_year == number;
             }
 
+            if (13..=31).contains(&number) {
+                return day_number
+                    .map(|day_value| day_value == number)
+                    .unwrap_or(false);
+            }
+
             if (1..=12).contains(&number) {
                 return day_month == number;
             }
