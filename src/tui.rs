@@ -6,7 +6,9 @@ use crate::models::is_model_estimated;
 use crate::types::{
     AnalyzerStatsView, CompactDate, MultiAnalyzerStatsView, SharedAnalyzerView, resolve_model,
 };
-use crate::utils::{NumberFormatOptions, format_date_for_display, format_number};
+use crate::utils::{
+    NumberFormatOptions, format_date_for_display, format_number, format_number_fit,
+};
 use crate::watcher::{FileWatcher, RealtimeStatsManager, WatcherEvent};
 use anyhow::Result;
 use chrono::Local;
@@ -94,6 +96,17 @@ struct UiState<'a> {
     sort_reversed: bool,
     show_totals: bool,
 }
+
+/// Column width for all token count columns (Cached, Input, Output, Reasoning).
+///
+/// Width of 12 accommodates:
+/// - All u32 per-day values without commas (max 10 digits: "4294967295")
+/// - Most comma-formatted values (up to "999,999,999" = 11 chars)
+/// - Most u64 total values without commas (up to 999 billion = 12 digits)
+///
+/// Values that still overflow (e.g. u64 totals with comma format) are handled
+/// by `format_number_fit` which falls back to human-readable format.
+const TOKEN_COL_WIDTH: u16 = 12;
 
 pub fn run_tui(
     stats_receiver: watch::Receiver<MultiAnalyzerStatsView>,
@@ -365,61 +378,59 @@ async fn run_app(
             }
 
             match key.code {
-                KeyCode::Left | KeyCode::Char('h') => {
-                    if *selected_tab > 0 {
-                        *selected_tab -= 1;
+                KeyCode::Left | KeyCode::Char('h') if *selected_tab > 0 => {
+                    *selected_tab -= 1;
 
-                        if let StatsViewMode::Session = *stats_view_mode
-                            && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some(view) = filtered_stats.get(*selected_tab)
+                    if let StatsViewMode::Session = *stats_view_mode
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(view) = filtered_stats.get(*selected_tab)
+                    {
+                        let view = view.read();
+                        let target_len = match session_day_filters
+                            .get(*selected_tab)
+                            .and_then(|f| f.as_ref())
                         {
-                            let view = view.read();
-                            let target_len = match session_day_filters
-                                .get(*selected_tab)
-                                .and_then(|f| f.as_ref())
-                            {
-                                Some(day) => view
-                                    .session_aggregates
-                                    .iter()
-                                    .filter(|s| &s.date == day)
-                                    .count(),
-                                None => view.session_aggregates.len(),
-                            };
-                            if target_len > 0 {
-                                table_state.select(Some(target_len.saturating_sub(1)));
-                            }
+                            Some(day) => view
+                                .session_aggregates
+                                .iter()
+                                .filter(|s| &s.date == day)
+                                .count(),
+                            None => view.session_aggregates.len(),
+                        };
+                        if target_len > 0 {
+                            table_state.select(Some(target_len.saturating_sub(1)));
                         }
-
-                        needs_redraw = true;
                     }
+
+                    needs_redraw = true;
                 }
-                KeyCode::Right | KeyCode::Char('l') => {
-                    if *selected_tab < filtered_stats.len().saturating_sub(1) {
-                        *selected_tab += 1;
+                KeyCode::Right | KeyCode::Char('l')
+                    if *selected_tab < filtered_stats.len().saturating_sub(1) =>
+                {
+                    *selected_tab += 1;
 
-                        if let StatsViewMode::Session = *stats_view_mode
-                            && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some(view) = filtered_stats.get(*selected_tab)
+                    if let StatsViewMode::Session = *stats_view_mode
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(view) = filtered_stats.get(*selected_tab)
+                    {
+                        let view = view.read();
+                        let target_len = match session_day_filters
+                            .get(*selected_tab)
+                            .and_then(|f| f.as_ref())
                         {
-                            let view = view.read();
-                            let target_len = match session_day_filters
-                                .get(*selected_tab)
-                                .and_then(|f| f.as_ref())
-                            {
-                                Some(day) => view
-                                    .session_aggregates
-                                    .iter()
-                                    .filter(|s| &s.date == day)
-                                    .count(),
-                                None => view.session_aggregates.len(),
-                            };
-                            if target_len > 0 {
-                                table_state.select(Some(target_len.saturating_sub(1)));
-                            }
+                            Some(day) => view
+                                .session_aggregates
+                                .iter()
+                                .filter(|s| &s.date == day)
+                                .count(),
+                            None => view.session_aggregates.len(),
+                        };
+                        if target_len > 0 {
+                            table_state.select(Some(target_len.saturating_sub(1)));
                         }
-
-                        needs_redraw = true;
                     }
+
+                    needs_redraw = true;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if let Some(table_state) = table_states.get_mut(*selected_tab)
@@ -629,43 +640,41 @@ async fn run_app(
                         needs_redraw = true;
                     }
                 }
-                KeyCode::Char('t') => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        *stats_view_mode = match *stats_view_mode {
-                            StatsViewMode::Daily => {
-                                session_day_filters[*selected_tab] = None;
-                                StatsViewMode::Session
-                            }
-                            StatsViewMode::Session => StatsViewMode::Daily,
-                        };
+                KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    *stats_view_mode = match *stats_view_mode {
+                        StatsViewMode::Daily => {
+                            session_day_filters[*selected_tab] = None;
+                            StatsViewMode::Session
+                        }
+                        StatsViewMode::Session => StatsViewMode::Daily,
+                    };
 
-                        date_jump_active = false;
-                        date_jump_buffer.clear();
+                    date_jump_active = false;
+                    date_jump_buffer.clear();
 
-                        if let StatsViewMode::Session = *stats_view_mode
-                            && let Some(table_state) = table_states.get_mut(*selected_tab)
-                            && let Some(view) = filtered_stats.get(*selected_tab)
-                        {
-                            let v = view.read();
-                            if !v.session_aggregates.is_empty() {
-                                let target_len = session_day_filters
-                                    .get(*selected_tab)
-                                    .and_then(|f| f.as_ref())
-                                    .map(|day| {
-                                        v.session_aggregates
-                                            .iter()
-                                            .filter(|s| &s.date == day)
-                                            .count()
-                                    })
-                                    .unwrap_or_else(|| v.session_aggregates.len());
-                                if target_len > 0 {
-                                    table_state.select(Some(target_len.saturating_sub(1)));
-                                }
+                    if let StatsViewMode::Session = *stats_view_mode
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                        && let Some(view) = filtered_stats.get(*selected_tab)
+                    {
+                        let v = view.read();
+                        if !v.session_aggregates.is_empty() {
+                            let target_len = session_day_filters
+                                .get(*selected_tab)
+                                .and_then(|f| f.as_ref())
+                                .map(|day| {
+                                    v.session_aggregates
+                                        .iter()
+                                        .filter(|s| &s.date == day)
+                                        .count()
+                                })
+                                .unwrap_or_else(|| v.session_aggregates.len());
+                            if target_len > 0 {
+                                table_state.select(Some(target_len.saturating_sub(1)));
                             }
                         }
-
-                        needs_redraw = true;
                     }
+
+                    needs_redraw = true;
                 }
                 KeyCode::Enter => {
                     if let StatsViewMode::Daily = *stats_view_mode
@@ -1014,13 +1023,13 @@ fn draw_daily_stats_table(
 
     let mut best_cost_cents: u32 = 0;
     let mut best_cost_i = 0;
-    let mut best_cached_tokens: u32 = 0;
+    let mut best_cached_tokens: u64 = 0;
     let mut best_cached_tokens_i = 0;
-    let mut best_input_tokens: u32 = 0;
+    let mut best_input_tokens: u64 = 0;
     let mut best_input_tokens_i = 0;
-    let mut best_output_tokens: u32 = 0;
+    let mut best_output_tokens: u64 = 0;
     let mut best_output_tokens_i = 0;
-    let mut best_reasoning_tokens: u32 = 0;
+    let mut best_reasoning_tokens: u64 = 0;
     let mut best_reasoning_tokens_i = 0;
     let mut best_conversations = 0;
     let mut best_conversations_i = 0;
@@ -1081,10 +1090,10 @@ fn draw_daily_stats_table(
         }
 
         total_cost_cents += day_stats.stats.cost_cents as u64;
-        total_cached += day_stats.stats.cached_tokens as u64;
-        total_input += day_stats.stats.input_tokens as u64;
-        total_output += day_stats.stats.output_tokens as u64;
-        total_reasoning += day_stats.stats.reasoning_tokens as u64;
+        total_cached += day_stats.stats.cached_tokens;
+        total_input += day_stats.stats.input_tokens;
+        total_output += day_stats.stats.output_tokens;
+        total_reasoning += day_stats.stats.reasoning_tokens;
         total_tool_calls += day_stats.stats.tool_calls as u64;
         total_conversations += day_stats.conversations as u64;
 
@@ -1141,19 +1150,21 @@ fn draw_daily_stats_table(
         }
         .right_aligned();
 
+        let tw = TOKEN_COL_WIDTH as usize;
+
         let cached_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.stats.cached_tokens, format_options),
+                format_number_fit(day_stats.stats.cached_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_cached_tokens_i {
             Line::from(Span::styled(
-                format_number(day_stats.stats.cached_tokens, format_options),
+                format_number_fit(day_stats.stats.cached_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
             ))
         } else {
             Line::from(Span::styled(
-                format_number(day_stats.stats.cached_tokens, format_options),
+                format_number_fit(day_stats.stats.cached_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         }
@@ -1161,54 +1172,57 @@ fn draw_daily_stats_table(
 
         let input_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.stats.input_tokens, format_options),
+                format_number_fit(day_stats.stats.input_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_input_tokens_i {
             Line::from(Span::styled(
-                format_number(day_stats.stats.input_tokens, format_options),
+                format_number_fit(day_stats.stats.input_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
             ))
         } else {
-            Line::from(Span::raw(format_number(
+            Line::from(Span::raw(format_number_fit(
                 day_stats.stats.input_tokens,
                 format_options,
+                tw,
             )))
         }
         .right_aligned();
 
         let output_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.stats.output_tokens, format_options),
+                format_number_fit(day_stats.stats.output_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_output_tokens_i {
             Line::from(Span::styled(
-                format_number(day_stats.stats.output_tokens, format_options),
+                format_number_fit(day_stats.stats.output_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
             ))
         } else {
-            Line::from(Span::raw(format_number(
+            Line::from(Span::raw(format_number_fit(
                 day_stats.stats.output_tokens,
                 format_options,
+                tw,
             )))
         }
         .right_aligned();
 
         let reasoning_cell = if is_empty_row {
             Line::from(Span::styled(
-                format_number(day_stats.stats.reasoning_tokens, format_options),
+                format_number_fit(day_stats.stats.reasoning_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
         } else if i == best_reasoning_tokens_i {
             Line::from(Span::styled(
-                format_number(day_stats.stats.reasoning_tokens, format_options),
+                format_number_fit(day_stats.stats.reasoning_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
             ))
         } else {
-            Line::from(Span::raw(format_number(
+            Line::from(Span::raw(format_number_fit(
                 day_stats.stats.reasoning_tokens,
                 format_options,
+                tw,
             )))
         }
         .right_aligned();
@@ -1308,6 +1322,7 @@ fn draw_daily_stats_table(
     let all_models_text = all_models_vec.join(", ");
 
     // Add separator row before totals
+    let token_sep = "─".repeat(TOKEN_COL_WIDTH as usize);
     let separator_row = Row::new(vec![
         Line::from(Span::styled(
             "",
@@ -1322,35 +1337,29 @@ fn draw_daily_stats_table(
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            "────────────",
+            token_sep.clone(),
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            "────────",
+            token_sep.clone(),
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            "─────────",
+            token_sep.clone(),
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
-            "──────────",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            "──────",
+            token_sep,
             Style::default().add_modifier(Modifier::DIM),
         )),
         Line::from(Span::styled(
             "──────",
             Style::default().add_modifier(Modifier::DIM),
         )),
-        /*
         Line::from(Span::styled(
-            "───────────────────────",
+            "──────",
             Style::default().add_modifier(Modifier::DIM),
         )),
-        */
         Line::from(Span::styled(
             "─".repeat(all_models_text.len().max(18)),
             Style::default().add_modifier(Modifier::DIM),
@@ -1361,6 +1370,7 @@ fn draw_daily_stats_table(
     // Add totals row
     let total_cost = total_cost_cents as f64 / 100.0;
 
+    let tw = TOKEN_COL_WIDTH as usize;
     let totals_row = Row::new(vec![
         // Arrow indicator for totals row when selected
         if table_state.selected() == Some(rows.len()) {
@@ -1385,24 +1395,24 @@ fn draw_daily_stats_table(
         ))
         .right_aligned(),
         Line::from(Span::styled(
-            format_number(total_cached, format_options),
+            format_number_fit(total_cached, format_options, tw),
             Style::default()
                 .add_modifier(Modifier::DIM)
                 .add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
         Line::from(Span::styled(
-            format_number(total_input, format_options),
+            format_number_fit(total_input, format_options, tw),
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
         Line::from(Span::styled(
-            format_number(total_output, format_options),
+            format_number_fit(total_output, format_options, tw),
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
         Line::from(Span::styled(
-            format_number(total_reasoning, format_options),
+            format_number_fit(total_reasoning, format_options, tw),
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
@@ -1432,17 +1442,16 @@ fn draw_daily_stats_table(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(1),  // Arrow
-            Constraint::Length(11), // Date
-            Constraint::Length(10), // Cost
-            Constraint::Length(12), // Cached
-            Constraint::Length(8),  // Input
-            Constraint::Length(9),  // Output
-            Constraint::Length(11), // Reasoning
-            Constraint::Length(6),  // Convs
-            Constraint::Length(6),  // Tools
-            // Constraint::Length(23), // Lines
-            Constraint::Min(10), // Models
+            Constraint::Length(1),               // Arrow
+            Constraint::Length(11),              // Date
+            Constraint::Length(10),              // Cost
+            Constraint::Length(TOKEN_COL_WIDTH), // Cached
+            Constraint::Length(TOKEN_COL_WIDTH), // Input
+            Constraint::Length(TOKEN_COL_WIDTH), // Output
+            Constraint::Length(TOKEN_COL_WIDTH), // Reasoning
+            Constraint::Length(6),               // Convs
+            Constraint::Length(6),               // Tools
+            Constraint::Min(10),                 // Models
         ],
     )
     .header(header)
@@ -1599,10 +1608,10 @@ fn draw_session_stats_table(
         }
 
         total_cost_cents += session.stats.cost_cents as u64;
-        total_input_tokens += session.stats.input_tokens as u64;
-        total_output_tokens += session.stats.output_tokens as u64;
-        total_cached_tokens += session.stats.cached_tokens as u64;
-        total_reasoning_tokens += session.stats.reasoning_tokens as u64;
+        total_input_tokens += session.stats.input_tokens;
+        total_output_tokens += session.stats.output_tokens;
+        total_cached_tokens += session.stats.cached_tokens;
+        total_reasoning_tokens += session.stats.reasoning_tokens;
         total_tool_calls += session.stats.tool_calls as u64;
 
         for &(model, _) in session.models.iter() {
@@ -1657,14 +1666,16 @@ fn draw_session_stats_table(
             }
             .right_aligned();
 
+            let tw = TOKEN_COL_WIDTH as usize;
+
             let cached_cell = if best_cached_tokens_i == Some(i) {
                 Line::from(Span::styled(
-                    format_number(session.stats.cached_tokens, format_options),
+                    format_number_fit(session.stats.cached_tokens, format_options, tw),
                     Style::default().fg(Color::Red),
                 ))
             } else {
                 Line::from(Span::styled(
-                    format_number(session.stats.cached_tokens, format_options),
+                    format_number_fit(session.stats.cached_tokens, format_options, tw),
                     Style::default().add_modifier(Modifier::DIM),
                 ))
             }
@@ -1672,39 +1683,42 @@ fn draw_session_stats_table(
 
             let input_cell = if best_input_tokens_i == Some(i) {
                 Line::from(Span::styled(
-                    format_number(session.stats.input_tokens, format_options),
+                    format_number_fit(session.stats.input_tokens, format_options, tw),
                     Style::default().fg(Color::Red),
                 ))
             } else {
-                Line::from(Span::raw(format_number(
+                Line::from(Span::raw(format_number_fit(
                     session.stats.input_tokens,
                     format_options,
+                    tw,
                 )))
             }
             .right_aligned();
 
             let output_cell = if best_output_tokens_i == Some(i) {
                 Line::from(Span::styled(
-                    format_number(session.stats.output_tokens, format_options),
+                    format_number_fit(session.stats.output_tokens, format_options, tw),
                     Style::default().fg(Color::Red),
                 ))
             } else {
-                Line::from(Span::raw(format_number(
+                Line::from(Span::raw(format_number_fit(
                     session.stats.output_tokens,
                     format_options,
+                    tw,
                 )))
             }
             .right_aligned();
 
             let reasoning_cell = if best_reasoning_tokens_i == Some(i) {
                 Line::from(Span::styled(
-                    format_number(session.stats.reasoning_tokens, format_options),
+                    format_number_fit(session.stats.reasoning_tokens, format_options, tw),
                     Style::default().fg(Color::Red),
                 ))
             } else {
-                Line::from(Span::raw(format_number(
+                Line::from(Span::raw(format_number_fit(
                     session.stats.reasoning_tokens,
                     format_options,
+                    tw,
                 )))
             }
             .right_aligned();
@@ -1753,13 +1767,14 @@ fn draw_session_stats_table(
             rows.push(row);
         } else if i == total_session_rows && total_session_rows > 0 {
             // Separator row
+            let token_sep = "─".repeat(TOKEN_COL_WIDTH as usize);
             let separator_row = Row::new(vec![
                 Line::from(Span::styled(
                     "",
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
-                    "────────────",
+                    "────────────────────────────────",
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
@@ -1771,19 +1786,19 @@ fn draw_session_stats_table(
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
-                    "──────────",
+                    token_sep.clone(),
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
-                    "────────",
+                    token_sep.clone(),
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
-                    "─────────",
+                    token_sep.clone(),
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
-                    "───────────",
+                    token_sep,
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
@@ -1799,6 +1814,7 @@ fn draw_session_stats_table(
         } else {
             // Totals row
             let total_cost = total_cost_cents as f64 / 100.0;
+            let tw = TOKEN_COL_WIDTH as usize;
             let totals_row = Row::new(vec![
                 Line::from(Span::raw("")),
                 Line::from(Span::styled(
@@ -1814,24 +1830,24 @@ fn draw_session_stats_table(
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
-                    format_number(total_cached_tokens, format_options),
+                    format_number_fit(total_cached_tokens, format_options, tw),
                     Style::default()
                         .add_modifier(Modifier::DIM)
                         .add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
-                    format_number(total_input_tokens, format_options),
+                    format_number_fit(total_input_tokens, format_options, tw),
                     Style::default().add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
-                    format_number(total_output_tokens, format_options),
+                    format_number_fit(total_output_tokens, format_options, tw),
                     Style::default().add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
                 Line::from(Span::styled(
-                    format_number(total_reasoning_tokens, format_options),
+                    format_number_fit(total_reasoning_tokens, format_options, tw),
                     Style::default().add_modifier(Modifier::BOLD),
                 ))
                 .right_aligned(),
@@ -1857,16 +1873,16 @@ fn draw_session_stats_table(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(1),  // Arrow / highlight symbol space
-            Constraint::Length(32), // Session (increased width for name)
-            Constraint::Length(17), // Started
-            Constraint::Length(10), // Cost
-            Constraint::Length(10), // Cached Tks
-            Constraint::Length(8),  // Input
-            Constraint::Length(9),  // Output
-            Constraint::Length(11), // Reason Tks
-            Constraint::Length(6),  // Tools
-            Constraint::Min(10),    // Models
+            Constraint::Length(1),               // Arrow / highlight symbol space
+            Constraint::Length(32),              // Session (increased width for name)
+            Constraint::Length(17),              // Started
+            Constraint::Length(10),              // Cost
+            Constraint::Length(TOKEN_COL_WIDTH), // Cached Tks
+            Constraint::Length(TOKEN_COL_WIDTH), // Input
+            Constraint::Length(TOKEN_COL_WIDTH), // Output
+            Constraint::Length(TOKEN_COL_WIDTH), // Reason Tks
+            Constraint::Length(6),               // Tools
+            Constraint::Min(10),                 // Models
         ],
     )
     .header(header)
@@ -1906,10 +1922,10 @@ fn draw_summary_stats(
             }
 
             total_cost_cents += day_stats.stats.cost_cents as u64;
-            total_cached += day_stats.stats.cached_tokens as u64;
-            total_input += day_stats.stats.input_tokens as u64;
-            total_output += day_stats.stats.output_tokens as u64;
-            total_reasoning += day_stats.stats.reasoning_tokens as u64;
+            total_cached += day_stats.stats.cached_tokens;
+            total_input += day_stats.stats.input_tokens;
+            total_output += day_stats.stats.output_tokens;
+            total_reasoning += day_stats.stats.reasoning_tokens;
             total_tool_calls += day_stats.stats.tool_calls as u64;
 
             // Collect unique days across all tools that have actual data

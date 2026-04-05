@@ -325,6 +325,35 @@ fn test_large_tui_stats_accumulation() {
     assert!((dst.cost() - 10.0).abs() < 0.01);
 }
 
+#[test]
+fn test_tui_stats_accumulation_exceeds_u32_max() {
+    let mut dst = TuiStats::default();
+    let src = Stats {
+        input_tokens: u32::MAX as u64,
+        output_tokens: 1,
+        reasoning_tokens: 2,
+        cached_tokens: 3,
+        ..Stats::default()
+    };
+
+    accumulate_tui_stats(&mut dst, &src);
+    accumulate_tui_stats(
+        &mut dst,
+        &Stats {
+            input_tokens: 1,
+            output_tokens: u32::MAX as u64,
+            reasoning_tokens: u32::MAX as u64,
+            cached_tokens: u32::MAX as u64,
+            ..Stats::default()
+        },
+    );
+
+    assert_eq!(dst.input_tokens, u32::MAX as u64 + 1);
+    assert_eq!(dst.output_tokens, u32::MAX as u64 + 1);
+    assert_eq!(dst.reasoning_tokens, u32::MAX as u64 + 2);
+    assert_eq!(dst.cached_tokens, u32::MAX as u64 + 3);
+}
+
 // ============================================================================
 // COMPREHENSIVE DATA INTEGRITY TESTS
 // ============================================================================

@@ -439,7 +439,7 @@ fn to_conversation_message(
             s.reasoning_tokens = tokens.reasoning;
             s.cache_creation_tokens = tokens.cache.write;
             s.cache_read_tokens = tokens.cache.read;
-            s.cached_tokens = tokens.cache.read;
+            s.cached_tokens = tokens.cache.write + tokens.cache.read;
 
             if let Some(model_name) = msg.model_name() {
                 s.cost = calculate_total_cost(

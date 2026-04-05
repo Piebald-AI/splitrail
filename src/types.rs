@@ -454,16 +454,16 @@ impl std::ops::SubAssign for Stats {
     }
 }
 
-/// Lightweight stats for TUI display only (24 bytes vs 320 bytes for full Stats).
+/// Lightweight stats for TUI display only (40 bytes vs 320 bytes for full Stats).
 /// Contains only fields actually rendered in the UI.
 /// Uses u32 for memory efficiency - sufficient for per-session and per-day values.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TuiStats {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub reasoning_tokens: u32,
-    pub cached_tokens: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
     pub cost_cents: u32, // Store as cents to avoid f32 precision issues
     pub tool_calls: u32,
 }
@@ -493,10 +493,10 @@ impl TuiStats {
 impl From<&Stats> for TuiStats {
     fn from(s: &Stats) -> Self {
         TuiStats {
-            input_tokens: s.input_tokens as u32,
-            output_tokens: s.output_tokens as u32,
-            reasoning_tokens: s.reasoning_tokens as u32,
-            cached_tokens: s.cached_tokens as u32,
+            input_tokens: s.input_tokens,
+            output_tokens: s.output_tokens,
+            reasoning_tokens: s.reasoning_tokens,
+            cached_tokens: s.cached_tokens,
             cost_cents: (s.cost * 100.0).round() as u32,
             tool_calls: s.tool_calls,
         }

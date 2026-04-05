@@ -1,6 +1,6 @@
 [package]
 name = "splitrail"
-version = "3.3.3"
+version = "3.3.5"
 edition = "2024"
 license = "MIT"
 authors = ["Piebald LLC <support@piebald.ai>"]
@@ -41,7 +41,6 @@ tiktoken-rs = "0.9.1"
 parking_lot = "0.12"
 tinyvec = { version = "1.8", features = ["alloc"] }
 c2rust-bitfields = "0.18"
-bincode = "2.0.1"
 dirs = "6.0"
 chrono-tz = "0.10"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
@@ -56,9 +55,9 @@ version = "4.5.53"
 features = ["derive"]
 
 [dependencies.reqwest]
-version = "0.13.1"
+version = "0.13.2"
 default-features = false
-features = ["rustls"]
+features = ["rustls", "gzip"]
 
 [dev-dependencies]
 tempfile = "3.24"

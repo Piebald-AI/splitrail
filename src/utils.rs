@@ -90,6 +90,72 @@ pub fn format_number(n: impl Into<u64>, options: &NumberFormatOptions) -> String
     }
 }
 
+/// Format a number to fit within a given column width.
+///
+/// Falls back to progressively more compact representations if the user's
+/// preferred format (commas, plain digits, etc.) overflows the column:
+///   1. User's preferred format
+///   2. Human-readable with configured decimal places (e.g. "193.1m")
+///   3. Human-readable with fewer decimal places (e.g. "193m")
+///   4. Plain digits (no separators)
+///
+/// This ensures that the most significant digits are never clipped by
+/// ratatui's column rendering — instead the number is abbreviated.
+pub fn format_number_fit(
+    n: impl Into<u64>,
+    options: &NumberFormatOptions,
+    max_width: usize,
+) -> String {
+    let n: u64 = n.into();
+
+    // 1. Try the user's preferred format first
+    let preferred = format_number(n, options);
+    if preferred.len() <= max_width {
+        return preferred;
+    }
+
+    // 2. Try human-readable with configured decimal places
+    let human_options = NumberFormatOptions {
+        use_human: true,
+        use_comma: false,
+        locale: options.locale.clone(),
+        decimal_places: options.decimal_places,
+    };
+    let human = format_number(n, &human_options);
+    if human.len() <= max_width {
+        return human;
+    }
+
+    // 3. Try human-readable with progressively fewer decimal places
+    for dp in (0..options.decimal_places).rev() {
+        let compact_options = NumberFormatOptions {
+            use_human: true,
+            use_comma: false,
+            locale: options.locale.clone(),
+            decimal_places: dp,
+        };
+        let compact = format_number(n, &compact_options);
+        if compact.len() <= max_width {
+            return compact;
+        }
+    }
+
+    // 4. Fall back to plain digits (no separators)
+    let plain = n.to_string();
+    if plain.len() <= max_width {
+        return plain;
+    }
+
+    // 5. Last resort: human-readable with 0 decimal places (should always be short)
+    let minimal = NumberFormatOptions {
+        use_human: true,
+        use_comma: false,
+        locale: options.locale.clone(),
+        decimal_places: 0,
+    };
+    format_number(n, &minimal)
+}
+
 pub fn format_date_for_display(date: &str) -> String {
     if date == "unknown" {
         return "Unknown".to_string();
@@ -157,19 +223,19 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 daily_stats_entry.stats.input_tokens = daily_stats_entry
                     .stats
                     .input_tokens
-                    .saturating_add(entry.stats.input_tokens as u32);
+                    .saturating_add(entry.stats.input_tokens);
                 daily_stats_entry.stats.output_tokens = daily_stats_entry
                     .stats
                     .output_tokens
-                    .saturating_add(entry.stats.output_tokens as u32);
+                    .saturating_add(entry.stats.output_tokens);
                 daily_stats_entry.stats.reasoning_tokens = daily_stats_entry
                     .stats
                     .reasoning_tokens
-                    .saturating_add(entry.stats.reasoning_tokens as u32);
+                    .saturating_add(entry.stats.reasoning_tokens);
                 daily_stats_entry.stats.cached_tokens = daily_stats_entry
                     .stats
                     .cached_tokens
-                    .saturating_add(entry.stats.cached_tokens as u32);
+                    .saturating_add(entry.stats.cached_tokens);
                 daily_stats_entry.stats.tool_calls = daily_stats_entry
                     .stats
                     .tool_calls
