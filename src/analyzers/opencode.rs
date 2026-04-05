@@ -622,24 +622,17 @@ fn load_sessions_from_db(conn: &Connection) -> HashMap<String, DbSession> {
 /// Batch-load tool call stats from the SQLite `part` table.
 ///
 /// Returns a map of `message_id → Stats` with tool call counts.
-/// Only loads parts that contain tool-type data (uses a LIKE filter
+/// Only loads parts that contain tool-type data (uses `json_extract`
 /// to avoid deserializing non-tool parts).
-///
-/// **Assumption**: OpenCode serialises JSON with `JSON.stringify()` (no
-/// pretty-printing), so the `type` key is always immediately followed by
-/// its value without extra whitespace.  The two LIKE patterns cover the
-/// standard `"type":"tool"` form and the `"type": "tool"` variant (single
-/// space after colon).  Rows that match the LIKE but aren't actually tool
-/// parts are safely filtered out by the Rust-side `part_type != "tool"`
-/// check, so false positives are harmless.
 fn batch_load_tool_stats_from_db(conn: &Connection) -> HashMap<String, Stats> {
     let mut map: HashMap<String, Stats> = HashMap::new();
 
-    // Use LIKE to pre-filter for tool-type parts — avoids deserializing text,
-    // reasoning, step-start, etc. parts which are typically much larger.
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT message_id, data FROM part WHERE data LIKE '%\"type\":\"tool\"%' OR data LIKE '%\"type\": \"tool\"%'",
-    ) else {
+    // Use json_extract to pre-filter for tool-type parts — avoids
+    // deserializing text, reasoning, step-start, etc. parts which are
+    // typically much larger.
+    let Ok(mut stmt) = conn
+        .prepare("SELECT message_id, data FROM part WHERE json_extract(data, '$.type') = 'tool'")
+    else {
         return map;
     };
 
@@ -698,9 +691,7 @@ fn batch_load_step_finish_from_db(conn: &Connection) -> HashMap<String, StepFini
     let mut map: HashMap<String, StepFinishAgg> = HashMap::new();
 
     let Ok(mut stmt) = conn.prepare(
-        "SELECT message_id, data FROM part \
-         WHERE data LIKE '%\"type\":\"step-finish\"%' \
-            OR data LIKE '%\"type\": \"step-finish\"%'",
+        "SELECT message_id, data FROM part WHERE json_extract(data, '$.type') = 'step-finish'",
     ) else {
         return map;
     };
