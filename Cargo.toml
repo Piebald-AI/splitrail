@@ -57,7 +57,7 @@ features = ["derive"]
 [dependencies.reqwest]
 version = "0.13.2"
 default-features = false
-features = ["rustls"]
+features = ["rustls", "gzip"]
 
 [dev-dependencies]
 tempfile = "3.24"

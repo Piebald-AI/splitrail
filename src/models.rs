@@ -391,6 +391,16 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         }),
         is_estimated: false,
     },
+    "gpt-5.4-mini" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.75,
+            output_per_1m: 4.5,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.075,
+        },
+        is_estimated: false,
+    },
 
     // Anthropic Models
     "claude-opus-4-6" => ModelInfo {
@@ -1089,6 +1099,9 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     // OpenAI aliases (continued)
     "gpt-5.4" => "gpt-5.4",
     "gpt-5.4-2026-03-05" => "gpt-5.4",
+    "gpt-5.4-mini" => "gpt-5.4-mini",
+    "gpt-5.4-mini-2026-03-17" => "gpt-5.4-mini",
+    "gpt-5.4-mini-2026-03-17." => "gpt-5.4-mini",
 
     // MiniMax aliases
     "minimax-m2.5" => "minimax-m2.5",
@@ -1368,7 +1381,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{calculate_cache_cost, calculate_input_cost};
+    use super::{
+        calculate_cache_cost, calculate_input_cost, calculate_output_cost, get_model_info,
+    };
 
     fn approx_eq(left: f64, right: f64) {
         assert!((left - right).abs() < 1e-9, "left={left}, right={right}");
@@ -1390,5 +1405,19 @@ mod tests {
     fn gemini_2_5_pro_remains_progressive() {
         let cost = calculate_input_cost("gemini-2.5-pro", 250_000);
         approx_eq(cost, 0.375);
+    }
+
+    #[test]
+    fn gpt_5_4_mini_alias_maps_to_pricing() {
+        let model_info = get_model_info("gpt-5.4-mini-2026-03-17.").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("gpt-5.4-mini-2026-03-17.", 1_000_000);
+        let output_cost = calculate_output_cost("gpt-5.4-mini-2026-03-17.", 1_000_000);
+        let cache_cost = calculate_cache_cost("gpt-5.4-mini-2026-03-17.", 0, 1_000_000);
+
+        approx_eq(input_cost, 0.75);
+        approx_eq(output_cost, 4.5);
+        approx_eq(cache_cost, 0.075);
     }
 }
