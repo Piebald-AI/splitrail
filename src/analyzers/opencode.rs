@@ -297,7 +297,7 @@ fn compute_message_stats(msg: &OpenCodeMessage, tool_stats: Stats) -> Stats {
         s.reasoning_tokens = tokens.reasoning;
         s.cache_creation_tokens = tokens.cache.write;
         s.cache_read_tokens = tokens.cache.read;
-        s.cached_tokens = tokens.cache.read;
+        s.cached_tokens = tokens.cache.write + tokens.cache.read;
 
         if let Some(model_name) = msg.model_name() {
             s.cost = calculate_total_cost(
@@ -559,7 +559,7 @@ struct DbProject {
 /// Lightweight session data from the `session` table.
 struct DbSession {
     project_id: String,
-    title: String,
+    title: Option<String>,
 }
 
 /// Load projects from the SQLite `project` table.
@@ -604,7 +604,7 @@ fn load_sessions_from_db(conn: &Connection) -> HashMap<String, DbSession> {
                 row.get::<_, String>(0)?,
                 DbSession {
                     project_id: row.get(1)?,
-                    title: row.get(2)?,
+                    title: row.get::<_, Option<String>>(2)?,
                 },
             ))
         })
@@ -797,13 +797,20 @@ fn parse_sqlite_messages(db_path: &Path) -> Result<Vec<ConversationMessage>> {
             // This handles newer OpenCode versions where per-step accounting
             // is the primary data source.
             if msg.role == "assistant" {
-                let msg_has_tokens = msg
-                    .tokens
-                    .as_ref()
-                    .is_some_and(|t| t.input > 0 || t.output > 0);
+                let msg_has_tokens = msg.tokens.as_ref().is_some_and(|t| {
+                    t.input > 0
+                        || t.output > 0
+                        || t.reasoning > 0
+                        || t.cache.read > 0
+                        || t.cache.write > 0
+                });
                 if !msg_has_tokens
                     && let Some(agg) = step_finish_map.get(&id)
-                    && (agg.input > 0 || agg.output > 0)
+                    && (agg.input > 0
+                        || agg.output > 0
+                        || agg.reasoning > 0
+                        || agg.cache_read > 0
+                        || agg.cache_write > 0)
                 {
                     msg.tokens = Some(OpenCodeTokens {
                         input: agg.input,
@@ -827,7 +834,7 @@ fn parse_sqlite_messages(db_path: &Path) -> Result<Vec<ConversationMessage>> {
             let tool_stats = tool_stats_map.get(&id).cloned().unwrap_or_default();
             let stats = compute_message_stats(&msg, tool_stats);
 
-            let session_title = session.map(|s| s.title.clone());
+            let session_title = session.and_then(|s| s.title.clone());
             let worktree = project.map(|p| p.worktree.as_str());
             // Use session_id as fallback (consistent with the JSON path which
             // uses session.id — NOT project_id — so deduplication produces the
@@ -945,6 +952,25 @@ impl Analyzer for OpenCodeAnalyzer {
 
         let mut results: Vec<(PathBuf, Vec<ConversationMessage>)> = Vec::new();
 
+        // --- SQLite sources first: parse each DB ---
+        // SQLite records are richer (have tool stats, step-finish tokens, etc.)
+        // so they are added first. During deduplication (which keeps the first-
+        // seen entry per global_hash), SQLite wins over legacy JSON.
+        for source in db_sources {
+            match parse_sqlite_messages(&source.path) {
+                Ok(messages) if !messages.is_empty() => {
+                    results.push((source.path.clone(), messages));
+                }
+                Ok(_) => {} // empty DB
+                Err(e) => {
+                    eprintln!(
+                        "Failed to parse OpenCode SQLite DB {:?}: {}",
+                        source.path, e
+                    );
+                }
+            }
+        }
+
         // --- JSON sources: load shared context once, parse in parallel ---
         if !json_sources.is_empty()
             && let Some(storage_root) = Self::storage_root()
@@ -969,22 +995,6 @@ impl Analyzer for OpenCodeAnalyzer {
                 .collect();
 
             results.extend(json_results);
-        }
-
-        // --- SQLite sources: parse each DB ---
-        for source in db_sources {
-            match parse_sqlite_messages(&source.path) {
-                Ok(messages) if !messages.is_empty() => {
-                    results.push((source.path.clone(), messages));
-                }
-                Ok(_) => {} // empty DB
-                Err(e) => {
-                    eprintln!(
-                        "Failed to parse OpenCode SQLite DB {:?}: {}",
-                        source.path, e
-                    );
-                }
-            }
         }
 
         results
@@ -1258,6 +1268,7 @@ mod tests {
         assert_eq!(stats.reasoning_tokens, 100);
         assert_eq!(stats.cache_read_tokens, 2000);
         assert_eq!(stats.cache_creation_tokens, 500);
+        assert_eq!(stats.cached_tokens, 2500); // read + write
         // Explicit cost wins.
         assert!((stats.cost - 0.05).abs() < f64::EPSILON);
         assert_eq!(stats.tool_calls, 1); // at least 1 for model call
@@ -1616,7 +1627,7 @@ mod tests {
 
         let sessions = load_sessions_from_db(&conn);
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions["ses_1"].title, "My Session");
+        assert_eq!(sessions["ses_1"].title.as_deref(), Some("My Session"));
         assert_eq!(sessions["ses_1"].project_id, "proj_1");
     }
 
@@ -1758,7 +1769,7 @@ mod tests {
                 let project = session.and_then(|s| db_projects.get(&s.project_id));
                 let tool_stats = tool_stats_map.get(&id).cloned().unwrap_or_default();
                 let stats = compute_message_stats(&msg, tool_stats);
-                let session_title = session.map(|s| s.title.clone());
+                let session_title = session.and_then(|s| s.title.clone());
                 let worktree = project.map(|p| p.worktree.as_str());
                 let fallback = Some(session_id.as_str());
 
@@ -1867,7 +1878,7 @@ mod tests {
 
         let sessions = load_sessions_from_db(&conn);
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions["ses_ws"].title, "Feature work");
+        assert_eq!(sessions["ses_ws"].title.as_deref(), Some("Feature work"));
         assert_eq!(sessions["ses_ws"].project_id, "proj_hash");
     }
 
@@ -2074,13 +2085,20 @@ mod tests {
 
                 // Apply step-finish fallback (same logic as parse_sqlite_messages).
                 if msg.role == "assistant" {
-                    let msg_has_tokens = msg
-                        .tokens
-                        .as_ref()
-                        .is_some_and(|t| t.input > 0 || t.output > 0);
+                    let msg_has_tokens = msg.tokens.as_ref().is_some_and(|t| {
+                        t.input > 0
+                            || t.output > 0
+                            || t.reasoning > 0
+                            || t.cache.read > 0
+                            || t.cache.write > 0
+                    });
                     if !msg_has_tokens
                         && let Some(agg) = step_finish_map.get(&id)
-                        && (agg.input > 0 || agg.output > 0)
+                        && (agg.input > 0
+                            || agg.output > 0
+                            || agg.reasoning > 0
+                            || agg.cache_read > 0
+                            || agg.cache_write > 0)
                     {
                         msg.tokens = Some(OpenCodeTokens {
                             input: agg.input,
@@ -2101,7 +2119,7 @@ mod tests {
                 let project = session.and_then(|s| db_projects.get(&s.project_id));
                 let tool_stats = tool_stats_map.get(&id).cloned().unwrap_or_default();
                 let stats = compute_message_stats(&msg, tool_stats);
-                let session_title = session.map(|s| s.title.clone());
+                let session_title = session.and_then(|s| s.title.clone());
                 let worktree = project.map(|p| p.worktree.as_str());
                 let fallback = Some(session_id.as_str());
 
@@ -2234,7 +2252,10 @@ mod tests {
             "/code/tweakcc"
         );
         assert_eq!(db_sessions.len(), 1);
-        assert_eq!(db_sessions["ses_real1"].title, "Exploring tweakcc codebase");
+        assert_eq!(
+            db_sessions["ses_real1"].title.as_deref(),
+            Some("Exploring tweakcc codebase")
+        );
         assert_eq!(tool_stats_map["msg_a1"].tool_calls, 1);
         assert_eq!(tool_stats_map["msg_a1"].files_read, 1);
     }
