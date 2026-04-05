@@ -97,70 +97,70 @@ impl OpenCodeAnalyzer {
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeProjectTime {
-    created: i64,
+pub(crate) struct OpenCodeProjectTime {
+    pub(crate) created: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeProject {
-    id: String,
-    worktree: String,
+pub(crate) struct OpenCodeProject {
+    pub(crate) id: String,
+    pub(crate) worktree: String,
     #[serde(default)]
-    vcs: Option<String>,
-    time: OpenCodeProjectTime,
+    pub(crate) vcs: Option<String>,
+    pub(crate) time: OpenCodeProjectTime,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeSessionTime {
-    created: i64,
-    updated: i64,
+pub(crate) struct OpenCodeSessionTime {
+    pub(crate) created: i64,
+    pub(crate) updated: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeSessionSummary {
+pub(crate) struct OpenCodeSessionSummary {
     #[serde(default)]
-    additions: i64,
+    pub(crate) additions: i64,
     #[serde(default)]
-    deletions: i64,
+    pub(crate) deletions: i64,
     #[serde(default)]
-    files: i64,
+    pub(crate) files: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeSession {
-    id: String,
+pub(crate) struct OpenCodeSession {
+    pub(crate) id: String,
     #[serde(rename = "projectID")]
-    project_id: String,
-    directory: String,
+    pub(crate) project_id: String,
+    pub(crate) directory: String,
     #[serde(default)]
-    title: Option<String>,
-    time: OpenCodeSessionTime,
+    pub(crate) title: Option<String>,
+    pub(crate) time: OpenCodeSessionTime,
     #[serde(default)]
-    summary: Option<OpenCodeSessionSummary>,
+    pub(crate) summary: Option<OpenCodeSessionSummary>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeMessageTime {
+pub(crate) struct OpenCodeMessageTime {
     #[serde(default)]
-    created: Option<i64>,
+    pub(crate) created: Option<i64>,
     #[serde(default)]
-    completed: Option<i64>,
+    pub(crate) completed: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeMessageSummaryDetails {
+pub(crate) struct OpenCodeMessageSummaryDetails {
     #[serde(default)]
-    title: Option<String>,
+    pub(crate) title: Option<String>,
     #[serde(default)]
-    body: Option<String>,
+    pub(crate) body: Option<String>,
     #[serde(default)]
-    diffs: Vec<OwnedValue>,
+    pub(crate) diffs: Vec<OwnedValue>,
 }
 
 /// The `summary` field can be either a boolean flag (`true`) indicating a summary message,
@@ -168,47 +168,47 @@ struct OpenCodeMessageSummaryDetails {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 #[allow(dead_code)]
-enum OpenCodeMessageSummary {
+pub(crate) enum OpenCodeMessageSummary {
     Flag(bool),
     Details(OpenCodeMessageSummaryDetails),
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeModelRef {
+pub(crate) struct OpenCodeModelRef {
     #[serde(rename = "providerID")]
-    provider_id: String,
+    pub(crate) provider_id: String,
     #[serde(rename = "modelID")]
-    model_id: String,
+    pub(crate) model_id: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-struct OpenCodeCacheTokens {
+pub(crate) struct OpenCodeCacheTokens {
     #[serde(default)]
-    read: u64,
+    pub(crate) read: u64,
     #[serde(default)]
-    write: u64,
+    pub(crate) write: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-struct OpenCodeTokens {
+pub(crate) struct OpenCodeTokens {
     #[serde(default)]
-    input: u64,
+    pub(crate) input: u64,
     #[serde(default)]
-    output: u64,
+    pub(crate) output: u64,
     #[serde(default)]
-    reasoning: u64,
+    pub(crate) reasoning: u64,
     #[serde(default)]
-    cache: OpenCodeCacheTokens,
+    pub(crate) cache: OpenCodeCacheTokens,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeMessagePath {
+pub(crate) struct OpenCodeMessagePath {
     #[serde(default)]
-    cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     #[serde(default)]
-    root: Option<String>,
+    pub(crate) root: Option<String>,
 }
 
 /// Represents a single message from the OpenCode on-disk format.
@@ -216,47 +216,49 @@ struct OpenCodeMessagePath {
 /// Works for both the legacy JSON files (where `id`/`sessionID` are in the JSON)
 /// and the new SQLite database (where they come from DB columns and the `data`
 /// JSON blob omits them).
+///
+/// Also used by the Kilo CLI analyzer, which shares the identical on-disk format.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
-struct OpenCodeMessage {
+pub(crate) struct OpenCodeMessage {
     #[serde(default)]
-    id: String,
+    pub(crate) id: String,
     #[serde(rename = "sessionID")]
     #[serde(default)]
-    session_id: String,
+    pub(crate) session_id: String,
     #[serde(default)]
-    role: String,
+    pub(crate) role: String,
     #[serde(default)]
-    time: OpenCodeMessageTime,
+    pub(crate) time: OpenCodeMessageTime,
     #[serde(default)]
-    summary: Option<OpenCodeMessageSummary>,
+    pub(crate) summary: Option<OpenCodeMessageSummary>,
     #[serde(default)]
-    agent: Option<String>,
+    pub(crate) agent: Option<String>,
     #[serde(rename = "model")]
     #[serde(default)]
-    model_ref: Option<OpenCodeModelRef>,
+    pub(crate) model_ref: Option<OpenCodeModelRef>,
     #[serde(rename = "modelID")]
     #[serde(default)]
-    model_id: Option<String>,
+    pub(crate) model_id: Option<String>,
     #[serde(rename = "providerID")]
     #[serde(default)]
-    provider_id: Option<String>,
+    pub(crate) provider_id: Option<String>,
     #[serde(default)]
-    parent_id: Option<String>,
+    pub(crate) parent_id: Option<String>,
     #[serde(default)]
-    mode: Option<String>,
+    pub(crate) mode: Option<String>,
     #[serde(default)]
-    path: Option<OpenCodeMessagePath>,
+    pub(crate) path: Option<OpenCodeMessagePath>,
     #[serde(default)]
-    cost: Option<f64>,
+    pub(crate) cost: Option<f64>,
     #[serde(default)]
-    tokens: Option<OpenCodeTokens>,
+    pub(crate) tokens: Option<OpenCodeTokens>,
     #[serde(default)]
-    finish: Option<String>,
+    pub(crate) finish: Option<String>,
 }
 
 impl OpenCodeMessage {
-    fn model_name(&self) -> Option<String> {
+    pub(crate) fn model_name(&self) -> Option<String> {
         if let Some(model_id) = &self.model_id
             && !model_id.is_empty()
         {
@@ -275,7 +277,7 @@ impl OpenCodeMessage {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn ms_to_datetime(ms: Option<i64>) -> DateTime<Utc> {
+pub(crate) fn ms_to_datetime(ms: Option<i64>) -> DateTime<Utc> {
     let ms = ms.unwrap_or(0);
     Utc.timestamp_millis_opt(ms)
         .single()
@@ -284,7 +286,7 @@ fn ms_to_datetime(ms: Option<i64>) -> DateTime<Utc> {
 
 /// Compute stats from an [`OpenCodeMessage`], optionally merging in pre-loaded
 /// tool-call stats (from parts data).
-fn compute_message_stats(msg: &OpenCodeMessage, tool_stats: Stats) -> Stats {
+pub(crate) fn compute_message_stats(msg: &OpenCodeMessage, tool_stats: Stats) -> Stats {
     if msg.role != "assistant" {
         return Stats::default();
     }
@@ -328,12 +330,17 @@ fn compute_message_stats(msg: &OpenCodeMessage, tool_stats: Stats) -> Stats {
 }
 
 /// Build a [`ConversationMessage`] from an [`OpenCodeMessage`] and pre-computed stats.
-fn build_conversation_message(
+///
+/// Accepts an [`Application`] variant and `hash_prefix` so that both OpenCode and
+/// Kilo CLI can share this logic with their respective identities.
+pub(crate) fn build_conversation_message(
     msg: OpenCodeMessage,
     session_title: Option<String>,
     project_worktree: Option<&str>,
     fallback_project_hash: Option<&str>,
     stats: Stats,
+    application: Application,
+    hash_prefix: &str,
 ) -> ConversationMessage {
     let project_hash = if let Some(worktree) = project_worktree {
         hash_text(worktree)
@@ -345,11 +352,11 @@ fn build_conversation_message(
 
     let conversation_hash = hash_text(&msg.session_id);
     let local_hash = Some(msg.id.clone());
-    let global_hash = hash_text(&format!("opencode_{}_{}", msg.session_id, msg.id));
+    let global_hash = hash_text(&format!("{}_{}_{}", hash_prefix, msg.session_id, msg.id));
     let date = ms_to_datetime(msg.time.created);
 
     ConversationMessage {
-        application: Application::OpenCode,
+        application,
         date,
         project_hash,
         conversation_hash,
@@ -371,7 +378,7 @@ fn build_conversation_message(
 // Legacy JSON file helpers
 // ---------------------------------------------------------------------------
 
-fn load_projects(project_root: &Path) -> HashMap<String, OpenCodeProject> {
+pub(crate) fn load_projects(project_root: &Path) -> HashMap<String, OpenCodeProject> {
     let mut projects = HashMap::new();
 
     if !project_root.is_dir() {
@@ -399,7 +406,7 @@ fn load_projects(project_root: &Path) -> HashMap<String, OpenCodeProject> {
     projects
 }
 
-fn load_sessions(session_root: &Path) -> HashMap<String, OpenCodeSession> {
+pub(crate) fn load_sessions(session_root: &Path) -> HashMap<String, OpenCodeSession> {
     let mut sessions = HashMap::new();
 
     if !session_root.is_dir() {
@@ -444,7 +451,7 @@ fn load_sessions(session_root: &Path) -> HashMap<String, OpenCodeSession> {
 /// Shared between the legacy filesystem path ([`extract_tool_stats_from_parts`])
 /// and the SQLite path ([`batch_load_tool_stats_from_db`]) so the counting logic
 /// stays in one place.
-fn accumulate_tool_stat(stats: &mut Stats, tool_name: &str, value: &OwnedValue) {
+pub(crate) fn accumulate_tool_stat(stats: &mut Stats, tool_name: &str, value: &OwnedValue) {
     stats.tool_calls += 1;
 
     match tool_name {
@@ -466,7 +473,7 @@ fn accumulate_tool_stat(stats: &mut Stats, tool_name: &str, value: &OwnedValue) 
     }
 }
 
-fn extract_tool_stats_from_parts(part_root: &Path, message_id: &str) -> Stats {
+pub(crate) fn extract_tool_stats_from_parts(part_root: &Path, message_id: &str) -> Stats {
     let mut stats = Stats::default();
 
     let dir = part_root.join(message_id);
@@ -536,15 +543,23 @@ fn json_to_conversation_message(
     let worktree = project.map(|p| p.worktree.as_str());
     let fallback = session.map(|s| s.id.as_str());
 
-    build_conversation_message(msg, session_title, worktree, fallback, stats)
+    build_conversation_message(
+        msg,
+        session_title,
+        worktree,
+        fallback,
+        stats,
+        Application::OpenCode,
+        "opencode",
+    )
 }
 
 // ---------------------------------------------------------------------------
 // SQLite database helpers
 // ---------------------------------------------------------------------------
 
-/// Open the OpenCode SQLite database in read-only mode with WAL support.
-fn open_db(path: &Path) -> Result<Connection> {
+/// Open an OpenCode-format SQLite database in read-only mode with WAL support.
+pub(crate) fn open_db(path: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(path, flags)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -552,18 +567,18 @@ fn open_db(path: &Path) -> Result<Connection> {
 }
 
 /// Lightweight project data from the `project` table.
-struct DbProject {
-    worktree: String,
+pub(crate) struct DbProject {
+    pub(crate) worktree: String,
 }
 
 /// Lightweight session data from the `session` table.
-struct DbSession {
-    project_id: String,
-    title: Option<String>,
+pub(crate) struct DbSession {
+    pub(crate) project_id: String,
+    pub(crate) title: Option<String>,
 }
 
 /// Load projects from the SQLite `project` table.
-fn load_projects_from_db(conn: &Connection) -> HashMap<String, DbProject> {
+pub(crate) fn load_projects_from_db(conn: &Connection) -> HashMap<String, DbProject> {
     let mut map = HashMap::new();
 
     let Ok(mut stmt) = conn.prepare("SELECT id, worktree FROM project") else {
@@ -591,7 +606,7 @@ fn load_projects_from_db(conn: &Connection) -> HashMap<String, DbProject> {
 }
 
 /// Load sessions from the SQLite `session` table.
-fn load_sessions_from_db(conn: &Connection) -> HashMap<String, DbSession> {
+pub(crate) fn load_sessions_from_db(conn: &Connection) -> HashMap<String, DbSession> {
     let mut map = HashMap::new();
 
     let Ok(mut stmt) = conn.prepare("SELECT id, project_id, title FROM session") else {
@@ -624,7 +639,7 @@ fn load_sessions_from_db(conn: &Connection) -> HashMap<String, DbSession> {
 /// Returns a map of `message_id → Stats` with tool call counts.
 /// Only loads parts that contain tool-type data (uses `json_extract`
 /// to avoid deserializing non-tool parts).
-fn batch_load_tool_stats_from_db(conn: &Connection) -> HashMap<String, Stats> {
+pub(crate) fn batch_load_tool_stats_from_db(conn: &Connection) -> HashMap<String, Stats> {
     let mut map: HashMap<String, Stats> = HashMap::new();
 
     // Use json_extract to pre-filter for tool-type parts — avoids
@@ -678,16 +693,16 @@ fn batch_load_tool_stats_from_db(conn: &Connection) -> HashMap<String, Stats> {
 /// fallback when the message-level `data` blob has zero tokens (which can happen
 /// in newer OpenCode versions where per-step accounting is the primary source).
 #[derive(Debug, Clone, Default)]
-struct StepFinishAgg {
-    input: u64,
-    output: u64,
-    reasoning: u64,
-    cache_read: u64,
-    cache_write: u64,
-    cost: f64,
+pub(crate) struct StepFinishAgg {
+    pub(crate) input: u64,
+    pub(crate) output: u64,
+    pub(crate) reasoning: u64,
+    pub(crate) cache_read: u64,
+    pub(crate) cache_write: u64,
+    pub(crate) cost: f64,
 }
 
-fn batch_load_step_finish_from_db(conn: &Connection) -> HashMap<String, StepFinishAgg> {
+pub(crate) fn batch_load_step_finish_from_db(conn: &Connection) -> HashMap<String, StepFinishAgg> {
     let mut map: HashMap<String, StepFinishAgg> = HashMap::new();
 
     let Ok(mut stmt) = conn.prepare(
@@ -742,12 +757,19 @@ fn batch_load_step_finish_from_db(conn: &Connection) -> HashMap<String, StepFini
     map
 }
 
-/// Parse all messages from the OpenCode SQLite database.
+/// Parse all messages from an OpenCode-format SQLite database.
 ///
 /// Reads from the `message`, `session`, `project`, and `part` tables.
 /// The `message.data` column is a JSON blob matching [`OpenCodeMessage`]
 /// (minus `id` and `sessionID`, which come from the row columns).
-fn parse_sqlite_messages(db_path: &Path) -> Result<Vec<ConversationMessage>> {
+///
+/// Accepts [`Application`] and `hash_prefix` so both OpenCode and Kilo CLI
+/// can share this logic with their respective identities.
+pub(crate) fn parse_sqlite_messages(
+    db_path: &Path,
+    application: Application,
+    hash_prefix: &str,
+) -> Result<Vec<ConversationMessage>> {
     let conn = open_db(db_path)?;
 
     let db_projects = load_projects_from_db(&conn);
@@ -838,6 +860,8 @@ fn parse_sqlite_messages(db_path: &Path) -> Result<Vec<ConversationMessage>> {
                 worktree,
                 fallback,
                 stats,
+                application.clone(),
+                hash_prefix,
             ))
         })
         .collect();
@@ -909,7 +933,7 @@ impl Analyzer for OpenCodeAnalyzer {
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
         // SQLite database — return all messages at once.
         if source.path.extension().is_some_and(|ext| ext == "db") {
-            return parse_sqlite_messages(&source.path);
+            return parse_sqlite_messages(&source.path, Application::OpenCode, "opencode");
         }
 
         // Legacy JSON message file — load context and parse single file.
@@ -948,7 +972,7 @@ impl Analyzer for OpenCodeAnalyzer {
         // so they are added first. During deduplication (which keeps the first-
         // seen entry per global_hash), SQLite wins over legacy JSON.
         for source in db_sources {
-            match parse_sqlite_messages(&source.path) {
+            match parse_sqlite_messages(&source.path, Application::OpenCode, "opencode") {
                 Ok(messages) if !messages.is_empty() => {
                     results.push((source.path.clone(), messages));
                 }
@@ -1322,6 +1346,8 @@ mod tests {
             Some("/home/user/project"),
             None,
             Stats::default(),
+            Application::OpenCode,
+            "opencode",
         );
 
         assert_eq!(conv.application, Application::OpenCode);
@@ -1342,7 +1368,15 @@ mod tests {
             ..Default::default()
         };
 
-        let conv = build_conversation_message(msg, None, None, Some("ses_b"), Stats::default());
+        let conv = build_conversation_message(
+            msg,
+            None,
+            None,
+            Some("ses_b"),
+            Stats::default(),
+            Application::OpenCode,
+            "opencode",
+        );
         assert_eq!(conv.project_hash, hash_text("ses_b"));
     }
 
@@ -1356,7 +1390,15 @@ mod tests {
         };
 
         // No worktree, no fallback — uses session_id.
-        let conv = build_conversation_message(msg, None, None, None, Stats::default());
+        let conv = build_conversation_message(
+            msg,
+            None,
+            None,
+            None,
+            Stats::default(),
+            Application::OpenCode,
+            "opencode",
+        );
         assert_eq!(conv.project_hash, hash_text("ses_c"));
     }
 
@@ -1378,7 +1420,15 @@ mod tests {
             role: "assistant".to_string(),
             ..Default::default()
         };
-        let json_conv = build_conversation_message(json_msg, None, None, None, Stats::default());
+        let json_conv = build_conversation_message(
+            json_msg,
+            None,
+            None,
+            None,
+            Stats::default(),
+            Application::OpenCode,
+            "opencode",
+        );
 
         // Simulate SQLite path (id and session_id injected from DB columns).
         let mut sqlite_msg = OpenCodeMessage {
@@ -1387,8 +1437,15 @@ mod tests {
         };
         sqlite_msg.id = message_id.to_string();
         sqlite_msg.session_id = session_id.to_string();
-        let sqlite_conv =
-            build_conversation_message(sqlite_msg, None, None, None, Stats::default());
+        let sqlite_conv = build_conversation_message(
+            sqlite_msg,
+            None,
+            None,
+            None,
+            Stats::default(),
+            Application::OpenCode,
+            "opencode",
+        );
 
         assert_eq!(json_conv.global_hash, expected);
         assert_eq!(sqlite_conv.global_hash, expected);
@@ -1770,6 +1827,8 @@ mod tests {
                     worktree,
                     fallback,
                     stats,
+                    Application::OpenCode,
+                    "opencode",
                 ))
             })
             .collect();
@@ -2120,6 +2179,8 @@ mod tests {
                     worktree,
                     fallback,
                     stats,
+                    Application::OpenCode,
+                    "opencode",
                 ))
             })
             .collect();
