@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-04-05
+- Add monthly view to TUI (#133) - Sewer56
+- feat: add Kilo Code CLI analyzer (#118) - mike1858
+- fix: add retry logic, per-chunk progress saving, and gzip support (#138) - mike1858
+- feat: add SQLite database support to OpenCode analyzer (#120) - mike1858
+- Include token counts for Piebald that were accidentally ignored (#136) - mike1858
+- Add aliases for Gemini 3.1 Pro - low and medium and high (#135) - mike1858
+- fix: correct TuiStats size comment, revert cost_cents to u32 (#132) - Sewer56
+
 ## [3.3.5] - 2026-03-14
 - Fix capped large token totals in TUI stats (#130) - @mike1858
 
