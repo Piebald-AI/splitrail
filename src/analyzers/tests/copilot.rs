@@ -3,6 +3,7 @@ use crate::analyzers::copilot::*;
 use crate::types::MessageRole;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use tempfile::tempdir;
 
 #[test]
 fn test_parse_sample_copilot_session() {
@@ -189,5 +190,68 @@ fn test_copilot_glob_patterns() {
     assert!(
         patterns_str.contains("chatSessions"),
         "Patterns should include copilot-chat extension"
+    );
+    assert!(
+        patterns_str.contains(".copilot/session-state"),
+        "Patterns should include Copilot CLI session-state files"
+    );
+    assert!(
+        patterns_str.contains("events.jsonl"),
+        "Patterns should include nested Copilot CLI events files"
+    );
+}
+
+#[test]
+fn test_parse_sample_copilot_cli_session() {
+    let temp_dir = tempdir().unwrap();
+    let session_dir = temp_dir.path().join("cli-session");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let session_file = session_dir.join("events.jsonl");
+    std::fs::write(
+        &session_file,
+        concat!(
+            r#"{"type":"session.start","timestamp":"2026-02-09T09:28:30.798Z","data":{"sessionId":"cli-session-1","context":{"cwd":"/home/user/project","model":"openai/gpt-4.1"}}}"#,
+            "\n",
+            r#"{"type":"user.message","timestamp":"2026-02-09T09:28:31.000Z","data":{"content":"Add a health check endpoint"}}"#,
+            "\n",
+            r#"{"type":"assistant.message","timestamp":"2026-02-09T09:28:32.000Z","data":{"reasoningText":"I should inspect the server routes.","content":"I'll add the route and wire it up.","toolRequests":[{"toolCallId":"tool-1","toolName":"read_file","arguments":{"path":"src/main.rs"}},{"toolCallId":"tool-2","toolName":"run_in_terminal","arguments":{"command":"cargo test","description":"Run tests"}}]}}"#,
+            "\n",
+            r#"{"type":"tool.execution_start","timestamp":"2026-02-09T09:28:32.100Z","data":{"toolCallId":"tool-1","toolName":"read_file","arguments":{"path":"src/main.rs"}}}"#,
+            "\n",
+            r#"{"type":"tool.execution_complete","timestamp":"2026-02-09T09:28:32.200Z","data":{"toolCallId":"tool-1","success":true,"result":{"content":"fn main() {}"}}}"#,
+            "\n",
+            r#"{"type":"tool.execution_start","timestamp":"2026-02-09T09:28:32.300Z","data":{"toolCallId":"tool-2","toolName":"run_in_terminal","arguments":{"command":"cargo test","description":"Run tests"}}}"#,
+            "\n",
+            r#"{"type":"tool.execution_complete","timestamp":"2026-02-09T09:28:32.400Z","data":{"toolCallId":"tool-2","success":true,"result":{"content":"test result: ok"}}}"#,
+            "\n",
+            r#"{"type":"assistant.message.delta","timestamp":"2026-02-09T09:28:33.000Z","data":{"content":"Done — the endpoint is available at /health."}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let messages = parse_copilot_cli_session_file(&session_file).unwrap();
+    assert_eq!(
+        messages.len(),
+        2,
+        "Expected one user message and one assistant message"
+    );
+
+    assert_eq!(messages[0].role, MessageRole::User);
+    assert_eq!(messages[0].model, None);
+    assert_eq!(messages[0].stats.input_tokens, 0);
+    assert_eq!(messages[0].stats.output_tokens, 0);
+
+    assert_eq!(messages[1].role, MessageRole::Assistant);
+    assert_eq!(messages[1].model.as_deref(), Some("gpt-4.1"));
+    assert_eq!(messages[1].stats.tool_calls, 2);
+    assert_eq!(messages[1].stats.files_read, 1);
+    assert_eq!(messages[1].stats.terminal_commands, 1);
+    assert!(messages[1].stats.input_tokens > 0);
+    assert!(messages[1].stats.output_tokens > 0);
+    assert_eq!(
+        messages[1].session_name.as_deref(),
+        Some("Add a health check endpoint")
     );
 }
