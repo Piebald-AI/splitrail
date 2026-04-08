@@ -1560,8 +1560,8 @@ mod tests {
             .index
             .get("super-expensive-o3")
             .expect("Should find custom model");
-        match info.pricing {
-            PricingStructure::Flat { input_per_1m, .. } => assert_eq!(input_per_1m, 1000.0),
+        match &info.pricing {
+            PricingStructure::Flat { input_per_1m, .. } => assert_eq!(*input_per_1m, 1000.0),
             _ => panic!("Expected flat pricing"),
         }
 

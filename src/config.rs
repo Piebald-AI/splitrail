@@ -240,6 +240,7 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::PricingStructure;
     use tempfile::TempDir;
 
     fn setup_test_config() -> (TempDir, PathBuf) {
