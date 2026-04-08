@@ -362,6 +362,42 @@ fn test_aggregate_by_date_gap_filling() {
 }
 
 #[test]
+fn test_aggregate_by_date_counts_assistant_without_model_as_ai_message() {
+    let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
+    let local_date_str = date
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+
+    let msg = ConversationMessage {
+        date,
+        application: crate::types::Application::CopilotCli,
+        project_hash: "p".to_string(),
+        conversation_hash: "c1".to_string(),
+        local_hash: None,
+        global_hash: "g1".to_string(),
+        model: None,
+        stats: Stats {
+            input_tokens: 42,
+            output_tokens: 84,
+            ..Stats::default()
+        },
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: None,
+    };
+
+    let result = aggregate_by_date(&[msg]);
+    let stats = &result[&local_date_str];
+
+    assert_eq!(stats.user_messages, 0);
+    assert_eq!(stats.ai_messages, 1);
+    assert_eq!(stats.stats.input_tokens, 42);
+    assert_eq!(stats.stats.output_tokens, 84);
+    assert!(stats.models.is_empty());
+}
+
+#[test]
 fn test_filter_zero_cost_messages_empty_input() {
     let messages: Vec<ConversationMessage> = vec![];
     let result = filter_zero_cost_messages(messages);

@@ -372,7 +372,7 @@ impl SplitrailMcpServer {
 
     #[tool(
         name = "list_analyzers",
-        description = "List all available AI coding tool analyzers (e.g., Claude Code, Codex CLI, Gemini CLI, GitHub Copilot)."
+        description = "List all available AI coding tool analyzers (e.g., Claude Code, Codex CLI, Gemini CLI, GitHub Copilot, GitHub Copilot CLI)."
     )]
     async fn list_analyzers(
         &self,

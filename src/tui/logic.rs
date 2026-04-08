@@ -2,7 +2,8 @@
 ///
 /// Provides functions to aggregate statistics, filter dates, and check for data presence.
 use crate::types::{
-    CompactDate, ConversationMessage, DailyStats, ModelCounts, Stats, TuiStats, intern_model,
+    CompactDate, ConversationMessage, DailyStats, MessageRole, ModelCounts, Stats, TuiStats,
+    intern_model,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -224,10 +225,13 @@ pub fn aggregate_sessions_from_messages(
             entry.date = CompactDate::from_local(&msg.date);
         }
 
-        // Only aggregate stats for assistant/model messages and track models
-        if let Some(model) = &msg.model {
-            entry.models.increment(intern_model(model), 1);
+        // Only aggregate stats for assistant messages and track models when known.
+        if msg.role == MessageRole::Assistant {
             accumulate_tui_stats(&mut entry.stats, &msg.stats);
+
+            if let Some(model) = &msg.model {
+                entry.models.increment(intern_model(model), 1);
+            }
         }
 
         // Capture session name if available
