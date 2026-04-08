@@ -1,6 +1,8 @@
+use crate::models::ModelInfo;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -9,6 +11,10 @@ pub struct Config {
     pub server: ServerConfig,
     pub upload: UploadConfig,
     pub formatting: FormattingConfig,
+    #[serde(default)]
+    pub models: HashMap<String, ModelInfo>,
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -52,6 +58,8 @@ impl Default for Config {
                 locale: "en".to_string(),
                 decimal_places: 2,
             },
+            models: HashMap::new(),
+            aliases: HashMap::new(),
         }
     }
 }
@@ -171,6 +179,12 @@ pub fn show_config() -> Result<()> {
             println!("   Number Human: {}", config.formatting.number_human);
             println!("   Locale: {}", config.formatting.locale);
             println!("   Decimal Places: {}", config.formatting.decimal_places);
+            if !config.models.is_empty() {
+                println!("   Custom Models: {}", config.models.len());
+            }
+            if !config.aliases.is_empty() {
+                println!("   Custom Aliases: {}", config.aliases.len());
+            }
         }
         None => {
             println!("❌ No configuration file found.");
@@ -233,6 +247,54 @@ mod tests {
         let config_path = dir.path().join(".splitrail.toml");
         set_test_config_path(config_path.clone());
         (dir, config_path)
+    }
+
+    #[test]
+    fn test_config_with_custom_models() {
+        let toml_str = r#"
+[server]
+url = "https://custom.example.com"
+api_token = "test-token"
+
+[upload]
+auto_upload = true
+upload_today_only = false
+retry_attempts = 5
+last_date_uploaded = 0
+
+[formatting]
+number_comma = true
+number_human = false
+locale = "zh"
+decimal_places = 4
+
+[models."custom-model"]
+pricing = { Flat = { input_per_1m = 10.0, output_per_1m = 20.0 } }
+caching = "None"
+is_estimated = true
+
+[aliases]
+"my-alias" = "custom-model"
+"#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+
+        assert_eq!(config.server.url, "https://custom.example.com");
+        assert!(config.models.contains_key("custom-model"));
+
+        let custom_model = config.models.get("custom-model").unwrap();
+        match &custom_model.pricing {
+            PricingStructure::Flat {
+                input_per_1m,
+                output_per_1m,
+            } => {
+                assert_eq!(*input_per_1m, 10.0);
+                assert_eq!(*output_per_1m, 20.0);
+            }
+            _ => panic!("Expected flat pricing"),
+        }
+
+        assert_eq!(config.aliases.get("my-alias").unwrap(), "custom-model");
     }
 
     #[test]
