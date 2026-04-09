@@ -3,6 +3,13 @@ use crate::models::calculate_total_cost;
 use crate::types::MessageRole;
 use std::path::PathBuf;
 use tempfile::tempdir;
+use tiktoken_rs::get_bpe_from_model;
+
+fn token_count(text: &str) -> u64 {
+    get_bpe_from_model("o200k_base")
+        .map(|bpe| bpe.encode_with_special_tokens(text).len() as u64)
+        .unwrap_or_else(|_| (text.len() / 4) as u64)
+}
 
 #[test]
 fn test_registry_exposes_separate_copilot_cli_analyzer() {
@@ -239,6 +246,39 @@ fn test_copilot_cli_infers_model_from_tool_execution_results() {
     assert_eq!(messages[1].model.as_deref(), Some("gpt-5.4"));
     assert_eq!(messages[1].stats.output_tokens, 536);
     assert_eq!(messages[1].stats.tool_calls, 1);
+}
+
+#[test]
+fn test_copilot_cli_reasoning_text_populates_reasoning_tokens() {
+    let temp_dir = tempdir().unwrap();
+    let session_dir = temp_dir.path().join("cli-session");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let reasoning_text = "I should inspect the current parser, compare shutdown metrics, and keep output accounting unchanged.";
+    let session_file = session_dir.join("events.jsonl");
+    std::fs::write(
+        &session_file,
+        format!(
+            r#"{{"type":"session.start","timestamp":"2026-04-08T05:00:00.000Z","data":{{"sessionId":"cli-session-reasoning","context":{{"cwd":"/home/user/project","model":"openai/gpt-5.4"}}}}}}
+{{"type":"user.message","timestamp":"2026-04-08T05:00:01.000Z","data":{{"content":"Inspect the parser"}}}}
+{{"type":"assistant.turn_start","timestamp":"2026-04-08T05:00:02.000Z","data":{{"turnId":"0","interactionId":"interaction-1"}}}}
+{{"type":"assistant.message","timestamp":"2026-04-08T05:00:03.000Z","data":{{"messageId":"assistant-1","interactionId":"interaction-1","reasoningText":"{reasoning_text}","content":"I found the parser entrypoint.","outputTokens":1234}}}}
+{{"type":"assistant.turn_end","timestamp":"2026-04-08T05:00:04.000Z","data":{{"turnId":"0"}}}}
+"#
+        ),
+    )
+    .unwrap();
+
+    let messages = parse_copilot_cli_session_file(&session_file).unwrap();
+    assert_eq!(messages.len(), 2);
+
+    assert_eq!(messages[1].role, MessageRole::Assistant);
+    assert_eq!(messages[1].stats.output_tokens, 1_234);
+    assert_eq!(
+        messages[1].stats.reasoning_tokens,
+        token_count(reasoning_text)
+    );
+    assert!(messages[1].stats.reasoning_tokens > 0);
 }
 
 #[test]

@@ -135,6 +135,19 @@ impl CopilotCliTurn {
             .join("\n")
     }
 
+    fn reasoning_text(&self) -> String {
+        self.reasoning_parts
+            .iter()
+            .map(String::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn reasoning_tokens(&self) -> u64 {
+        count_tokens(&self.reasoning_text())
+    }
+
     fn visible_output_tokens(&self) -> u64 {
         if self.exact_output_tokens > 0 {
             self.exact_output_tokens
@@ -458,6 +471,10 @@ fn apply_copilot_cli_shutdown_metrics(
             let message = &mut entries[*message_index];
             message.stats.input_tokens = input_distribution[position];
             message.stats.output_tokens = output_distribution[position];
+            message.stats.reasoning_tokens = message
+                .stats
+                .reasoning_tokens
+                .min(message.stats.output_tokens);
             message.stats.cache_read_tokens = cache_read_distribution[position];
             message.stats.cache_creation_tokens = cache_write_distribution[position];
             message.stats.cached_tokens =
@@ -573,6 +590,7 @@ fn flush_copilot_cli_turn(
         } else {
             count_tokens(&output_text)
         };
+        let reasoning_tokens = turn.reasoning_tokens().min(output_tokens);
         let model = turn.model.clone();
         live_context.absorb_turn(&turn, include_user_text);
 
@@ -580,6 +598,7 @@ fn flush_copilot_cli_turn(
         assistant_stats.input_tokens = estimated_input_tokens;
         assistant_stats.cache_read_tokens = estimated_cache_read_tokens;
         assistant_stats.output_tokens = output_tokens;
+        assistant_stats.reasoning_tokens = reasoning_tokens;
         assistant_stats.cached_tokens =
             assistant_stats.cache_read_tokens + assistant_stats.cache_creation_tokens;
         if let Some(model_name) = model.as_deref() {
