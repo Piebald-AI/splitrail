@@ -42,13 +42,15 @@ enum GeminiCliMessage {
         id: String,
         #[serde(deserialize_with = "deserialize_utc_timestamp")]
         timestamp: DateTime<Utc>,
-        content: String,
+        #[serde(default)]
+        content: Option<GeminiCliContent>,
     },
     Gemini {
         id: String,
         #[serde(deserialize_with = "deserialize_utc_timestamp")]
         timestamp: DateTime<Utc>,
-        content: String,
+        #[serde(default)]
+        content: Option<GeminiCliContent>,
         model: String,
         #[serde(default)]
         thoughts: Vec<simd_json::OwnedValue>,
@@ -60,20 +62,66 @@ enum GeminiCliMessage {
         id: String,
         #[serde(deserialize_with = "deserialize_utc_timestamp")]
         timestamp: DateTime<Utc>,
-        content: String,
+        #[serde(default)]
+        content: Option<GeminiCliContent>,
     },
     Error {
         id: String,
         #[serde(deserialize_with = "deserialize_utc_timestamp")]
         timestamp: DateTime<Utc>,
-        content: String,
+        #[serde(default)]
+        content: Option<GeminiCliContent>,
     },
     Info {
         id: String,
         #[serde(deserialize_with = "deserialize_utc_timestamp")]
         timestamp: DateTime<Utc>,
-        content: String,
+        #[serde(default)]
+        content: Option<GeminiCliContent>,
     },
+}
+
+/// A single `Part` from Gemini CLI's multi-modal content. Only `text` is
+/// consumed by splitrail; any other fields (e.g. `inlineData`, `fileData`,
+/// `functionCall`) are silently ignored by serde's default behaviour, which
+/// is what we want — the schema is still evolving upstream and we don't want
+/// unrecognised part kinds to abort parsing.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct GeminiCliPart {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// The `content` field on a Gemini CLI message. Mirrors `PartListUnion` from
+/// `@google/genai`: it can be a plain string (legacy format), a single `Part`
+/// object, or an array of `Part` objects (current format, since Gemini CLI
+/// changed its schema — see issue #137).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum GeminiCliContent {
+    Text(String),
+    Part(GeminiCliPart),
+    Parts(Vec<GeminiCliPart>),
+}
+
+impl GeminiCliContent {
+    /// Extract a concatenated plain-text representation of the content,
+    /// ignoring non-text parts (images, function calls, etc.).
+    fn as_text(&self) -> String {
+        match self {
+            GeminiCliContent::Text(s) => s.clone(),
+            GeminiCliContent::Part(p) => p.text.clone().unwrap_or_default(),
+            GeminiCliContent::Parts(ps) => {
+                let mut out = String::new();
+                for p in ps {
+                    if let Some(t) = &p.text {
+                        out.push_str(t);
+                    }
+                }
+                out
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,15 +264,20 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                 timestamp,
                 content,
             } => {
-                if fallback_session_name.is_none() && !content.is_empty() {
-                    let text_str = content;
-                    let truncated = if text_str.chars().count() > 50 {
-                        let chars: String = text_str.chars().take(50).collect();
-                        format!("{}...", chars)
-                    } else {
-                        text_str
-                    };
-                    fallback_session_name = Some(truncated);
+                if fallback_session_name.is_none() {
+                    let text_str = content
+                        .as_ref()
+                        .map(GeminiCliContent::as_text)
+                        .unwrap_or_default();
+                    if !text_str.is_empty() {
+                        let truncated = if text_str.chars().count() > 50 {
+                            let chars: String = text_str.chars().take(50).collect();
+                            format!("{chars}...")
+                        } else {
+                            text_str
+                        };
+                        fallback_session_name = Some(truncated);
+                    }
                 }
 
                 entries.push(ConversationMessage {
