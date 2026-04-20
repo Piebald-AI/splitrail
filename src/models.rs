@@ -1,7 +1,7 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::utils::warn_once;
 
@@ -82,7 +82,7 @@ pub struct ModelInfo {
 
 /// Global registry for models and aliases
 struct Registry {
-    index: HashMap<String, ModelInfo>,
+    index: HashMap<String, Arc<ModelInfo>>,
     aliases: HashMap<String, String>,
 }
 
@@ -100,7 +100,7 @@ impl Registry {
         external_aliases: HashMap<String, String>,
     ) {
         for (name, info) in external_models {
-            self.index.insert(name, info);
+            self.index.insert(name, Arc::new(info));
         }
         for (alias, canonical) in external_aliases {
             self.aliases.insert(alias, canonical);
@@ -109,22 +109,13 @@ impl Registry {
 }
 
 static REGISTRY: OnceLock<RwLock<Registry>> = OnceLock::new();
-static EXTERNAL_MODELS_INITIALIZED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static FREE_MODEL_INFO: OnceLock<Arc<ModelInfo>> = OnceLock::new();
 
-/// Initialize the model registry with external configuration.
-/// This should be called once at startup.
+/// Merge external model configuration into the global registry.
 pub fn init_external_models(
     external_models: HashMap<String, ModelInfo>,
     external_aliases: HashMap<String, String>,
 ) {
-    if EXTERNAL_MODELS_INITIALIZED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        warn_once(
-            "WARNING: init_external_models called multiple times. Skipping subsequent loads.",
-        );
-        return;
-    }
-
     let rwlock = REGISTRY.get_or_init(|| RwLock::new(Registry::new_with_defaults()));
     let mut registry = rwlock.write();
     registry.merge(external_models, external_aliases);
@@ -135,18 +126,18 @@ fn get_registry_lock() -> &'static RwLock<Registry> {
 }
 
 fn populate_defaults(
-    index: &mut HashMap<String, ModelInfo>,
+    index: &mut HashMap<String, Arc<ModelInfo>>,
     aliases: &mut HashMap<String, String>,
 ) {
     macro_rules! add_model {
         ($name:expr, $pricing:expr, $caching:expr, $est:expr) => {
             index.insert(
                 $name.to_string(),
-                ModelInfo {
+                Arc::new(ModelInfo {
                     pricing: $pricing,
                     caching: $caching,
                     is_estimated: $est,
-                },
+                }),
             );
         };
     }
@@ -1333,25 +1324,27 @@ fn populate_defaults(
 
 /// Free-tier model pricing for models accessed via OpenRouter's `:free` suffix
 /// or other free-tier naming patterns.
-fn get_free_model_info() -> ModelInfo {
-    ModelInfo {
-        pricing: PricingStructure::Flat {
-            input_per_1m: 0.0,
-            output_per_1m: 0.0,
-        },
-        caching: CachingSupport::None,
-        is_estimated: false,
-    }
+fn get_free_model_info() -> Arc<ModelInfo> {
+    Arc::clone(FREE_MODEL_INFO.get_or_init(|| {
+        Arc::new(ModelInfo {
+            pricing: PricingStructure::Flat {
+                input_per_1m: 0.0,
+                output_per_1m: 0.0,
+            },
+            caching: CachingSupport::None,
+            is_estimated: false,
+        })
+    }))
 }
 
 /// Look up a model name directly in the index and alias tables.
-fn lookup_model(name: &str) -> Option<ModelInfo> {
+fn lookup_model(name: &str) -> Option<Arc<ModelInfo>> {
     let registry = get_registry_lock().read();
     if let Some(model_info) = registry.index.get(name) {
-        return Some(model_info.clone());
+        return Some(Arc::clone(model_info));
     }
     if let Some(canonical_name) = registry.aliases.get(name) {
-        return registry.index.get(canonical_name).cloned();
+        return registry.index.get(canonical_name).map(Arc::clone);
     }
     None
 }
@@ -1362,7 +1355,7 @@ fn lookup_model(name: &str) -> Option<ModelInfo> {
 /// `z-ai/glm-5`, `openrouter/aurora-alpha`) by stripping the prefix before
 /// lookup. Models with a `:free` suffix (OpenRouter free tier) always
 /// return $0 pricing.
-pub fn get_model_info(model_name: &str) -> Option<ModelInfo> {
+pub fn get_model_info(model_name: &str) -> Option<Arc<ModelInfo>> {
     // Fast path: direct lookup
     if let Some(info) = lookup_model(model_name) {
         return Some(info);
@@ -1404,17 +1397,21 @@ pub fn is_model_estimated(model_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn input_cost_for_model(model_info: &ModelInfo, input_tokens: u64) -> f64 {
+    match &model_info.pricing {
+        PricingStructure::Flat { input_per_1m, .. } => {
+            (input_tokens as f64 / 1_000_000.0) * input_per_1m
+        }
+        PricingStructure::Tiered(tiered) => {
+            calculate_tiered_cost(input_tokens, &tiered.tiers, tiered.bracket_pricing, true)
+        }
+    }
+}
+
 /// Calculate cost for input tokens using the model's pricing structure
 pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
     match get_model_info(model_name) {
-        Some(model_info) => match &model_info.pricing {
-            PricingStructure::Flat { input_per_1m, .. } => {
-                (input_tokens as f64 / 1_000_000.0) * input_per_1m
-            }
-            PricingStructure::Tiered(tiered) => {
-                calculate_tiered_cost(input_tokens, &tiered.tiers, tiered.bracket_pricing, true)
-            }
-        },
+        Some(model_info) => input_cost_for_model(&model_info, input_tokens),
         None => {
             warn_once(format!(
                 "WARNING: Unknown model: {model_name}. Defaulting to $0."
@@ -1424,22 +1421,53 @@ pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
     }
 }
 
+fn output_cost_for_model(model_info: &ModelInfo, output_tokens: u64) -> f64 {
+    match &model_info.pricing {
+        PricingStructure::Flat { output_per_1m, .. } => {
+            (output_tokens as f64 / 1_000_000.0) * output_per_1m
+        }
+        PricingStructure::Tiered(tiered) => {
+            calculate_tiered_cost(output_tokens, &tiered.tiers, tiered.bracket_pricing, false)
+        }
+    }
+}
+
 /// Calculate cost for output tokens using the model's pricing structure
 pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
     match get_model_info(model_name) {
-        Some(model_info) => match &model_info.pricing {
-            PricingStructure::Flat { output_per_1m, .. } => {
-                (output_tokens as f64 / 1_000_000.0) * output_per_1m
-            }
-            PricingStructure::Tiered(tiered) => {
-                calculate_tiered_cost(output_tokens, &tiered.tiers, tiered.bracket_pricing, false)
-            }
-        },
+        Some(model_info) => output_cost_for_model(&model_info, output_tokens),
         None => {
             warn_once(format!(
                 "WARNING: Unknown model: {model_name}. Defaulting to $0."
             ));
             (output_tokens as f64 / 1_000_000.0) * 0.0 // $0 per 1M tokens fallback
+        }
+    }
+}
+
+fn cache_cost_for_model(
+    model_info: &ModelInfo,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+) -> f64 {
+    match &model_info.caching {
+        CachingSupport::None => 0.0,
+        CachingSupport::OpenAI {
+            cached_input_per_1m,
+        } => {
+            // OpenAI only has cached input cost, no creation cost
+            (cache_read_tokens as f64 / 1_000_000.0) * cached_input_per_1m
+        }
+        CachingSupport::Anthropic {
+            cache_write_per_1m,
+            cache_read_per_1m,
+        } => {
+            let creation_cost = (cache_creation_tokens as f64 / 1_000_000.0) * cache_write_per_1m;
+            let read_cost = (cache_read_tokens as f64 / 1_000_000.0) * cache_read_per_1m;
+            creation_cost + read_cost
+        }
+        CachingSupport::Google(tiered) => {
+            calculate_tiered_cache_cost(cache_read_tokens, &tiered.tiers, tiered.bracket_pricing)
         }
     }
 }
@@ -1452,32 +1480,7 @@ pub fn calculate_cache_cost(
 ) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            match &model_info.caching {
-                CachingSupport::None => 0.0,
-                CachingSupport::OpenAI {
-                    cached_input_per_1m,
-                } => {
-                    // OpenAI only has cached input cost, no creation cost
-                    (cache_read_tokens as f64 / 1_000_000.0) * cached_input_per_1m
-                }
-                CachingSupport::Anthropic {
-                    cache_write_per_1m,
-                    cache_read_per_1m,
-                } => {
-                    let creation_cost =
-                        (cache_creation_tokens as f64 / 1_000_000.0) * cache_write_per_1m;
-                    let read_cost = (cache_read_tokens as f64 / 1_000_000.0) * cache_read_per_1m;
-                    creation_cost + read_cost
-                }
-                CachingSupport::Google(tiered) => {
-                    // Google only has read cost, calculate based on tiers
-                    calculate_tiered_cache_cost(
-                        cache_read_tokens,
-                        &tiered.tiers,
-                        tiered.bracket_pricing,
-                    )
-                }
-            }
+            cache_cost_for_model(&model_info, cache_creation_tokens, cache_read_tokens)
         }
         None => {
             warn_once(format!(
@@ -1496,11 +1499,19 @@ pub fn calculate_total_cost(
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
 ) -> f64 {
-    let input_cost = calculate_input_cost(model_name, input_tokens);
-    let output_cost = calculate_output_cost(model_name, output_tokens);
-    let cache_cost = calculate_cache_cost(model_name, cache_creation_tokens, cache_read_tokens);
-
-    input_cost + output_cost + cache_cost
+    match get_model_info(model_name) {
+        Some(model_info) => {
+            input_cost_for_model(&model_info, input_tokens)
+                + output_cost_for_model(&model_info, output_tokens)
+                + cache_cost_for_model(&model_info, cache_creation_tokens, cache_read_tokens)
+        }
+        None => {
+            warn_once(format!(
+                "WARNING: Unknown model: {model_name}. Defaulting to $0."
+            ));
+            0.0
+        }
+    }
 }
 
 fn calculate_tiered_cost(
@@ -1600,13 +1611,19 @@ where
 mod tests {
     use super::{
         CachingSupport, ModelInfo, PricingStructure, Registry, calculate_cache_cost,
-        calculate_input_cost, calculate_output_cost, get_model_info,
+        calculate_input_cost, calculate_output_cost, get_model_info, get_registry_lock,
+        init_external_models,
     };
 
     use std::collections::HashMap;
 
     fn approx_eq(left: f64, right: f64) {
         assert!((left - right).abs() < 1e-9, "left={left}, right={right}");
+    }
+
+    fn reset_global_registry() {
+        let registry = get_registry_lock();
+        *registry.write() = Registry::new_with_defaults();
     }
 
     #[test]
@@ -1644,6 +1661,56 @@ mod tests {
             .get("expensive")
             .expect("Should find aliased model");
         assert_eq!(canonical, "super-expensive-o3");
+    }
+
+    #[test]
+    fn init_external_models_accepts_multiple_calls() {
+        reset_global_registry();
+
+        let mut first_models = HashMap::new();
+        first_models.insert(
+            "review-first-model".to_string(),
+            ModelInfo {
+                pricing: PricingStructure::Flat {
+                    input_per_1m: 1.0,
+                    output_per_1m: 2.0,
+                },
+                caching: CachingSupport::None,
+                is_estimated: false,
+            },
+        );
+        let mut first_aliases = HashMap::new();
+        first_aliases.insert(
+            "review-first-alias".to_string(),
+            "review-first-model".to_string(),
+        );
+
+        init_external_models(first_models, first_aliases);
+        assert!(get_model_info("review-first-alias").is_some());
+
+        let mut second_models = HashMap::new();
+        second_models.insert(
+            "review-second-model".to_string(),
+            ModelInfo {
+                pricing: PricingStructure::Flat {
+                    input_per_1m: 3.0,
+                    output_per_1m: 4.0,
+                },
+                caching: CachingSupport::None,
+                is_estimated: false,
+            },
+        );
+        let mut second_aliases = HashMap::new();
+        second_aliases.insert(
+            "review-second-alias".to_string(),
+            "review-second-model".to_string(),
+        );
+
+        init_external_models(second_models, second_aliases);
+
+        assert!(get_model_info("review-second-alias").is_some());
+
+        reset_global_registry();
     }
 
     #[test]
@@ -1704,5 +1771,31 @@ mod tests {
         approx_eq(input_cost, 75.0);
         approx_eq(output_cost, 150.0);
         approx_eq(cache_cost, 37.5);
+    }
+
+    #[test]
+    fn repeated_tiered_model_lookups_reuse_the_same_tier_storage() {
+        let first = get_model_info("gemini-2.5-pro").expect("model should exist");
+        let second = get_model_info("gemini-2.5-pro").expect("model should exist");
+
+        match (&first.pricing, &second.pricing) {
+            (PricingStructure::Tiered(first_tiered), PricingStructure::Tiered(second_tiered)) => {
+                assert!(
+                    std::ptr::eq(first_tiered.tiers.as_ptr(), second_tiered.tiers.as_ptr()),
+                    "tier pricing should not be reallocated on each lookup"
+                );
+            }
+            _ => panic!("Expected tiered pricing"),
+        }
+
+        match (&first.caching, &second.caching) {
+            (CachingSupport::Google(first_tiered), CachingSupport::Google(second_tiered)) => {
+                assert!(
+                    std::ptr::eq(first_tiered.tiers.as_ptr(), second_tiered.tiers.as_ptr()),
+                    "cache tiers should not be reallocated on each lookup"
+                );
+            }
+            _ => panic!("Expected Google caching"),
+        }
     }
 }

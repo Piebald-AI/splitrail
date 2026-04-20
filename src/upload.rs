@@ -6,8 +6,11 @@ use crate::utils;
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[cfg(not(test))]
+use std::sync::OnceLock;
 
 fn upload_log_path() -> PathBuf {
     std::env::temp_dir().join("SPLITRAIL.log")
@@ -41,17 +44,32 @@ fn upload_debug_log(line: impl Into<String>) {
     append_upload_log(&line);
 }
 
+#[cfg(not(test))]
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Get the shared HTTP client singleton
-pub fn get_http_client() -> &'static reqwest::Client {
-    HTTP_CLIENT.get_or_init(|| {
+pub fn get_http_client() -> reqwest::Client {
+    #[cfg(test)]
+    {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .danger_accept_invalid_certs(true)
             .build()
             .expect("Failed to create HTTP client")
-    })
+    }
+
+    #[cfg(not(test))]
+    {
+        HTTP_CLIENT
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .timeout(Duration::from_secs(120))
+                    .danger_accept_invalid_certs(true)
+                    .build()
+                    .expect("Failed to create HTTP client")
+            })
+            .clone()
+    }
 }
 
 #[cfg(test)]
@@ -155,7 +173,7 @@ where
                 total_messages,
                 upload_debug,
             };
-            match upload_single_chunk(client, config, chunk, &ctx, &mut progress_callback).await {
+            match upload_single_chunk(&client, config, chunk, &ctx, &mut progress_callback).await {
                 Ok(()) => {
                     last_err = None;
                     break;
