@@ -2,6 +2,7 @@ mod claude_code;
 mod cline;
 mod codex_cli;
 mod copilot;
+mod copilot_cli;
 mod gemini_cli;
 mod kilo_cli;
 mod kilo_code;

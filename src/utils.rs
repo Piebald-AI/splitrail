@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::types::{CompactDate, ConversationMessage, DailyStats, ModelStats};
+use crate::types::{CompactDate, ConversationMessage, DailyStats, MessageRole, ModelStats};
 
 static WARNED_MESSAGES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -209,14 +209,22 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                 ..Default::default()
             });
 
-        match &entry.model {
-            Some(model) => {
-                // AI message
+        match entry.role {
+            MessageRole::Assistant => {
                 daily_stats_entry.ai_messages += 1;
-                *daily_stats_entry
-                    .models
-                    .entry(model.to_string())
-                    .or_insert(0) += 1;
+
+                if let Some(model) = &entry.model {
+                    *daily_stats_entry
+                        .models
+                        .entry(model.to_string())
+                        .or_insert(0) += 1;
+
+                    daily_stats_entry
+                        .model_stats
+                        .entry(model.to_string())
+                        .or_insert_with(|| ModelStats::new(model.to_string()))
+                        .add_message(&entry.stats);
+                }
 
                 // Aggregate TUI-relevant stats only (TuiStats has 6 fields)
                 daily_stats_entry.stats.add_cost(entry.stats.cost);
@@ -240,15 +248,8 @@ pub fn aggregate_by_date(entries: &[ConversationMessage]) -> BTreeMap<String, Da
                     .stats
                     .tool_calls
                     .saturating_add(entry.stats.tool_calls);
-
-                // Aggregate per-model stats for JSON output
-                daily_stats_entry
-                    .model_stats
-                    .entry(model.to_string())
-                    .or_insert_with(|| ModelStats::new(model.to_string()))
-                    .add_message(&entry.stats);
             }
-            None => {
+            MessageRole::User => {
                 // User message - no TUI-relevant stats to aggregate
                 daily_stats_entry.user_messages += 1;
             }

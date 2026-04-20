@@ -494,6 +494,27 @@ fn populate_defaults(
     );
 
     add_model!(
+        "gpt-5.4-pro",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 30.0,
+                    output_per_1m: 180.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 60.0,
+                    output_per_1m: 270.0
+                },
+            ],
+            bracket_pricing: false,
+        }),
+        CachingSupport::None,
+        false
+    );
+
+    add_model!(
         "gpt-5.4-mini",
         PricingStructure::Flat {
             input_per_1m: 0.75,
@@ -506,6 +527,18 @@ fn populate_defaults(
     );
 
     // Anthropic Models
+    add_model!(
+        "claude-opus-4-7",
+        PricingStructure::Flat {
+            input_per_1m: 5.0,
+            output_per_1m: 25.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 6.25,
+            cache_read_per_1m: 0.5
+        },
+        false
+    );
     add_model!(
         "claude-opus-4-6",
         PricingStructure::Flat {
@@ -1045,6 +1078,15 @@ fn populate_defaults(
 
     // MiniMax Models
     add_model!(
+        "minimax-m2.1",
+        PricingStructure::Flat {
+            input_per_1m: 0.30,
+            output_per_1m: 1.20
+        },
+        CachingSupport::None,
+        false
+    );
+    add_model!(
         "minimax-m2.5",
         PricingStructure::Flat {
             input_per_1m: 0.30,
@@ -1149,6 +1191,10 @@ fn populate_defaults(
     add_alias!("gpt-5-pro", "gpt-5-pro");
 
     // Anthropic aliases
+    add_alias!("claude-opus-4.7", "claude-opus-4-7");
+    add_alias!("claude-opus-4.6", "claude-opus-4-6");
+    add_alias!("claude-4.6-opus", "claude-opus-4-6");
+    add_alias!("claude-4.6-opus-20260205", "claude-opus-4-6");
     add_alias!("claude-opus-4-6", "claude-opus-4-6");
     add_alias!("claude-opus-4-5", "claude-opus-4-5");
     add_alias!("claude-opus-4.5", "claude-opus-4-5");
@@ -1163,6 +1209,7 @@ fn populate_defaults(
     add_alias!("claude-sonnet-4-0", "claude-sonnet-4");
     add_alias!("claude-sonnet-4.6", "claude-sonnet-4-6");
     add_alias!("claude-sonnet-4.5", "claude-sonnet-4-5");
+    add_alias!("claude-4.5-sonnet", "claude-sonnet-4-5");
     add_alias!("claude-sonnet-4-5-20250929", "claude-sonnet-4-5");
     add_alias!("claude-3-7-sonnet", "claude-3-7-sonnet");
     add_alias!("claude-3-7-sonnet-20250219", "claude-3-7-sonnet");
@@ -1239,13 +1286,18 @@ fn populate_defaults(
     // OpenAI aliases (continued)
     add_alias!("gpt-5.4", "gpt-5.4");
     add_alias!("gpt-5.4-2026-03-05", "gpt-5.4");
+    add_alias!("gpt-5.4-pro", "gpt-5.4-pro");
     add_alias!("gpt-5.4-mini", "gpt-5.4-mini");
     add_alias!("gpt-5.4-mini-2026-03-17", "gpt-5.4-mini");
     add_alias!("gpt-5.4-mini-2026-03-17.", "gpt-5.4-mini");
 
     // MiniMax aliases
+    add_alias!("minimax-m2.1", "minimax-m2.1");
     add_alias!("minimax-m2.5", "minimax-m2.5");
     add_alias!("minimax-m2.5-20260211", "minimax-m2.5");
+
+    // Moonshot / ByteDance / Meituan aliases
+    add_alias!("doubao-seed-code", "doubao-seed-2.0-code");
 
     // StepFun aliases
     add_alias!("step-3.5-flash", "step-3.5-flash");

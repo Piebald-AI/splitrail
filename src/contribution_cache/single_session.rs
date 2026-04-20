@@ -1,7 +1,9 @@
 //! Single-session contribution type for 1-file-1-session analyzers.
 
 use super::SessionHash;
-use crate::types::{CompactDate, ConversationMessage, ModelCounts, TuiStats, intern_model};
+use crate::types::{
+    CompactDate, ConversationMessage, MessageRole, ModelCounts, TuiStats, intern_model,
+};
 
 // ============================================================================
 // SingleSessionContribution - For 1 file = 1 session analyzers
@@ -39,10 +41,13 @@ impl SingleSessionContribution {
                 session_hash = SessionHash::from_str(&msg.conversation_hash);
             }
 
-            if let Some(model) = &msg.model {
+            if msg.role == MessageRole::Assistant {
                 ai_message_count += 1;
-                models.increment(intern_model(model), 1);
                 stats += TuiStats::from(&msg.stats);
+
+                if let Some(model) = &msg.model {
+                    models.increment(intern_model(model), 1);
+                }
             }
         }
 
