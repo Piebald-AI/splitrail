@@ -132,7 +132,7 @@ struct CopilotToolCall {
 }
 
 // Helper function to count tokens in a string using tiktoken
-fn count_tokens(text: &str) -> u64 {
+pub(crate) fn count_tokens(text: &str) -> u64 {
     // Use o200k_base encoding (GPT-4o and newer models)
     match get_bpe_from_model("o200k_base") {
         Ok(bpe) => {
@@ -189,13 +189,13 @@ fn extract_and_hash_project_id_copilot(_file_path: &Path) -> String {
     hash_text("copilot-global")
 }
 
-fn is_probably_tool_json_text(text: &str) -> bool {
+pub(crate) fn is_probably_tool_json_text(text: &str) -> bool {
     let trimmed = text.trim_start();
     (trimmed.starts_with('{') || trimmed.starts_with("[{")) && trimmed.contains("\"tool\"")
 }
 
 // Helper function to extract model from model_id field
-fn extract_model_from_model_id(model_id: &str) -> Option<String> {
+pub(crate) fn extract_model_from_model_id(model_id: &str) -> Option<String> {
     // Model ID format examples:
     // "generic-copilot/litellm/anthropic/claude-haiku-4.5"
     // "LiteLLM/Sonnet 4.5"
@@ -425,22 +425,11 @@ impl Analyzer for CopilotAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        // VSCode forks that might have Copilot installed: Code, Cursor, Windsurf, VSCodium, Positron, Antigravity
-        let vscode_forks = [
-            "Code",
-            "Cursor",
-            "Windsurf",
-            "VSCodium",
-            "Positron",
-            "Code - Insiders",
-            "Antigravity",
-        ];
-
         if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
 
             // macOS paths for all VSCode forks
-            for fork in &vscode_forks {
+            for fork in COPILOT_VSCODE_FORKS {
                 patterns.push(format!("{home_str}/Library/Application Support/{fork}/User/workspaceStorage/*/chatSessions/*.json"));
             }
         }
@@ -449,7 +438,7 @@ impl Analyzer for CopilotAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::workspace_storage_dirs()
+        let sources: Vec<DataSource> = Self::workspace_storage_dirs()
             .into_iter()
             .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
             .filter_map(|e| e.ok())

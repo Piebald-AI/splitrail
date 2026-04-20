@@ -190,4 +190,12 @@ fn test_copilot_glob_patterns() {
         patterns_str.contains("chatSessions"),
         "Patterns should include copilot-chat extension"
     );
+    assert!(
+        !patterns_str.contains(".copilot/session-state"),
+        "VS Code Copilot patterns should not include Copilot CLI session-state files"
+    );
+    assert!(
+        !patterns_str.contains("events.jsonl"),
+        "VS Code Copilot patterns should not include Copilot CLI event files"
+    );
 }

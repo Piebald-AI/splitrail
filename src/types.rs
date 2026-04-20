@@ -217,6 +217,7 @@ pub enum Application {
     KiloCode,
     KiloCli,
     Copilot,
+    CopilotCli,
     OpenCode,
     PiAgent,
     Piebald,

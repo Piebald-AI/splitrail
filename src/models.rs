@@ -391,6 +391,25 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         }),
         is_estimated: false,
     },
+    "gpt-5.4-pro" => ModelInfo {
+        pricing: PricingStructure::Tiered(TieredPricing {
+            tiers: &[
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 30.0,
+                    output_per_1m: 180.0,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 60.0,
+                    output_per_1m: 270.0,
+                },
+            ],
+            bracket_pricing: false,
+        }),
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
     "gpt-5.4-mini" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 0.75,
@@ -926,7 +945,39 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         is_estimated: false,
     },
 
+    // Moonshot AI Models
+    "kimi-k2.5" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.60,
+            output_per_1m: 3.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.10,
+        },
+        is_estimated: false,
+    },
+
+    // ByteDance / Doubao Models
+    "doubao-seed-2.0-code" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.67,
+            output_per_1m: 3.36,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.14,
+        },
+        is_estimated: true,
+    },
+
     // MiniMax Models
+    "minimax-m2.1" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.30,
+            output_per_1m: 1.20,
+        },
+        caching: CachingSupport::None,
+        is_estimated: false,
+    },
     "minimax-m2.5" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 0.30,
@@ -934,6 +985,26 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
         caching: CachingSupport::None,
         is_estimated: false,
+    },
+
+    // Meituan Models
+    "longcat-flash-lite" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.10,
+            output_per_1m: 0.40,
+        },
+        caching: CachingSupport::None,
+        is_estimated: true,
+    },
+
+    // Routing selector pseudo-models
+    "auto" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.0,
+            output_per_1m: 0.0,
+        },
+        caching: CachingSupport::None,
+        is_estimated: true,
     },
 
     // StepFun Models
@@ -1019,11 +1090,15 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5.2-codex" => "gpt-5.2-codex",
     "gpt-5.3-codex" => "gpt-5.3-codex",
     "gpt-5-pro" => "gpt-5-pro",
+    "gpt-5.4-pro" => "gpt-5.4-pro",
 
     // Anthropic aliases
     "claude-opus-4-7" => "claude-opus-4-7",
     "claude-opus-4.7" => "claude-opus-4-7",
     "claude-opus-4-6" => "claude-opus-4-6",
+    "claude-opus-4.6" => "claude-opus-4-6",
+    "claude-4.6-opus" => "claude-opus-4-6",
+    "claude-4.6-opus-20260205" => "claude-opus-4-6",
     "claude-opus-4-5" => "claude-opus-4-5",
     "claude-opus-4.5" => "claude-opus-4-5",
     "claude-opus-4-5-20251101" => "claude-opus-4-5",
@@ -1039,6 +1114,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "claude-sonnet-4-6" => "claude-sonnet-4-6",
     "claude-sonnet-4.5" => "claude-sonnet-4-5",
     "claude-sonnet-4-5" => "claude-sonnet-4-5",
+    "claude-4.5-sonnet" => "claude-sonnet-4-5",
     "claude-sonnet-4-5-20250929" => "claude-sonnet-4-5",
     "claude-3-7-sonnet" => "claude-3-7-sonnet",
     "claude-3-7-sonnet-20250219" => "claude-3-7-sonnet",
@@ -1117,8 +1193,15 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5.4-mini-2026-03-17." => "gpt-5.4-mini",
 
     // MiniMax aliases
+    "minimax-m2.1" => "minimax-m2.1",
     "minimax-m2.5" => "minimax-m2.5",
     "minimax-m2.5-20260211" => "minimax-m2.5",
+
+    // Moonshot / ByteDance / Meituan aliases
+    "kimi-k2.5" => "kimi-k2.5",
+    "doubao-seed-2.0-code" => "doubao-seed-2.0-code",
+    "doubao-seed-code" => "doubao-seed-2.0-code",
+    "longcat-flash-lite" => "longcat-flash-lite",
 
     // StepFun aliases
     "step-3.5-flash" => "step-3.5-flash",
@@ -1432,5 +1515,81 @@ mod tests {
         approx_eq(input_cost, 0.75);
         approx_eq(output_cost, 4.5);
         approx_eq(cache_cost, 0.075);
+    }
+
+    #[test]
+    fn claude_reordered_aliases_map_to_existing_pricing() {
+        let opus = get_model_info("claude-4.6-opus").expect("alias should resolve");
+        assert!(!opus.is_estimated);
+
+        let dotted = get_model_info("claude-opus-4.6").expect("dotted opus alias should resolve");
+        assert!(!dotted.is_estimated);
+
+        let dated = get_model_info("anthropic/claude-4.6-opus-20260205")
+            .expect("provider alias should resolve");
+        assert!(!dated.is_estimated);
+
+        let sonnet =
+            get_model_info("claude-4.5-sonnet").expect("reordered sonnet alias should resolve");
+        assert!(!sonnet.is_estimated);
+
+        approx_eq(calculate_input_cost("claude-4.6-opus", 1_000_000), 5.0);
+        approx_eq(calculate_output_cost("claude-4.5-sonnet", 1_000_000), 15.0);
+    }
+
+    #[test]
+    fn gpt_5_4_pro_and_provider_prefixed_alias_use_official_pricing() {
+        let model_info =
+            get_model_info("pa/gpt-5.4-pro").expect("provider-prefixed alias should resolve");
+        assert!(!model_info.is_estimated);
+
+        approx_eq(calculate_input_cost("gpt-5.4-pro", 100_000), 3.0);
+        approx_eq(calculate_output_cost("pa/gpt-5.4-pro", 100_000), 18.0);
+    }
+
+    #[test]
+    fn recent_observed_models_have_lookup_entries() {
+        let kimi = get_model_info("kimi-k2.5").expect("kimi model should exist");
+        assert!(!kimi.is_estimated);
+        approx_eq(calculate_input_cost("kimi-k2.5", 1_000_000), 0.6);
+        approx_eq(calculate_output_cost("kimi-k2.5", 1_000_000), 3.0);
+        approx_eq(calculate_cache_cost("kimi-k2.5", 0, 1_000_000), 0.1);
+
+        let minimax = get_model_info("minimax/minimax-m2.1").expect("minimax model should exist");
+        assert!(!minimax.is_estimated);
+        approx_eq(calculate_input_cost("minimax/minimax-m2.1", 1_000_000), 0.3);
+        approx_eq(
+            calculate_output_cost("minimax/minimax-m2.1", 1_000_000),
+            1.2,
+        );
+
+        let doubao = get_model_info("doubao-seed-code").expect("doubao alias should resolve");
+        assert!(doubao.is_estimated);
+        approx_eq(calculate_input_cost("doubao-seed-code", 1_000_000), 0.67);
+        approx_eq(
+            calculate_output_cost("doubao-seed-2.0-code", 1_000_000),
+            3.36,
+        );
+        approx_eq(calculate_cache_cost("doubao-seed-code", 0, 1_000_000), 0.14);
+
+        let longcat =
+            get_model_info("meituan/longcat-flash-lite").expect("meituan model should exist");
+        assert!(longcat.is_estimated);
+        approx_eq(
+            calculate_input_cost("meituan/longcat-flash-lite", 1_000_000),
+            0.1,
+        );
+        approx_eq(calculate_output_cost("longcat-flash-lite", 1_000_000), 0.4);
+    }
+
+    #[test]
+    fn auto_route_selector_is_estimated_zero_cost() {
+        let model_info =
+            get_model_info("auto").expect("auto selector should have a placeholder entry");
+        assert!(model_info.is_estimated);
+
+        approx_eq(calculate_input_cost("auto", 1_000_000), 0.0);
+        approx_eq(calculate_output_cost("auto", 1_000_000), 0.0);
+        approx_eq(calculate_cache_cost("auto", 1_000_000, 1_000_000), 0.0);
     }
 }
