@@ -232,6 +232,16 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         caching: CachingSupport::None,
         is_estimated: false,
     },
+    "gpt-4.5" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 75.0,
+            output_per_1m: 150.0,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 37.5,
+        },
+        is_estimated: false,
+    },
     "gpt-5" => ModelInfo {
         pricing: PricingStructure::Flat {
             input_per_1m: 1.25,
@@ -417,6 +427,16 @@ static MODEL_INDEX: phf::Map<&'static str, ModelInfo> = phf_map! {
         },
         caching: CachingSupport::OpenAI {
             cached_input_per_1m: 0.075,
+        },
+        is_estimated: false,
+    },
+    "gpt-5.4-nano" => ModelInfo {
+        pricing: PricingStructure::Flat {
+            input_per_1m: 0.20,
+            output_per_1m: 1.25,
+        },
+        caching: CachingSupport::OpenAI {
+            cached_input_per_1m: 0.02,
         },
         is_estimated: false,
     },
@@ -1071,6 +1091,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "codex-mini-latest" => "codex-mini-latest",
     "gpt-4-turbo" => "gpt-4-turbo",
     "gpt-4-turbo-2024-04-09" => "gpt-4-turbo",
+    "gpt-4.5" => "gpt-4.5",
     "gpt-5" => "gpt-5",
     "gpt-5-codex" => "gpt-5",
     "gpt-5-2025-08-07" => "gpt-5",
@@ -1191,6 +1212,7 @@ static MODEL_ALIASES: phf::Map<&'static str, &'static str> = phf_map! {
     "gpt-5.4-mini" => "gpt-5.4-mini",
     "gpt-5.4-mini-2026-03-17" => "gpt-5.4-mini",
     "gpt-5.4-mini-2026-03-17." => "gpt-5.4-mini",
+    "gpt-5.4-nano" => "gpt-5.4-nano",
 
     // MiniMax aliases
     "minimax-m2.1" => "minimax-m2.1",
@@ -1591,5 +1613,47 @@ mod tests {
         approx_eq(calculate_input_cost("auto", 1_000_000), 0.0);
         approx_eq(calculate_output_cost("auto", 1_000_000), 0.0);
         approx_eq(calculate_cache_cost("auto", 1_000_000, 1_000_000), 0.0);
+    }
+
+    #[test]
+    fn gpt_5_4_nano_pricing_is_available() {
+        let model_info = get_model_info("gpt-5.4-nano").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("gpt-5.4-nano", 1_000_000);
+        let output_cost = calculate_output_cost("gpt-5.4-nano", 1_000_000);
+        let cache_cost = calculate_cache_cost("gpt-5.4-nano", 0, 1_000_000);
+
+        approx_eq(input_cost, 0.20);
+        approx_eq(output_cost, 1.25);
+        approx_eq(cache_cost, 0.02);
+    }
+
+    #[test]
+    fn gpt_4_5_pricing_is_available() {
+        let model_info = get_model_info("gpt-4.5").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("gpt-4.5", 1_000_000);
+        let output_cost = calculate_output_cost("gpt-4.5", 1_000_000);
+        let cache_cost = calculate_cache_cost("gpt-4.5", 0, 1_000_000);
+
+        approx_eq(input_cost, 75.0);
+        approx_eq(output_cost, 150.0);
+        approx_eq(cache_cost, 37.5);
+    }
+
+    #[test]
+    fn gpt_5_1_pricing_is_available() {
+        let model_info = get_model_info("gpt-5.1").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("gpt-5.1", 1_000_000);
+        let output_cost = calculate_output_cost("gpt-5.1", 1_000_000);
+        let cache_cost = calculate_cache_cost("gpt-5.1", 0, 1_000_000);
+
+        approx_eq(input_cost, 1.25);
+        approx_eq(output_cost, 10.0);
+        approx_eq(cache_cost, 0.125);
     }
 }
