@@ -6,8 +6,11 @@ use crate::utils;
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[cfg(not(test))]
+use std::sync::OnceLock;
 
 fn upload_log_path() -> PathBuf {
     std::env::temp_dir().join("SPLITRAIL.log")
@@ -41,17 +44,46 @@ fn upload_debug_log(line: impl Into<String>) {
     append_upload_log(&line);
 }
 
+#[cfg(not(test))]
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+fn allow_invalid_certs_from_env(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+#[cfg(not(test))]
+fn upload_accept_invalid_certs_enabled() -> bool {
+    allow_invalid_certs_from_env(
+        std::env::var("SPLITRAIL_ACCEPT_INVALID_CERTS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn build_http_client(allow_invalid_certs: bool) -> reqwest::Client {
+    let builder = reqwest::Client::builder().timeout(Duration::from_secs(120));
+    let builder = if allow_invalid_certs {
+        builder.danger_accept_invalid_certs(true)
+    } else {
+        builder
+    };
+
+    builder.build().expect("Failed to create HTTP client")
+}
+
 /// Get the shared HTTP client singleton
-pub fn get_http_client() -> &'static reqwest::Client {
-    HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .expect("Failed to create HTTP client")
-    })
+pub fn get_http_client() -> reqwest::Client {
+    #[cfg(test)]
+    {
+        build_http_client(true)
+    }
+
+    #[cfg(not(test))]
+    {
+        HTTP_CLIENT
+            .get_or_init(|| build_http_client(upload_accept_invalid_certs_enabled()))
+            .clone()
+    }
 }
 
 #[cfg(test)]
@@ -155,7 +187,7 @@ where
                 total_messages,
                 upload_debug,
             };
-            match upload_single_chunk(client, config, chunk, &ctx, &mut progress_callback).await {
+            match upload_single_chunk(&client, config, chunk, &ctx, &mut progress_callback).await {
                 Ok(()) => {
                     last_err = None;
                     break;

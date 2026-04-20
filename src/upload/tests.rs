@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 use crate::config::set_test_config_path;
 
@@ -50,6 +51,71 @@ fn make_stats_with_messages(messages: Vec<ConversationMessage>) -> MultiAnalyzer
     }
 }
 
+fn parse_content_length(headers: &str) -> Option<usize> {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("Content-Length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    })
+}
+
+#[test]
+fn parse_content_length_matches_header_names_case_insensitively() {
+    let headers = "POST / HTTP/1.1\r\nhost: localhost\r\ncontent-length: 123\r\n\r\n";
+    assert_eq!(parse_content_length(headers), Some(123));
+}
+
+#[test]
+fn invalid_cert_opt_in_requires_explicit_truthy_value() {
+    assert!(!allow_invalid_certs_from_env(None));
+    assert!(!allow_invalid_certs_from_env(Some("false")));
+    assert!(allow_invalid_certs_from_env(Some("true")));
+    assert!(allow_invalid_certs_from_env(Some("1")));
+}
+
+async fn read_http_request(socket: &mut tokio::net::TcpStream) {
+    let mut buffer = Vec::new();
+    let mut content_length = None;
+
+    loop {
+        let mut chunk = [0u8; 8192];
+        let bytes_read = socket.read(&mut chunk).await.expect("read request");
+        if bytes_read == 0 {
+            break;
+        }
+
+        buffer.extend_from_slice(&chunk[..bytes_read]);
+
+        if content_length.is_none()
+            && let Some(headers_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+        {
+            let headers = &buffer[..headers_end];
+            let headers = String::from_utf8_lossy(headers);
+            content_length = parse_content_length(&headers);
+
+            if let Some(content_length) = content_length {
+                let body_bytes = buffer.len() - (headers_end + 4);
+                if body_bytes >= content_length {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        if let Some(content_length) = content_length
+            && let Some(headers_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+        {
+            let body_bytes = buffer.len() - (headers_end + 4);
+            if body_bytes >= content_length {
+                break;
+            }
+        }
+    }
+}
+
 async fn start_test_server(
     status_line: &str,
     body: &str,
@@ -72,16 +138,17 @@ async fn start_test_server(
     let base_url = format!("http://{}", addr);
     let status_line = status_line.to_string();
     let body = body.to_string();
+    let (ready_tx, ready_rx) = oneshot::channel();
 
     tokio::spawn(async move {
+        let _ = ready_tx.send(());
         for _ in 0..expected_requests {
             let (mut socket, _) = match listener.accept().await {
                 Ok(conn) => conn,
                 Err(_) => return,
             };
 
-            let mut buf = [0u8; 4096];
-            let _ = socket.read(&mut buf).await;
+            read_http_request(&mut socket).await;
 
             request_counter.fetch_add(1, Ordering::SeqCst);
 
@@ -95,6 +162,8 @@ async fn start_test_server(
             let _ = socket.write_all(response.as_bytes()).await;
         }
     });
+
+    let _ = ready_rx.await;
 
     Some(base_url)
 }

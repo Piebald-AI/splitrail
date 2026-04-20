@@ -131,6 +131,9 @@ async fn main() {
     // Load config file to get defaults
     let config = config::Config::load().unwrap_or(None).unwrap_or_default();
 
+    // Initialize external models from config
+    models::init_external_models(config.models.clone(), config.aliases.clone());
+
     // Create format options merging config defaults with CLI overrides
     let format_options = utils::NumberFormatOptions {
         use_comma: cli.number_comma || config.formatting.number_comma,
