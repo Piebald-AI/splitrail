@@ -321,6 +321,17 @@ fn populate_defaults(
         false
     );
     add_model!(
+        "gpt-4.5",
+        PricingStructure::Flat {
+            input_per_1m: 75.0,
+            output_per_1m: 150.0
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 37.5
+        },
+        false
+    );
+    add_model!(
         "gpt-5",
         PricingStructure::Flat {
             input_per_1m: 1.25,
@@ -522,6 +533,17 @@ fn populate_defaults(
         },
         CachingSupport::OpenAI {
             cached_input_per_1m: 0.075
+        },
+        false
+    );
+    add_model!(
+        "gpt-5.4-nano",
+        PricingStructure::Flat {
+            input_per_1m: 0.20,
+            output_per_1m: 1.25
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.02
         },
         false
     );
@@ -1654,5 +1676,33 @@ mod tests {
         approx_eq(input_cost, 0.75);
         approx_eq(output_cost, 4.5);
         approx_eq(cache_cost, 0.075);
+    }
+
+    #[test]
+    fn gpt_5_4_nano_pricing_is_available() {
+        let model_info = get_model_info("gpt-5.4-nano").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("gpt-5.4-nano", 1_000_000);
+        let output_cost = calculate_output_cost("gpt-5.4-nano", 1_000_000);
+        let cache_cost = calculate_cache_cost("gpt-5.4-nano", 0, 1_000_000);
+
+        approx_eq(input_cost, 0.20);
+        approx_eq(output_cost, 1.25);
+        approx_eq(cache_cost, 0.02);
+    }
+
+    #[test]
+    fn gpt_4_5_pricing_is_available() {
+        let model_info = get_model_info("gpt-4.5").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("gpt-4.5", 1_000_000);
+        let output_cost = calculate_output_cost("gpt-4.5", 1_000_000);
+        let cache_cost = calculate_cache_cost("gpt-4.5", 0, 1_000_000);
+
+        approx_eq(input_cost, 75.0);
+        approx_eq(output_cost, 150.0);
+        approx_eq(cache_cost, 37.5);
     }
 }
