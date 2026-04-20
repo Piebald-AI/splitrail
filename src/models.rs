@@ -1,6 +1,6 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use crate::utils::warn_once;
@@ -100,11 +100,58 @@ impl Registry {
         external_aliases: HashMap<String, String>,
     ) {
         for (name, info) in external_models {
+            if !Self::validate_model_info(&info) {
+                warn_once(format!(
+                    "WARNING: init_external_models ignoring invalid tier config for model `{name}`."
+                ));
+                continue;
+            }
             self.index.insert(name, Arc::new(info));
         }
         for (alias, canonical) in external_aliases {
             self.aliases.insert(alias, canonical);
         }
+    }
+
+    fn validate_model_info(info: &ModelInfo) -> bool {
+        let pricing_ok = match &info.pricing {
+            PricingStructure::Flat { .. } => true,
+            PricingStructure::Tiered(tiered) => {
+                Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
+            }
+        };
+
+        let caching_ok = match &info.caching {
+            CachingSupport::Google(tiered) => {
+                Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
+            }
+            _ => true,
+        };
+
+        pricing_ok && caching_ok
+    }
+
+    fn validate_tier_bounds<T, F>(tiers: &[T], max_tokens: F) -> bool
+    where
+        F: Fn(&T) -> Option<u64>,
+    {
+        if tiers.is_empty() {
+            return false;
+        }
+
+        let mut previous_limit = 0_u64;
+
+        for (index, tier) in tiers.iter().enumerate() {
+            match max_tokens(tier) {
+                Some(limit) if limit > previous_limit && index + 1 < tiers.len() => {
+                    previous_limit = limit;
+                }
+                None if index + 1 == tiers.len() => return true,
+                _ => return false,
+            }
+        }
+
+        false
     }
 }
 
@@ -1054,6 +1101,19 @@ fn populate_defaults(
         false
     );
 
+    // ByteDance / Doubao Models
+    add_model!(
+        "doubao-seed-2.0-code",
+        PricingStructure::Flat {
+            input_per_1m: 0.67,
+            output_per_1m: 3.36
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.14
+        },
+        true
+    );
+
     // Z.AI (Zhipu AI) - Additional Models
     add_model!(
         "glm-5",
@@ -1340,13 +1400,18 @@ fn get_free_model_info() -> Arc<ModelInfo> {
 /// Look up a model name directly in the index and alias tables.
 fn lookup_model(name: &str) -> Option<Arc<ModelInfo>> {
     let registry = get_registry_lock().read();
-    if let Some(model_info) = registry.index.get(name) {
-        return Some(Arc::clone(model_info));
+    let mut current = name;
+    let mut visited = HashSet::new();
+
+    loop {
+        if let Some(model_info) = registry.index.get(current) {
+            return Some(Arc::clone(model_info));
+        }
+        if !visited.insert(current.to_string()) {
+            return None;
+        }
+        current = registry.aliases.get(current)?.as_str();
     }
-    if let Some(canonical_name) = registry.aliases.get(name) {
-        return registry.index.get(canonical_name).map(Arc::clone);
-    }
-    None
 }
 
 /// Get model info by any valid name (canonical or alias).
@@ -1610,9 +1675,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CachingSupport, ModelInfo, PricingStructure, Registry, calculate_cache_cost,
-        calculate_input_cost, calculate_output_cost, get_model_info, get_registry_lock,
-        init_external_models,
+        CachingSupport, CachingTier, ModelInfo, PricingStructure, PricingTier, Registry,
+        TieredCaching, TieredPricing, calculate_cache_cost, calculate_input_cost,
+        calculate_output_cost, get_model_info, get_registry_lock, init_external_models,
     };
 
     use std::collections::HashMap;
@@ -1714,6 +1779,95 @@ mod tests {
     }
 
     #[test]
+    fn transitive_aliases_resolve_to_the_final_model() {
+        reset_global_registry();
+
+        let mut models = HashMap::new();
+        models.insert(
+            "review-chain-model".to_string(),
+            ModelInfo {
+                pricing: PricingStructure::Flat {
+                    input_per_1m: 1.5,
+                    output_per_1m: 2.5,
+                },
+                caching: CachingSupport::None,
+                is_estimated: false,
+            },
+        );
+
+        let mut aliases = HashMap::new();
+        aliases.insert("review-chain-a".to_string(), "review-chain-b".to_string());
+        aliases.insert(
+            "review-chain-b".to_string(),
+            "review-chain-model".to_string(),
+        );
+
+        init_external_models(models, aliases);
+
+        let model_info = get_model_info("review-chain-a").expect("alias chain should resolve");
+        match &model_info.pricing {
+            PricingStructure::Flat { input_per_1m, .. } => approx_eq(*input_per_1m, 1.5),
+            _ => panic!("Expected flat pricing"),
+        }
+
+        reset_global_registry();
+    }
+
+    #[test]
+    fn invalid_external_tier_configs_are_skipped() {
+        reset_global_registry();
+
+        let mut models = HashMap::new();
+        models.insert(
+            "review-invalid-tier-model".to_string(),
+            ModelInfo {
+                pricing: PricingStructure::Tiered(TieredPricing {
+                    tiers: vec![
+                        PricingTier {
+                            max_tokens: Some(200),
+                            input_per_1m: 1.0,
+                            output_per_1m: 2.0,
+                        },
+                        PricingTier {
+                            max_tokens: Some(100),
+                            input_per_1m: 3.0,
+                            output_per_1m: 4.0,
+                        },
+                    ],
+                    bracket_pricing: false,
+                }),
+                caching: CachingSupport::Google(TieredCaching {
+                    tiers: vec![
+                        CachingTier {
+                            max_tokens: Some(50),
+                            cached_input_per_1m: 0.5,
+                        },
+                        CachingTier {
+                            max_tokens: Some(25),
+                            cached_input_per_1m: 0.25,
+                        },
+                    ],
+                    bracket_pricing: false,
+                }),
+                is_estimated: false,
+            },
+        );
+
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "review-invalid-tier-alias".to_string(),
+            "review-invalid-tier-model".to_string(),
+        );
+
+        init_external_models(models, aliases);
+
+        assert!(get_model_info("review-invalid-tier-model").is_none());
+        assert!(get_model_info("review-invalid-tier-alias").is_none());
+
+        reset_global_registry();
+    }
+
+    #[test]
     fn gemini_3_1_pro_preview_uses_bracket_pricing_for_input() {
         let cost = calculate_input_cost("gemini-3.1-pro-preview", 250_000);
         approx_eq(cost, 1.0);
@@ -1771,6 +1925,20 @@ mod tests {
         approx_eq(input_cost, 75.0);
         approx_eq(output_cost, 150.0);
         approx_eq(cache_cost, 37.5);
+    }
+
+    #[test]
+    fn doubao_seed_code_alias_resolves() {
+        let model_info = get_model_info("doubao-seed-code").expect("alias should resolve");
+        assert!(model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("doubao-seed-code", 1_000_000);
+        let output_cost = calculate_output_cost("doubao-seed-code", 1_000_000);
+        let cache_cost = calculate_cache_cost("doubao-seed-code", 0, 1_000_000);
+
+        approx_eq(input_cost, 0.67);
+        approx_eq(output_cost, 3.36);
+        approx_eq(cache_cost, 0.14);
     }
 
     #[test]

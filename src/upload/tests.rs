@@ -51,6 +51,30 @@ fn make_stats_with_messages(messages: Vec<ConversationMessage>) -> MultiAnalyzer
     }
 }
 
+fn parse_content_length(headers: &str) -> Option<usize> {
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("Content-Length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    })
+}
+
+#[test]
+fn parse_content_length_matches_header_names_case_insensitively() {
+    let headers = "POST / HTTP/1.1\r\nhost: localhost\r\ncontent-length: 123\r\n\r\n";
+    assert_eq!(parse_content_length(headers), Some(123));
+}
+
+#[test]
+fn invalid_cert_opt_in_requires_explicit_truthy_value() {
+    assert!(!allow_invalid_certs_from_env(None));
+    assert!(!allow_invalid_certs_from_env(Some("false")));
+    assert!(allow_invalid_certs_from_env(Some("true")));
+    assert!(allow_invalid_certs_from_env(Some("1")));
+}
+
 async fn read_http_request(socket: &mut tokio::net::TcpStream) {
     let mut buffer = Vec::new();
     let mut content_length = None;
@@ -69,10 +93,7 @@ async fn read_http_request(socket: &mut tokio::net::TcpStream) {
         {
             let headers = &buffer[..headers_end];
             let headers = String::from_utf8_lossy(headers);
-            content_length = headers.lines().find_map(|line| {
-                line.strip_prefix("Content-Length: ")
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-            });
+            content_length = parse_content_length(&headers);
 
             if let Some(content_length) = content_length {
                 let body_bytes = buffer.len() - (headers_end + 4);
