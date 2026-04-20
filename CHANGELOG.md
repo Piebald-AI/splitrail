@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] - 2026-04-20
+- feat: support external model and pricing configuration from TOML (#140) - jimyag
+- Support GitHub Copilot CLI and improve CLI accounting (#141) - zhangzqs
+- fix(gemini-cli): accept multi-modal content (string | Part | Part[]) (#143) - mike1858
+- Claude Opus 4.7 (#142) - mike1858
+- Add pricing for GPT-5.4 nano and GPT-4.5 (#144) - mike1858
+
 ## [3.4.0] - 2026-04-05
 - Add monthly view to TUI (#133) - Sewer56
 - feat: add Kilo Code CLI analyzer (#118) - mike1858
