@@ -2,6 +2,7 @@ pub mod logic;
 #[cfg(test)]
 mod tests;
 
+use crate::config::TuiConfig;
 use crate::models::is_model_estimated;
 use crate::types::{
     AnalyzerStatsView, CompactDate, DailyStats, MultiAnalyzerStatsView, SharedAnalyzerView,
@@ -20,7 +21,8 @@ use crossterm::terminal::{
 };
 use crossterm::{ExecutableCommand, execute};
 use logic::{
-    SessionAggregate, aggregate_daily_stats_by_month, date_matches_buffer, has_data_shared,
+    SessionAggregate, aggregate_daily_stats_by_month, date_matches_buffer, filtered_aggregate_keys,
+    has_data_shared, is_empty_period,
 };
 use parking_lot::Mutex;
 use ratatui::backend::CrosstermBackend;
@@ -63,36 +65,6 @@ enum StatsViewMode {
     Session,
 }
 
-/// A simple Either type for iterators to avoid allocation when reversing.
-enum EitherIter<L, R> {
-    Left(L),
-    Right(R),
-}
-
-impl<L, R, T> Iterator for EitherIter<L, R>
-where
-    L: Iterator<Item = T>,
-    R: Iterator<Item = T>,
-{
-    type Item = T;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            EitherIter::Left(l) => l.next(),
-            EitherIter::Right(r) => r.next(),
-        }
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            EitherIter::Left(l) => l.size_hint(),
-            EitherIter::Right(r) => r.size_hint(),
-        }
-    }
-}
-
 enum AggregateStatsData<'a> {
     Borrowed(&'a BTreeMap<String, DailyStats>),
     Owned(BTreeMap<String, DailyStats>),
@@ -119,52 +91,46 @@ fn get_aggregate_stats<'a>(
     }
 }
 
-fn aggregate_total_rows(view: &AnalyzerStatsView, aggregate_view_mode: AggregateViewMode) -> usize {
-    get_aggregate_stats(view, aggregate_view_mode)
-        .as_map()
-        .len()
-        + 2
+fn aggregate_total_rows(
+    view: &AnalyzerStatsView,
+    aggregate_view_mode: AggregateViewMode,
+    hide_empty_periods: bool,
+) -> usize {
+    let visible_rows = filtered_aggregate_keys(
+        get_aggregate_stats(view, aggregate_view_mode).as_map(),
+        hide_empty_periods,
+        false,
+    )
+    .len();
+    visible_rows + 2
 }
 
 fn find_matching_aggregate_index(
     view: &AnalyzerStatsView,
     aggregate_view_mode: AggregateViewMode,
     buffer: &str,
+    hide_empty_periods: bool,
     sort_reversed: bool,
 ) -> Option<usize> {
     let aggregate_stats = get_aggregate_stats(view, aggregate_view_mode);
-    let stats = aggregate_stats.as_map();
-
-    if sort_reversed {
-        stats
-            .iter()
-            .rev()
-            .enumerate()
-            .find(|(_, (period, _))| date_matches_buffer(period, buffer))
-            .map(|(index, _)| index)
-    } else {
-        stats
-            .iter()
-            .enumerate()
-            .find(|(_, (period, _))| date_matches_buffer(period, buffer))
-            .map(|(index, _)| index)
-    }
+    filtered_aggregate_keys(aggregate_stats.as_map(), hide_empty_periods, sort_reversed)
+        .into_iter()
+        .enumerate()
+        .find(|(_, period)| date_matches_buffer(period, buffer))
+        .map(|(index, _)| index)
 }
 
 fn aggregate_key_at(
     view: &AnalyzerStatsView,
     aggregate_view_mode: AggregateViewMode,
     index: usize,
+    hide_empty_periods: bool,
     sort_reversed: bool,
 ) -> Option<String> {
     let aggregate_stats = get_aggregate_stats(view, aggregate_view_mode);
-    let stats = aggregate_stats.as_map();
-
-    if sort_reversed {
-        stats.iter().rev().nth(index).map(|(key, _)| key.clone())
-    } else {
-        stats.iter().nth(index).map(|(key, _)| key.clone())
-    }
+    filtered_aggregate_keys(aggregate_stats.as_map(), hide_empty_periods, sort_reversed)
+        .into_iter()
+        .nth(index)
 }
 
 fn clamp_table_selection(table_state: &mut TableState, total_rows: usize) {
@@ -225,6 +191,7 @@ struct UiState<'a> {
     date_jump_active: bool,
     date_jump_buffer: &'a str,
     sort_reversed: bool,
+    hide_empty_periods: bool,
     show_totals: bool,
 }
 
@@ -242,6 +209,7 @@ const TOKEN_COL_WIDTH: u16 = 12;
 pub fn run_tui(
     stats_receiver: watch::Receiver<MultiAnalyzerStatsView>,
     format_options: &NumberFormatOptions,
+    tui_config: TuiConfig,
     upload_status: Arc<Mutex<UploadStatus>>,
     update_status: Arc<Mutex<crate::version_check::UpdateStatus>>,
     file_watcher: FileWatcher,
@@ -274,6 +242,7 @@ pub fn run_tui(
             &mut terminal,
             stats_receiver,
             format_options,
+            tui_config,
             &mut selected_tab,
             &mut scroll_offset,
             &mut aggregate_view_mode,
@@ -295,6 +264,7 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     mut stats_receiver: watch::Receiver<MultiAnalyzerStatsView>,
     format_options: &NumberFormatOptions,
+    tui_config: TuiConfig,
     selected_tab: &mut usize,
     scroll_offset: &mut usize,
     aggregate_view_mode: &mut AggregateViewMode,
@@ -309,7 +279,8 @@ async fn run_app(
     let mut session_day_filters: Vec<Option<CompactDate>> = Vec::new();
     let mut date_jump_active = false;
     let mut date_jump_buffer = String::new();
-    let mut sort_reversed = false;
+    let mut sort_reversed = tui_config.reverse_sort_default;
+    let mut hide_empty_periods = tui_config.hide_empty_periods;
     let mut show_totals = true;
     let mut current_stats = stats_receiver.borrow().clone();
 
@@ -413,6 +384,7 @@ async fn run_app(
                     date_jump_active,
                     date_jump_buffer: &date_jump_buffer,
                     sort_reversed,
+                    hide_empty_periods,
                     show_totals,
                 };
                 draw_ui(
@@ -479,6 +451,7 @@ async fn run_app(
                                 &stats,
                                 *aggregate_view_mode,
                                 &date_jump_buffer,
+                                hide_empty_periods,
                                 sort_reversed,
                             ) {
                                 table_state.select(Some(index));
@@ -497,6 +470,7 @@ async fn run_app(
                                 &stats,
                                 *aggregate_view_mode,
                                 &date_jump_buffer,
+                                hide_empty_periods,
                                 sort_reversed,
                             ) {
                                 table_state.select(Some(index));
@@ -577,9 +551,12 @@ async fn run_app(
                             StatsViewMode::Aggregate => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                                     let view = current_stats.read();
-                                    let data_rows =
-                                        aggregate_total_rows(&view, *aggregate_view_mode)
-                                            .saturating_sub(2);
+                                    let data_rows = aggregate_total_rows(
+                                        &view,
+                                        *aggregate_view_mode,
+                                        hide_empty_periods,
+                                    )
+                                    .saturating_sub(2);
                                     let last_row = if data_rows > 0 { data_rows + 1 } else { 1 };
 
                                     if selected < last_row {
@@ -638,9 +615,12 @@ async fn run_app(
                             StatsViewMode::Aggregate => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                                     let view = current_stats.read();
-                                    let data_rows =
-                                        aggregate_total_rows(&view, *aggregate_view_mode)
-                                            .saturating_sub(2);
+                                    let data_rows = aggregate_total_rows(
+                                        &view,
+                                        *aggregate_view_mode,
+                                        hide_empty_periods,
+                                    )
+                                    .saturating_sub(2);
                                     table_state.select(Some(selected.saturating_sub(
                                         if data_rows > 0 && selected == data_rows + 1 {
                                             2
@@ -694,8 +674,11 @@ async fn run_app(
                             StatsViewMode::Aggregate => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                                     let view = current_stats.read();
-                                    let total_rows =
-                                        aggregate_total_rows(&view, *aggregate_view_mode);
+                                    let total_rows = aggregate_total_rows(
+                                        &view,
+                                        *aggregate_view_mode,
+                                        hide_empty_periods,
+                                    );
                                     table_state.select(Some(total_rows.saturating_sub(1)));
                                     needs_redraw = true;
                                 }
@@ -735,8 +718,11 @@ async fn run_app(
                             StatsViewMode::Aggregate => {
                                 if let Some(current_stats) = filtered_stats.get(*selected_tab) {
                                     let view = current_stats.read();
-                                    let total_rows =
-                                        aggregate_total_rows(&view, *aggregate_view_mode);
+                                    let total_rows = aggregate_total_rows(
+                                        &view,
+                                        *aggregate_view_mode,
+                                        hide_empty_periods,
+                                    );
                                     let new_selected =
                                         (selected + 10).min(total_rows.saturating_sub(1));
                                     table_state.select(Some(new_selected));
@@ -807,7 +793,7 @@ async fn run_app(
                         let view = current_stats.read();
                         clamp_table_selection(
                             table_state,
-                            aggregate_total_rows(&view, *aggregate_view_mode),
+                            aggregate_total_rows(&view, *aggregate_view_mode, hide_empty_periods),
                         );
                     }
 
@@ -858,13 +844,18 @@ async fn run_app(
                     {
                         let view = current_stats.read();
                         if selected_idx
-                            < aggregate_total_rows(&view, AggregateViewMode::Daily)
-                                .saturating_sub(2)
+                            < aggregate_total_rows(
+                                &view,
+                                AggregateViewMode::Daily,
+                                hide_empty_periods,
+                            )
+                            .saturating_sub(2)
                         {
                             let day_key = aggregate_key_at(
                                 &view,
                                 AggregateViewMode::Daily,
                                 selected_idx,
+                                hide_empty_periods,
                                 sort_reversed,
                             )
                             .and_then(|key| CompactDate::from_str(&key));
@@ -881,6 +872,20 @@ async fn run_app(
                 }
                 KeyCode::Char('r') => {
                     sort_reversed = !sort_reversed;
+                    needs_redraw = true;
+                }
+                KeyCode::Char('e') => {
+                    hide_empty_periods = !hide_empty_periods;
+                    if matches!(*stats_view_mode, StatsViewMode::Aggregate)
+                        && let Some(current_stats) = filtered_stats.get(*selected_tab)
+                        && let Some(table_state) = table_states.get_mut(*selected_tab)
+                    {
+                        let view = current_stats.read();
+                        clamp_table_selection(
+                            table_state,
+                            aggregate_total_rows(&view, *aggregate_view_mode, hide_empty_periods),
+                        );
+                    }
                     needs_redraw = true;
                 }
                 KeyCode::Char('s') => {
@@ -1029,6 +1034,7 @@ fn draw_ui(
                             } else {
                                 ""
                             },
+                            ui_state.hide_empty_periods,
                             ui_state.sort_reversed,
                         );
                         has_estimated
@@ -1097,11 +1103,11 @@ fn draw_ui(
                     };
 
                     format!(
-                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • s to toggle summary • / for {jump_label} • m to toggle daily/monthly{drill_hint} • Ctrl+T for per-session view • q/Esc to quit"
+                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to toggle daily/monthly{drill_hint} • Ctrl+T for per-session view • q/Esc to quit"
                     )
                 }
                 StatsViewMode::Session => {
-                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • s to toggle summary • m to toggle daily/monthly • Ctrl+T for per-period view • q/Esc to quit".to_string()
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • e to toggle empty periods • s to toggle summary • m to toggle daily/monthly • Ctrl+T for per-period view • q/Esc to quit".to_string()
                 }
             };
 
@@ -1195,6 +1201,7 @@ fn draw_aggregate_stats_table(
     table_state: &mut TableState,
     aggregate_view_mode: AggregateViewMode,
     date_filter: &str,
+    hide_empty_periods: bool,
     sort_reversed: bool,
 ) -> (usize, bool) {
     let period_header = match aggregate_view_mode {
@@ -1204,7 +1211,9 @@ fn draw_aggregate_stats_table(
 
     let aggregate_stats = get_aggregate_stats(stats, aggregate_view_mode);
     let aggregate_stats = aggregate_stats.as_map();
-    clamp_table_selection(table_state, aggregate_stats.len() + 2);
+    let visible_periods =
+        filtered_aggregate_keys(aggregate_stats, hide_empty_periods, sort_reversed);
+    clamp_table_selection(table_state, visible_periods.len() + 2);
 
     let header = Row::new(vec![
         Cell::new(""),
@@ -1280,14 +1289,10 @@ fn draw_aggregate_stats_table(
     let mut total_tool_calls: u64 = 0;
     let mut total_conversations: u64 = 0;
 
-    // Use EitherIter to avoid allocation when reversing
-    let items_to_render = if sort_reversed {
-        EitherIter::Right(aggregate_stats.iter().rev())
-    } else {
-        EitherIter::Left(aggregate_stats.iter())
-    };
-
-    for (i, (period, period_stats)) in items_to_render.enumerate() {
+    for (i, period) in visible_periods.iter().enumerate() {
+        let period_stats = aggregate_stats
+            .get(period)
+            .expect("visible period key must exist in aggregate stats");
         // Filter rows based on date search
         if !date_filter.is_empty() && !date_matches_buffer(period, date_filter) {
             continue;
@@ -1316,15 +1321,7 @@ fn draw_aggregate_stats_table(
         let models = models_vec.join(", ");
 
         // Check if this is an empty row
-        let is_empty_row = period_stats.stats.cost_cents == 0
-            && period_stats.stats.cached_tokens == 0
-            && period_stats.stats.input_tokens == 0
-            && period_stats.stats.output_tokens == 0
-            && period_stats.stats.reasoning_tokens == 0
-            && period_stats.conversations == 0
-            && period_stats.user_messages == 0
-            && period_stats.ai_messages == 0
-            && period_stats.stats.tool_calls == 0;
+        let is_empty_row = is_empty_period(period_stats);
 
         // Create styled cells with colors matching original implementation
         let period_text = format_aggregate_period_for_display(period, aggregate_view_mode);
@@ -1586,8 +1583,8 @@ fn draw_aggregate_stats_table(
         },
         Line::from(Span::styled(
             match aggregate_view_mode {
-                AggregateViewMode::Daily => format!("Total ({}d)", aggregate_stats.len()),
-                AggregateViewMode::Monthly => format!("Total ({}m)", aggregate_stats.len()),
+                AggregateViewMode::Daily => format!("Total ({}d)", visible_periods.len()),
+                AggregateViewMode::Monthly => format!("Total ({}m)", visible_periods.len()),
             },
             Style::default().add_modifier(Modifier::BOLD),
         )),

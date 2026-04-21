@@ -1,6 +1,7 @@
 /// Tests for TUI components: table state management, upload progress, date matching, and stats accumulation.
 use crate::tui::logic::{
     accumulate_tui_stats, aggregate_daily_stats_by_month, date_matches_buffer,
+    filtered_aggregate_keys,
 };
 use crate::tui::{
     create_upload_progress_callback, format_month_for_display, show_upload_error,
@@ -418,6 +419,49 @@ fn test_date_filter_with_january() {
     assert!(date_matches_buffer("2025-01-15", "1"));
     assert!(date_matches_buffer("2025-01-15", "jan"));
     assert!(date_matches_buffer("2025-01-15", "JAN"));
+}
+
+#[test]
+fn test_filtered_aggregate_keys_skips_empty_periods_when_enabled() {
+    let stats = BTreeMap::from([
+        (
+            "2025-01-01".to_string(),
+            make_daily_stats("2025-01-01", 10, 0, 1),
+        ),
+        (
+            "2025-01-02".to_string(),
+            make_daily_stats("2025-01-02", 0, 0, 0),
+        ),
+    ]);
+
+    let keys = filtered_aggregate_keys(&stats, true, false);
+
+    assert_eq!(keys, vec!["2025-01-01".to_string()]);
+}
+
+#[test]
+fn test_filtered_aggregate_keys_reverses_after_filtering() {
+    let stats = BTreeMap::from([
+        (
+            "2025-01-01".to_string(),
+            make_daily_stats("2025-01-01", 10, 0, 1),
+        ),
+        (
+            "2025-01-02".to_string(),
+            make_daily_stats("2025-01-02", 0, 0, 0),
+        ),
+        (
+            "2025-01-03".to_string(),
+            make_daily_stats("2025-01-03", 20, 0, 2),
+        ),
+    ]);
+
+    let keys = filtered_aggregate_keys(&stats, true, true);
+
+    assert_eq!(
+        keys,
+        vec!["2025-01-03".to_string(), "2025-01-01".to_string()]
+    );
 }
 
 #[test]

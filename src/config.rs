@@ -12,6 +12,8 @@ pub struct Config {
     pub upload: UploadConfig,
     pub formatting: FormattingConfig,
     #[serde(default)]
+    pub tui: TuiConfig,
+    #[serde(default)]
     pub models: HashMap<String, ModelInfo>,
     #[serde(default)]
     pub aliases: HashMap<String, String>,
@@ -39,6 +41,12 @@ pub struct FormattingConfig {
     pub decimal_places: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct TuiConfig {
+    pub reverse_sort_default: bool,
+    pub hide_empty_periods: bool,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -58,6 +66,7 @@ impl Default for Config {
                 locale: "en".to_string(),
                 decimal_places: 2,
             },
+            tui: TuiConfig::default(),
             models: HashMap::new(),
             aliases: HashMap::new(),
         }
@@ -179,6 +188,14 @@ pub fn show_config() -> Result<()> {
             println!("   Number Human: {}", config.formatting.number_human);
             println!("   Locale: {}", config.formatting.locale);
             println!("   Decimal Places: {}", config.formatting.decimal_places);
+            println!(
+                "   TUI Reverse Sort Default: {}",
+                config.tui.reverse_sort_default
+            );
+            println!(
+                "   TUI Hide Empty Periods: {}",
+                config.tui.hide_empty_periods
+            );
             if !config.models.is_empty() {
                 println!("   Custom Models: {}", config.models.len());
             }
@@ -229,6 +246,18 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
         "decimal-places" => {
             let places = value.parse::<usize>().context("Invalid number value")?;
             config.formatting.decimal_places = places;
+        }
+        "reverse-sort-default" => {
+            let enabled = value
+                .parse::<bool>()
+                .context("Invalid boolean value. Use 'true' or 'false'")?;
+            config.tui.reverse_sort_default = enabled;
+        }
+        "hide-empty-periods" => {
+            let enabled = value
+                .parse::<bool>()
+                .context("Invalid boolean value. Use 'true' or 'false'")?;
+            config.tui.hide_empty_periods = enabled;
         }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }
@@ -312,6 +341,8 @@ is_estimated = true
         assert_eq!(loaded.server.api_token, "");
         assert!(!loaded.upload.auto_upload);
         assert_eq!(loaded.formatting.locale, "en");
+        assert!(!loaded.tui.reverse_sort_default);
+        assert!(!loaded.tui.hide_empty_periods);
     }
 
     #[test]
@@ -328,6 +359,8 @@ is_estimated = true
         set_config_value("number-human", "true").expect("set number-human");
         set_config_value("locale", "de").expect("set locale");
         set_config_value("decimal-places", "3").expect("set decimal-places");
+        set_config_value("reverse-sort-default", "true").expect("set reverse-sort-default");
+        set_config_value("hide-empty-periods", "true").expect("set hide-empty-periods");
 
         let cfg = Config::load()
             .expect("load config")
@@ -340,6 +373,8 @@ is_estimated = true
         assert!(cfg.formatting.number_human);
         assert_eq!(cfg.formatting.locale, "de");
         assert_eq!(cfg.formatting.decimal_places, 3);
+        assert!(cfg.tui.reverse_sort_default);
+        assert!(cfg.tui.hide_empty_periods);
 
         let err = set_config_value("unknown-key", "value").unwrap_err();
         let msg = format!("{err}");
@@ -353,5 +388,34 @@ is_estimated = true
             msg.contains("Invalid boolean value"),
             "unexpected error message: {msg}"
         );
+    }
+
+    #[test]
+    fn config_toml_parses_tui_section() {
+        let toml_str = r#"
+[server]
+url = "https://splitrail.dev"
+api_token = ""
+
+[upload]
+auto_upload = false
+upload_today_only = false
+retry_attempts = 3
+last_date_uploaded = 0
+
+[formatting]
+number_comma = false
+number_human = false
+locale = "en"
+decimal_places = 2
+
+[tui]
+reverse_sort_default = true
+hide_empty_periods = true
+"#;
+
+        let config: Config = toml::from_str(toml_str).expect("parse config");
+        assert!(config.tui.reverse_sort_default);
+        assert!(config.tui.hide_empty_periods);
     }
 }

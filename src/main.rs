@@ -117,7 +117,7 @@ enum ConfigSubcommands {
     Show,
     /// Set configuration value
     Set {
-        /// Configuration key (api-token, auto-upload, number-comma, number-human, locale, decimal-places)
+        /// Configuration key (api-token, auto-upload, number-comma, number-human, locale, decimal-places, reverse-sort-default, hide-empty-periods)
         key: String,
         /// Configuration value
         value: String,
@@ -290,6 +290,7 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     if let Err(e) = tui::run_tui(
         stats_manager.get_stats_receiver(),
         &format_options,
+        config.tui.clone(),
         upload_status.clone(),
         update_status,
         file_watcher,
