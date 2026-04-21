@@ -175,6 +175,36 @@ pub fn aggregate_daily_stats_by_month(
     monthly_stats
 }
 
+pub fn is_empty_period(stats: &DailyStats) -> bool {
+    stats.stats.cost_cents == 0
+        && stats.stats.cached_tokens == 0
+        && stats.stats.input_tokens == 0
+        && stats.stats.output_tokens == 0
+        && stats.stats.reasoning_tokens == 0
+        && stats.conversations == 0
+        && stats.user_messages == 0
+        && stats.ai_messages == 0
+        && stats.stats.tool_calls == 0
+}
+
+pub fn filtered_aggregate_keys(
+    aggregate_stats: &BTreeMap<String, DailyStats>,
+    hide_empty_periods: bool,
+    sort_reversed: bool,
+) -> Vec<String> {
+    let mut keys: Vec<String> = aggregate_stats
+        .iter()
+        .filter(|(_, stats)| !hide_empty_periods || !is_empty_period(stats))
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    if sort_reversed {
+        keys.reverse();
+    }
+
+    keys
+}
+
 /// Check if an AnalyzerStatsView has any data to display.
 pub fn has_data_view(stats: &crate::types::AnalyzerStatsView) -> bool {
     stats.num_conversations > 0
