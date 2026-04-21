@@ -1307,6 +1307,10 @@ fn populate_defaults(
     add_alias!("gemini-3-flash-preview-12-2025", "gemini-3-flash-preview");
     add_alias!("gemini-3-flash", "gemini-3-flash-preview");
     add_alias!("gemini-3.1-pro-preview", "gemini-3.1-pro-preview");
+    add_alias!(
+        "gemini-3.1-pro-preview-customtools",
+        "gemini-3.1-pro-preview"
+    );
     add_alias!("gemini-3.1-pro", "gemini-3.1-pro-preview");
     add_alias!("gemini-3.1-pro-low", "gemini-3.1-pro-preview");
     add_alias!("gemini-3.1-pro-medium", "gemini-3.1-pro-preview");
@@ -1877,6 +1881,21 @@ mod tests {
     fn gemini_3_1_pro_preview_uses_bracket_pricing_for_cache_reads() {
         let cost = calculate_cache_cost("gemini-3.1-pro-preview", 0, 250_000);
         approx_eq(cost, 0.1);
+    }
+
+    #[test]
+    fn gemini_3_1_pro_preview_customtools_alias_maps_to_same_pricing() {
+        let model_info =
+            get_model_info("gemini-3.1-pro-preview-customtools").expect("alias should resolve");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("gemini-3.1-pro-preview-customtools", 250_000);
+        let output_cost = calculate_output_cost("gemini-3.1-pro-preview-customtools", 250_000);
+        let cache_cost = calculate_cache_cost("gemini-3.1-pro-preview-customtools", 0, 250_000);
+
+        approx_eq(input_cost, 1.0);
+        approx_eq(output_cost, 4.5);
+        approx_eq(cache_cost, 0.1);
     }
 
     #[test]
