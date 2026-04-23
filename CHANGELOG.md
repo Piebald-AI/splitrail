@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1] - 2026-04-23
+- feat: add TUI defaults for sort and empty periods (#146) - jimyag
+- Add pricing for Gemini 3.1 Pro Preview Custom Tools (#148) - mike1858
+- Add GPT-5.5 pricing (#149) - mike1858
+
 ## [3.5.0] - 2026-04-20
 - feat: support external model and pricing configuration from TOML (#140) - jimyag
 - Support GitHub Copilot CLI and improve CLI accounting (#141) - zhangzqs
