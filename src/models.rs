@@ -564,6 +564,28 @@ fn populate_defaults(
     );
 
     add_model!(
+        "gpt-5.5",
+        PricingStructure::Flat {
+            input_per_1m: 5.0,
+            output_per_1m: 30.0
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.50
+        },
+        false
+    );
+
+    add_model!(
+        "gpt-5.5-pro",
+        PricingStructure::Flat {
+            input_per_1m: 30.0,
+            output_per_1m: 180.0
+        },
+        CachingSupport::None,
+        false
+    );
+
+    add_model!(
         "gpt-5.4-mini",
         PricingStructure::Flat {
             input_per_1m: 0.75,
@@ -1262,6 +1284,12 @@ fn populate_defaults(
     add_alias!("gpt-5.2-codex", "gpt-5.2-codex");
     add_alias!("gpt-5.3-codex", "gpt-5.3-codex");
     add_alias!("gpt-5-pro", "gpt-5-pro");
+    add_alias!("gpt-5.4", "gpt-5.4");
+    add_alias!("gpt-5.4-pro", "gpt-5.4-pro");
+    add_alias!("gpt-5.4-mini", "gpt-5.4-mini");
+    add_alias!("gpt-5.4-nano", "gpt-5.4-nano");
+    add_alias!("gpt-5.5", "gpt-5.5");
+    add_alias!("gpt-5.5-pro", "gpt-5.5-pro");
 
     // Anthropic aliases
     add_alias!("claude-opus-4.7", "claude-opus-4-7");
