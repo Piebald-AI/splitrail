@@ -565,22 +565,54 @@ fn populate_defaults(
 
     add_model!(
         "gpt-5.5",
-        PricingStructure::Flat {
-            input_per_1m: 5.0,
-            output_per_1m: 30.0
-        },
-        CachingSupport::OpenAI {
-            cached_input_per_1m: 0.50
-        },
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 5.0,
+                    output_per_1m: 30.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 10.0,
+                    output_per_1m: 45.0
+                },
+            ],
+            bracket_pricing: false,
+        }),
+        CachingSupport::Google(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(272_000),
+                    cached_input_per_1m: 0.50
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 1.25
+                },
+            ],
+            bracket_pricing: false,
+        }),
         false
     );
 
     add_model!(
         "gpt-5.5-pro",
-        PricingStructure::Flat {
-            input_per_1m: 30.0,
-            output_per_1m: 180.0
-        },
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 30.0,
+                    output_per_1m: 180.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 60.0,
+                    output_per_1m: 270.0
+                },
+            ],
+            bracket_pricing: false,
+        }),
         CachingSupport::None,
         false
     );
@@ -1289,6 +1321,7 @@ fn populate_defaults(
     add_alias!("gpt-5.4-mini", "gpt-5.4-mini");
     add_alias!("gpt-5.4-nano", "gpt-5.4-nano");
     add_alias!("gpt-5.5", "gpt-5.5");
+    add_alias!("gpt-5.5-2026-04-23", "gpt-5.5");
     add_alias!("gpt-5.5-pro", "gpt-5.5-pro");
 
     // Anthropic aliases
