@@ -5,36 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.2] - 2026-04-24
+- Add GPT-5.5 long-context pricing (#151) - mike1858
+
 ## [3.5.1] - 2026-04-23
 - feat: add TUI defaults for sort and empty periods (#146) - jimyag
 - Add pricing for Gemini 3.1 Pro Preview Custom Tools (#148) - mike1858
 - Add GPT-5.5 pricing (#149) - mike1858
 
 ## [3.5.0] - 2026-04-20
-- feat: support external model and pricing configuration from TOML (#140) - jimyag
-- Support GitHub Copilot CLI and improve CLI accounting (#141) - zhangzqs
-- fix(gemini-cli): accept multi-modal content (string | Part | Part[]) (#143) - mike1858
-- Claude Opus 4.7 (#142) - mike1858
-- Add pricing for GPT-5.4 nano and GPT-4.5 (#144) - mike1858
+- feat: support external model and pricing configuration from TOML (#140) - @jimyag
+- Support GitHub Copilot CLI and improve CLI accounting (#141) - @zhangzqs
+- fix(gemini-cli): accept multi-modal content (string | Part | Part[]) (#143) - @mike1858
+- Claude Opus 4.7 (#142) - @mike1858
+- Add pricing for GPT-5.4 nano and GPT-4.5 (#144) - @mike1858
 
 ## [3.4.0] - 2026-04-05
-- Add monthly view to TUI (#133) - Sewer56
-- feat: add Kilo Code CLI analyzer (#118) - mike1858
-- fix: add retry logic, per-chunk progress saving, and gzip support (#138) - mike1858
-- feat: add SQLite database support to OpenCode analyzer (#120) - mike1858
-- Include token counts for Piebald that were accidentally ignored (#136) - mike1858
-- Add aliases for Gemini 3.1 Pro - low and medium and high (#135) - mike1858
-- fix: correct TuiStats size comment, revert cost_cents to u32 (#132) - Sewer56
+- Add monthly view to TUI (#133) - @Sewer56
+- feat: add Kilo Code CLI analyzer (#118) - @mike1858
+- fix: add retry logic, per-chunk progress saving, and gzip support (#138) - @mike1858
+- feat: add SQLite database support to OpenCode analyzer (#120) - @mike1858
+- Include token counts for Piebald that were accidentally ignored (#136) - @mike1858
+- Add aliases for Gemini 3.1 Pro - low and medium and high (#135) - @mike1858
+- fix: correct TuiStats size comment, revert cost_cents to u32 (#132) - @Sewer56
 
 ## [3.3.5] - 2026-03-14
 - Fix capped large token totals in TUI stats (#130) - @mike1858
 
 ## [3.3.4] - 2026-03-11
-- fix: widen token columns and add overflow-safe formatting (#124) - mike1858
-- feat: add Gemini 3.1 Pro pricing and model aliases (#125) - mike1858
-- Fix JSONL parsing warnings and add missing model pricing (#127) - mike1858
-- feat: add Claude Sonnet 4.6 pricing (#121) - mike1858
-- Fix GPT-5.2 (#119) - mike1858
+- fix: widen token columns and add overflow-safe formatting (#124) - @mike1858
+- feat: add Gemini 3.1 Pro pricing and model aliases (#125) - @mike1858
+- Fix JSONL parsing warnings and add missing model pricing (#127) - @mike1858
+- feat: add Claude Sonnet 4.6 pricing (#121) - @mike1858
+- Fix GPT-5.2 (#119) - @mike1858
 
 ## [3.3.3] - 2026-02-13
 - fix: strip non-standard numeric format annotations from MCP JSON schemas (#114) - @mike1858
