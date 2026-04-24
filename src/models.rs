@@ -598,21 +598,10 @@ fn populate_defaults(
 
     add_model!(
         "gpt-5.5-pro",
-        PricingStructure::Tiered(TieredPricing {
-            tiers: vec![
-                PricingTier {
-                    max_tokens: Some(272_000),
-                    input_per_1m: 30.0,
-                    output_per_1m: 180.0
-                },
-                PricingTier {
-                    max_tokens: None,
-                    input_per_1m: 60.0,
-                    output_per_1m: 270.0
-                },
-            ],
-            bracket_pricing: false,
-        }),
+        PricingStructure::Flat {
+            input_per_1m: 30.0,
+            output_per_1m: 180.0
+        },
         CachingSupport::None,
         false
     );
