@@ -201,27 +201,18 @@ fn test_copilot_glob_patterns() {
 }
 
 #[test]
-fn test_parse_empty_copilot_session_without_requester_username() {
+fn test_parse_empty_copilot_session_without_optional_metadata_fields() {
     let dir = tempfile::tempdir().unwrap();
     let session_path = dir.path().join("empty-session.json");
     std::fs::write(
         &session_path,
         r#"{
             "version": 3,
-            "responderUsername": "",
-            "initialLocation": "panel",
             "requests": [],
             "sessionId": "b4c76ee0-d6af-4c61-a85b-2b092ebd86fd",
             "creationDate": 1768224201981,
             "lastMessageDate": 1768224201981,
-            "hasPendingEdits": false,
-            "inputState": {
-                "mode": {
-                    "id": "agent",
-                    "kind": "agent"
-                },
-                "inputText": ""
-            }
+            "hasPendingEdits": false
         }"#,
     )
     .unwrap();
