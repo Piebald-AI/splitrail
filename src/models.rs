@@ -1157,6 +1157,22 @@ fn populate_defaults(
         true
     );
 
+    // DeepSeek Models
+    // Source: https://api-docs.deepseek.com/quick_start/pricing/ (official pricing page;
+    // use the standard rates rather than the temporary promotional discount:
+    // cache hit $0.0145/M, cache miss $1.74/M, output $3.48/M)
+    add_model!(
+        "deepseek-v4-pro",
+        PricingStructure::Flat {
+            input_per_1m: 1.74,
+            output_per_1m: 3.48
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.0145
+        },
+        false
+    );
+
     // Z.AI (Zhipu AI) - Additional Models
     add_model!(
         "glm-5",
@@ -1192,6 +1208,18 @@ fn populate_defaults(
         false
     );
 
+    // Xiaomi Models
+    // Source: https://openrouter.ai/xiaomi/mimo-v2.5-pro
+    add_model!(
+        "mimo-v2.5-pro",
+        PricingStructure::Flat {
+            input_per_1m: 1.0,
+            output_per_1m: 3.0
+        },
+        CachingSupport::None,
+        true
+    );
+
     // MiniMax Models
     add_model!(
         "minimax-m2.1",
@@ -1210,6 +1238,42 @@ fn populate_defaults(
         },
         CachingSupport::None,
         false
+    );
+
+    // Moonshot AI Models
+    // Source: https://openrouter.ai/moonshotai/kimi-k2.5
+    add_model!(
+        "kimi-k2.5",
+        PricingStructure::Flat {
+            input_per_1m: 0.44,
+            output_per_1m: 2.0
+        },
+        CachingSupport::None,
+        true
+    );
+
+    // Qwen Models
+    // Source: https://openrouter.ai/qwen/qwen3.5-35b-a3b
+    add_model!(
+        "qwen3.5-35b-a3b",
+        PricingStructure::Flat {
+            input_per_1m: 0.1625,
+            output_per_1m: 1.30
+        },
+        CachingSupport::None,
+        true
+    );
+
+    // Meituan Models
+    // Source: https://anotherwrapper.com/tools/llm-pricing/longcat-flash-lite
+    add_model!(
+        "longcat-flash-lite",
+        PricingStructure::Flat {
+            input_per_1m: 0.10,
+            output_per_1m: 0.40
+        },
+        CachingSupport::None,
+        true
     );
 
     // StepFun Models
@@ -1243,6 +1307,19 @@ fn populate_defaults(
         },
         CachingSupport::None,
         false
+    );
+    // OpenRouter router labels
+    // Source: https://openrouter.ai/docs/guides/routing/routers/auto-router
+    // Auto Router has no standalone per-token price; usage is billed at the routed model's rate.
+    // Keep a zero-cost estimated placeholder so historical logs with only `auto` do not warn.
+    add_model!(
+        "auto",
+        PricingStructure::Flat {
+            input_per_1m: 0.0,
+            output_per_1m: 0.0
+        },
+        CachingSupport::None,
+        true
     );
 
     // Populate Aliases
@@ -1735,6 +1812,7 @@ mod tests {
     };
 
     use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
 
     fn approx_eq(left: f64, right: f64) {
         assert!((left - right).abs() < 1e-9, "left={left}, right={right}");
@@ -1743,6 +1821,14 @@ mod tests {
     fn reset_global_registry() {
         let registry = get_registry_lock();
         *registry.write() = Registry::new_with_defaults();
+    }
+
+    fn registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        TEST_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("registry test mutex should not be poisoned")
     }
 
     #[test]
@@ -1784,6 +1870,7 @@ mod tests {
 
     #[test]
     fn init_external_models_accepts_multiple_calls() {
+        let _guard = registry_test_guard();
         reset_global_registry();
 
         let mut first_models = HashMap::new();
@@ -1834,6 +1921,7 @@ mod tests {
 
     #[test]
     fn transitive_aliases_resolve_to_the_final_model() {
+        let _guard = registry_test_guard();
         reset_global_registry();
 
         let mut models = HashMap::new();
@@ -1869,6 +1957,7 @@ mod tests {
 
     #[test]
     fn invalid_external_tier_configs_are_skipped() {
+        let _guard = registry_test_guard();
         reset_global_registry();
 
         let mut models = HashMap::new();
@@ -2034,5 +2123,83 @@ mod tests {
             }
             _ => panic!("Expected Google caching"),
         }
+    }
+
+    #[test]
+    fn mimo_v2_5_pro_pricing_is_available() {
+        let model_info = get_model_info("mimo-v2.5-pro").expect("model should exist");
+        assert!(model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("mimo-v2.5-pro", 1_000_000);
+        let output_cost = calculate_output_cost("mimo-v2.5-pro", 1_000_000);
+
+        approx_eq(input_cost, 1.0);
+        approx_eq(output_cost, 3.0);
+    }
+
+    #[test]
+    fn deepseek_v4_pro_pricing_is_available() {
+        let model_info = get_model_info("deepseek-v4-pro").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("deepseek-v4-pro", 1_000_000);
+        let output_cost = calculate_output_cost("deepseek-v4-pro", 1_000_000);
+        let cache_cost = calculate_cache_cost("deepseek-v4-pro", 0, 1_000_000);
+
+        approx_eq(input_cost, 1.74);
+        approx_eq(output_cost, 3.48);
+        approx_eq(cache_cost, 0.0145);
+    }
+
+    #[test]
+    fn qwen_3_5_35b_a3b_provider_alias_resolves() {
+        let model_info =
+            get_model_info("qwen/qwen3.5-35b-a3b").expect("provider-prefixed model should exist");
+        assert!(model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("qwen/qwen3.5-35b-a3b", 1_000_000);
+        let output_cost = calculate_output_cost("qwen/qwen3.5-35b-a3b", 1_000_000);
+
+        approx_eq(input_cost, 0.1625);
+        approx_eq(output_cost, 1.30);
+    }
+
+    #[test]
+    fn longcat_flash_lite_provider_alias_resolves() {
+        let model_info = get_model_info("meituan/longcat-flash-lite")
+            .expect("provider-prefixed model should exist");
+        assert!(model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("meituan/longcat-flash-lite", 1_000_000);
+        let output_cost = calculate_output_cost("meituan/longcat-flash-lite", 1_000_000);
+
+        approx_eq(input_cost, 0.10);
+        approx_eq(output_cost, 0.40);
+    }
+
+    #[test]
+    fn kimi_k2_5_pricing_is_available() {
+        let model_info = get_model_info("kimi-k2.5").expect("model should exist");
+        assert!(model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("kimi-k2.5", 1_000_000);
+        let output_cost = calculate_output_cost("kimi-k2.5", 1_000_000);
+
+        approx_eq(input_cost, 0.44);
+        approx_eq(output_cost, 2.0);
+    }
+
+    #[test]
+    fn auto_router_placeholder_is_estimated_and_free() {
+        let model_info = get_model_info("auto").expect("router placeholder should exist");
+        assert!(model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("auto", 1_000_000);
+        let output_cost = calculate_output_cost("auto", 1_000_000);
+        let cache_cost = calculate_cache_cost("auto", 0, 1_000_000);
+
+        approx_eq(input_cost, 0.0);
+        approx_eq(output_cost, 0.0);
+        approx_eq(cache_cost, 0.0);
     }
 }
