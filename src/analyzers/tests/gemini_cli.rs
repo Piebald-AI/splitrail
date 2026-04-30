@@ -345,3 +345,103 @@ async fn test_gemini_cli_issue_137_regression() {
         .expect("issue #137 regression: parse_source must accept array-of-parts content");
     assert_eq!(parsed.len(), 2);
 }
+
+#[tokio::test]
+async fn test_gemini_cli_warning_messages_are_ignored() {
+    let dir = tempdir().unwrap();
+    let project_dir = dir.path().join("tmp").join("project-warning").join("chats");
+    let json_content = r#"{
+        "sessionId": "sess-warning",
+        "projectHash": "proj-hash",
+        "startTime": "2026-03-20T08:00:00Z",
+        "lastUpdated": "2026-03-20T08:05:00Z",
+        "messages": [
+            {
+                "type": "user",
+                "id": "u-1",
+                "timestamp": "2026-03-20T08:00:00Z",
+                "content": [{"text": "run the tests"}]
+            },
+            {
+                "type": "warning",
+                "id": "w-1",
+                "timestamp": "2026-03-20T08:00:01Z",
+                "content": [{"text": "tool output warning"}]
+            },
+            {
+                "type": "gemini",
+                "id": "g-1",
+                "timestamp": "2026-03-20T08:00:05Z",
+                "content": "done",
+                "model": "gemini-3-flash-preview",
+                "tokens": {
+                    "input": 10,
+                    "output": 20,
+                    "thoughts": 5,
+                    "cached": 0,
+                    "tool": 0,
+                    "total": 35
+                }
+            }
+        ]
+    }"#;
+    let session_path = write_session(&project_dir, json_content);
+
+    let analyzer = GeminiCliAnalyzer::new();
+    let source = crate::analyzer::DataSource { path: session_path };
+    let messages = analyzer
+        .parse_source(&source)
+        .expect("warning message types should not break parsing");
+
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, crate::types::MessageRole::User);
+    assert_eq!(messages[1].role, crate::types::MessageRole::Assistant);
+}
+
+#[tokio::test]
+async fn test_gemini_cli_jsonl_latest_message_version_wins() {
+    let dir = tempdir().unwrap();
+    let session_dir = dir
+        .path()
+        .join("tmp")
+        .join("project-jsonl")
+        .join("chats")
+        .join("9e43d548-335e-4ad0-b797-4f8bce36e08c");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let session_path = session_dir.join("06fhku.jsonl");
+    let jsonl_content = r#"{"sessionId":"sess-jsonl","projectHash":"proj-hash","startTime":"2026-04-28T16:10:11.637Z","lastUpdated":"2026-04-28T16:10:11.637Z","kind":"main"}
+{"id":"u-1","timestamp":"2026-04-28T16:11:14.988Z","type":"user","content":[{"text":"inspect this cache design"}]}
+{"$set":{"lastUpdated":"2026-04-28T16:11:14.989Z"}}
+{"id":"g-1","timestamp":"2026-04-28T16:11:38.569Z","type":"gemini","content":"first draft","thoughts":[],"tokens":{"input":20,"output":30,"cached":0,"thoughts":4,"tool":0,"total":54},"model":"gemini-3-flash-preview"}
+{"$set":{"lastUpdated":"2026-04-28T16:11:38.569Z"}}
+{"id":"g-1","timestamp":"2026-04-28T16:11:38.569Z","type":"gemini","content":"final draft","thoughts":[],"tokens":{"input":20,"output":30,"cached":0,"thoughts":4,"tool":0,"total":54},"model":"gemini-3-flash-preview","toolCalls":[{"id":"call-1","name":"run_shell_command","args":{"command":"rg cache"},"result":[]}]}
+"#;
+    let mut file = File::create(&session_path).unwrap();
+    file.write_all(jsonl_content.as_bytes()).unwrap();
+
+    let analyzer = GeminiCliAnalyzer::new();
+    let source = crate::analyzer::DataSource {
+        path: session_path.clone(),
+    };
+    let messages = analyzer
+        .parse_source(&source)
+        .expect("jsonl sessions should parse successfully");
+
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, crate::types::MessageRole::User);
+    assert_eq!(
+        messages[0].session_name.as_deref(),
+        Some("inspect this cache design")
+    );
+
+    let assistant = messages
+        .iter()
+        .find(|m| m.role == crate::types::MessageRole::Assistant)
+        .unwrap();
+    assert_eq!(assistant.stats.input_tokens, 20);
+    assert_eq!(assistant.stats.output_tokens, 30);
+    assert_eq!(assistant.stats.reasoning_tokens, 4);
+    assert_eq!(assistant.stats.tool_calls, 1);
+    assert_eq!(assistant.stats.terminal_commands, 1);
+    assert!(analyzer.is_valid_data_path(&session_path));
+}

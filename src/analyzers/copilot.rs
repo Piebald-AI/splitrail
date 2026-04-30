@@ -54,9 +54,13 @@ impl CopilotAnalyzer {
 #[serde(rename_all = "camelCase")]
 struct CopilotChatSession {
     version: u32,
-    requester_username: String,
-    responder_username: String,
-    initial_location: String,
+    #[serde(default)]
+    requester_username: Option<String>,
+    #[serde(default)]
+    responder_username: Option<String>,
+    #[serde(default)]
+    initial_location: Option<String>,
+    #[serde(default)]
     requests: Vec<CopilotRequest>,
     #[serde(default)]
     session_id: Option<String>,

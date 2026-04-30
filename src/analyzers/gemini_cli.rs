@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -73,6 +74,13 @@ enum GeminiCliMessage {
         content: Option<GeminiCliContent>,
     },
     Info {
+        id: String,
+        #[serde(deserialize_with = "deserialize_utc_timestamp")]
+        timestamp: DateTime<Utc>,
+        #[serde(default)]
+        content: Option<GeminiCliContent>,
+    },
+    Warning {
         id: String,
         #[serde(deserialize_with = "deserialize_utc_timestamp")]
         timestamp: DateTime<Utc>,
@@ -245,19 +253,29 @@ fn calculate_gemini_cost(tokens: &GeminiCliTokens, model_name: &str) -> f64 {
     input_cost + output_cost + cache_cost
 }
 
-// JSON session parsing (not JSONL)
-fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
+fn is_gemini_cli_chat_path(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext == "json" || ext == "jsonl")
+        && path
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| ancestor.file_name().is_some_and(|name| name == "chats"))
+}
+
+fn messages_from_session(
+    file_path: &Path,
+    messages: Vec<GeminiCliMessage>,
+) -> Vec<ConversationMessage> {
     let project_hash = extract_and_hash_project_id_gemini_cli(file_path);
     let file_path_str = file_path.to_string_lossy();
+    let conversation_hash = hash_text(&file_path.to_string_lossy());
     let mut entries = Vec::new();
     let mut fallback_session_name: Option<String> = None;
 
-    // Parse the complete session JSON
-    let session: GeminiCliSession =
-        simd_json::from_slice(&mut std::fs::read_to_string(file_path)?.into_bytes())?;
-
-    // Process each message in the session
-    for message in session.messages {
+    for message in messages {
         match message {
             GeminiCliMessage::User {
                 id: _,
@@ -290,7 +308,7 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                         file_path_str,
                         timestamp.to_rfc3339()
                     )),
-                    conversation_hash: hash_text(&file_path.to_string_lossy()),
+                    conversation_hash: conversation_hash.clone(),
                     model: None,
                     stats: Stats::default(),
                     role: MessageRole::User,
@@ -309,7 +327,6 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
             } => {
                 let mut stats = extract_tool_stats(&tool_calls);
 
-                // Update stats with token information
                 stats.input_tokens = tokens.input;
                 stats.output_tokens = tokens.output;
                 stats.reasoning_tokens = tokens.thoughts;
@@ -330,7 +347,7 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                     )),
                     date: timestamp,
                     project_hash: project_hash.clone(),
-                    conversation_hash: hash_text(&file_path.to_string_lossy()),
+                    conversation_hash: conversation_hash.clone(),
                     stats,
                     role: MessageRole::Assistant,
                     uuid: None,
@@ -341,7 +358,53 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
         }
     }
 
-    Ok(entries)
+    entries
+}
+
+// JSON session parsing (not JSONL)
+fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
+    let session: GeminiCliSession =
+        simd_json::from_slice(&mut std::fs::read_to_string(file_path)?.into_bytes())?;
+    Ok(messages_from_session(file_path, session.messages))
+}
+
+fn parse_jsonl_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
+    let content = std::fs::read_to_string(file_path)?;
+    let mut message_order = Vec::new();
+    let mut latest_messages = HashMap::new();
+
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let mut line_bytes = line.as_bytes().to_vec();
+        let value: simd_json::OwnedValue = simd_json::from_slice(&mut line_bytes)?;
+
+        if value.get("$set").is_some() {
+            continue;
+        }
+
+        if value.get("type").is_none() || value.get("id").is_none() {
+            continue;
+        }
+
+        let id = match value.get("id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => continue,
+        };
+
+        let mut message_bytes = line.as_bytes().to_vec();
+        let message: GeminiCliMessage = simd_json::from_slice(&mut message_bytes)?;
+
+        if !latest_messages.contains_key(&id) {
+            message_order.push(id.clone());
+        }
+        latest_messages.insert(id, message);
+    }
+
+    let messages = message_order
+        .into_iter()
+        .filter_map(|id| latest_messages.remove(&id))
+        .collect();
+
+    Ok(messages_from_session(file_path, messages))
 }
 
 #[async_trait]
@@ -365,16 +428,9 @@ impl Analyzer for GeminiCliAnalyzer {
         let sources = Self::data_dir()
             .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3).into_iter())
+            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).into_iter())
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type().is_file()
-                    && e.path().extension().is_some_and(|ext| ext == "json")
-                    && e.path()
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .is_some_and(|name| name == "chats")
-            })
+            .filter(|e| is_gemini_cli_chat_path(e.path()))
             .map(|e| DataSource {
                 path: e.into_path(),
             })
@@ -387,20 +443,16 @@ impl Analyzer for GeminiCliAnalyzer {
         Self::data_dir()
             .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3).into_iter())
+            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).into_iter())
             .filter_map(|e| e.ok())
-            .any(|e| {
-                e.file_type().is_file()
-                    && e.path().extension().is_some_and(|ext| ext == "json")
-                    && e.path()
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .is_some_and(|name| name == "chats")
-            })
+            .any(|e| is_gemini_cli_chat_path(e.path()))
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
-        parse_json_session_file(&source.path)
+        match source.path.extension().and_then(|ext| ext.to_str()) {
+            Some("jsonl") => parse_jsonl_session_file(&source.path),
+            _ => parse_json_session_file(&source.path),
+        }
     }
 
     fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
@@ -419,13 +471,7 @@ impl Analyzer for GeminiCliAnalyzer {
     }
 
     fn is_valid_data_path(&self, path: &Path) -> bool {
-        // Must be a .json file in a "chats" directory
-        path.is_file()
-            && path.extension().is_some_and(|ext| ext == "json")
-            && path
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|name| name == "chats")
+        is_gemini_cli_chat_path(path)
     }
 
     fn contribution_strategy(&self) -> ContributionStrategy {
