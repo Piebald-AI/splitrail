@@ -688,7 +688,7 @@ pub(crate) fn parse_copilot_cli_session_file(
     let mut assistant_index = 0usize;
     let mut current_turn: Option<CopilotCliTurn> = None;
     let mut live_context = CopilotCliLiveContext::default();
-    let mut shutdown_metrics: Option<BTreeMap<String, CopilotCliUsageTotals>> = None;
+    let mut shutdown_segment_start = 0usize;
 
     for event in events {
         let event_timestamp = parse_rfc3339_timestamp(event.timestamp.as_deref());
@@ -998,7 +998,10 @@ pub(crate) fn parse_copilot_cli_session_file(
             "session.shutdown" => {
                 let metrics = extract_copilot_cli_shutdown_metrics(&event_data);
                 if !metrics.is_empty() {
-                    shutdown_metrics = Some(metrics);
+                    let segment_entries = &mut entries[shutdown_segment_start..];
+                    fill_missing_copilot_cli_models(segment_entries, &metrics);
+                    apply_copilot_cli_shutdown_metrics(segment_entries, &metrics);
+                    shutdown_segment_start = entries.len();
                 }
             }
             "session.compaction_start" => {
@@ -1059,12 +1062,10 @@ pub(crate) fn parse_copilot_cli_session_file(
         );
     }
 
-    if let Some(shutdown_metrics) = shutdown_metrics {
-        fill_missing_copilot_cli_models(&mut entries, &shutdown_metrics);
-        apply_copilot_cli_shutdown_metrics(&mut entries, &shutdown_metrics);
-    } else {
-        apply_copilot_cli_live_prompt_overhead(&mut entries, live_context.static_prompt_tokens);
-    }
+    apply_copilot_cli_live_prompt_overhead(
+        &mut entries[shutdown_segment_start..],
+        live_context.static_prompt_tokens,
+    );
 
     Ok(entries)
 }

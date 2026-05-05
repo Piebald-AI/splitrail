@@ -211,6 +211,147 @@ fn test_copilot_cli_uses_shutdown_metrics_for_multi_turn_sessions() {
 }
 
 #[test]
+fn test_copilot_cli_accumulates_multiple_shutdown_segments_in_one_session_file() {
+    let temp_dir = tempdir().unwrap();
+    let session_dir = temp_dir.path().join("cli-session");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let session_file = session_dir.join("events.jsonl");
+    std::fs::write(
+        &session_file,
+        concat!(
+            r#"{"type":"session.start","timestamp":"2026-04-08T05:00:00.000Z","data":{"sessionId":"cli-session-resume","context":{"cwd":"/home/user/project","model":"openai/gpt-5.4"}}}"#,
+            "\n",
+            r#"{"type":"user.message","timestamp":"2026-04-08T05:00:01.000Z","data":{"content":"Handle the first request"}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_start","timestamp":"2026-04-08T05:00:02.000Z","data":{"turnId":"0","interactionId":"interaction-1"}}"#,
+            "\n",
+            r#"{"type":"assistant.message","timestamp":"2026-04-08T05:00:03.000Z","data":{"messageId":"assistant-1","interactionId":"interaction-1","content":"Finished the first chunk.","outputTokens":1200}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_end","timestamp":"2026-04-08T05:00:04.000Z","data":{"turnId":"0"}}"#,
+            "\n",
+            r#"{"type":"session.shutdown","timestamp":"2026-04-08T05:00:05.000Z","data":{"shutdownType":"routine","totalPremiumRequests":1,"modelMetrics":{"gpt-5.4":{"requests":{"count":1,"cost":0},"usage":{"inputTokens":2000000,"outputTokens":1200,"cacheReadTokens":1800000,"cacheWriteTokens":0}}}}}"#,
+            "\n",
+            r#"{"type":"user.message","timestamp":"2026-04-08T05:00:06.000Z","data":{"content":"Resume and finish the second request"}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_start","timestamp":"2026-04-08T05:00:07.000Z","data":{"turnId":"1","interactionId":"interaction-2"}}"#,
+            "\n",
+            r#"{"type":"assistant.message","timestamp":"2026-04-08T05:00:08.000Z","data":{"messageId":"assistant-2","interactionId":"interaction-2","content":"Finished the second chunk.","outputTokens":3400}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_end","timestamp":"2026-04-08T05:00:09.000Z","data":{"turnId":"1"}}"#,
+            "\n",
+            r#"{"type":"session.shutdown","timestamp":"2026-04-08T05:00:10.000Z","data":{"shutdownType":"routine","totalPremiumRequests":1,"modelMetrics":{"gpt-5.4":{"requests":{"count":1,"cost":0},"usage":{"inputTokens":5000000,"outputTokens":3400,"cacheReadTokens":4700000,"cacheWriteTokens":0}}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let messages = parse_copilot_cli_session_file(&session_file).unwrap();
+
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[0].role, MessageRole::User);
+    assert_eq!(messages[1].role, MessageRole::Assistant);
+    assert_eq!(messages[2].role, MessageRole::User);
+    assert_eq!(messages[3].role, MessageRole::Assistant);
+
+    assert_eq!(messages[1].stats.input_tokens, 2_000_000);
+    assert_eq!(messages[1].stats.output_tokens, 1_200);
+    assert_eq!(messages[1].stats.cache_read_tokens, 1_800_000);
+
+    assert_eq!(messages[3].stats.input_tokens, 5_000_000);
+    assert_eq!(messages[3].stats.output_tokens, 3_400);
+    assert_eq!(messages[3].stats.cache_read_tokens, 4_700_000);
+
+    let total_input: u64 = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .map(|message| message.stats.input_tokens)
+        .sum();
+    let total_output: u64 = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .map(|message| message.stats.output_tokens)
+        .sum();
+    let total_cache_read: u64 = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .map(|message| message.stats.cache_read_tokens)
+        .sum();
+
+    assert_eq!(total_input, 7_000_000);
+    assert_eq!(total_output, 4_600);
+    assert_eq!(total_cache_read, 6_500_000);
+}
+
+#[test]
+fn test_copilot_cli_keeps_segment_open_when_shutdown_metrics_are_empty() {
+    let temp_dir = tempdir().unwrap();
+    let session_dir = temp_dir.path().join("cli-session");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let session_file = session_dir.join("events.jsonl");
+    std::fs::write(
+        &session_file,
+        concat!(
+            r#"{"type":"session.start","timestamp":"2026-04-08T05:00:00.000Z","data":{"sessionId":"cli-session-empty-shutdown","context":{"cwd":"/home/user/project","model":"openai/gpt-5.4"}}}"#,
+            "\n",
+            r#"{"type":"user.message","timestamp":"2026-04-08T05:00:01.000Z","data":{"content":"Handle the first request"}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_start","timestamp":"2026-04-08T05:00:02.000Z","data":{"turnId":"0","interactionId":"interaction-1"}}"#,
+            "\n",
+            r#"{"type":"assistant.message","timestamp":"2026-04-08T05:00:03.000Z","data":{"messageId":"assistant-1","interactionId":"interaction-1","content":"Finished the first chunk.","outputTokens":1200}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_end","timestamp":"2026-04-08T05:00:04.000Z","data":{"turnId":"0"}}"#,
+            "\n",
+            r#"{"type":"session.shutdown","timestamp":"2026-04-08T05:00:05.000Z","data":{"shutdownType":"routine","totalPremiumRequests":0}}"#,
+            "\n",
+            r#"{"type":"user.message","timestamp":"2026-04-08T05:00:06.000Z","data":{"content":"Resume and finish the second request"}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_start","timestamp":"2026-04-08T05:00:07.000Z","data":{"turnId":"1","interactionId":"interaction-2"}}"#,
+            "\n",
+            r#"{"type":"assistant.message","timestamp":"2026-04-08T05:00:08.000Z","data":{"messageId":"assistant-2","interactionId":"interaction-2","content":"Finished the second chunk.","outputTokens":3400}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_end","timestamp":"2026-04-08T05:00:09.000Z","data":{"turnId":"1"}}"#,
+            "\n",
+            r#"{"type":"session.shutdown","timestamp":"2026-04-08T05:00:10.000Z","data":{"shutdownType":"routine","totalPremiumRequests":1,"modelMetrics":{"gpt-5.4":{"requests":{"count":2,"cost":0},"usage":{"inputTokens":7000000,"outputTokens":4600,"cacheReadTokens":6500000,"cacheWriteTokens":0}}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let messages = parse_copilot_cli_session_file(&session_file).unwrap();
+
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[1].stats.input_tokens, 1_826_086);
+    assert_eq!(messages[1].stats.output_tokens, 1_200);
+    assert_eq!(messages[1].stats.cache_read_tokens, 1_695_652);
+
+    assert_eq!(messages[3].stats.input_tokens, 5_173_914);
+    assert_eq!(messages[3].stats.output_tokens, 3_400);
+    assert_eq!(messages[3].stats.cache_read_tokens, 4_804_348);
+
+    let total_input: u64 = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .map(|message| message.stats.input_tokens)
+        .sum();
+    let total_output: u64 = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .map(|message| message.stats.output_tokens)
+        .sum();
+    let total_cache_read: u64 = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .map(|message| message.stats.cache_read_tokens)
+        .sum();
+
+    assert_eq!(total_input, 7_000_000);
+    assert_eq!(total_output, 4_600);
+    assert_eq!(total_cache_read, 6_500_000);
+}
+
+#[test]
 fn test_copilot_cli_infers_model_from_tool_execution_results() {
     let temp_dir = tempdir().unwrap();
     let session_dir = temp_dir.path().join("cli-session");
