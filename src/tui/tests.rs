@@ -1,11 +1,12 @@
 /// Tests for TUI components: table state management, upload progress, date matching, and stats accumulation.
 use crate::tui::logic::{
-    accumulate_tui_stats, aggregate_daily_stats_by_month, date_matches_buffer,
-    filtered_aggregate_keys,
+    accumulate_tui_stats, aggregate_daily_stats_by_month, aggregate_daily_stats_by_week,
+    aggregate_daily_stats_by_year, date_matches_buffer, filtered_aggregate_keys,
 };
 use crate::tui::{
-    create_upload_progress_callback, format_month_for_display, show_upload_error,
-    show_upload_success, update_day_filters, update_table_states, update_window_offsets,
+    PeriodFilter, build_display_stats, create_upload_progress_callback, format_month_for_display,
+    format_week_for_display, format_year_for_display, show_upload_error, show_upload_success,
+    update_period_filters, update_table_states, update_window_offsets,
 };
 use crate::types::{
     AgenticCodingToolStats, CompactDate, DailyStats, MultiAnalyzerStats, Stats, TuiStats,
@@ -82,13 +83,13 @@ fn test_update_table_states_filters_and_preserves_selection() {
 
     update_table_states(&mut table_states, &multi_view, &mut selected_tab);
 
-    // Only analyzers with data should be represented.
-    assert_eq!(table_states.len(), 1);
+    // Data tabs include the synthetic All Tools tab plus each analyzer with data.
+    assert_eq!(table_states.len(), 2);
     assert_eq!(selected_tab, 0);
     assert_eq!(table_states[0].selected(), Some(0));
 
     // If selected_tab is out of range, it should be clamped.
-    let mut table_states = vec![TableState::default(); 1];
+    let mut table_states = vec![TableState::default(); 2];
     let mut selected_tab = 10usize;
     let multi2 = MultiAnalyzerStats {
         analyzer_stats: vec![
@@ -98,28 +99,56 @@ fn test_update_table_states_filters_and_preserves_selection() {
     };
     let multi_view2 = multi2.into_view();
     update_table_states(&mut table_states, &multi_view2, &mut selected_tab);
-    assert_eq!(selected_tab, 0);
+    assert_eq!(selected_tab, 1);
 }
 
 #[test]
 fn test_update_window_offsets_and_day_filters_resize() {
     let mut offsets = vec![5usize];
     let day = CompactDate::from_str("2025-01-01").unwrap();
-    let mut filters: Vec<Option<CompactDate>> = vec![Some(day)];
+    let mut filters: Vec<Option<PeriodFilter>> = vec![Some(PeriodFilter::Day(day))];
 
     let count_two = 2usize;
     update_window_offsets(&mut offsets, &count_two);
-    update_day_filters(&mut filters, &count_two);
+    update_period_filters(&mut filters, &count_two);
 
     assert_eq!(offsets, vec![5, 0]);
-    assert_eq!(filters, vec![Some(day), None]);
+    assert_eq!(filters, vec![Some(PeriodFilter::Day(day)), None]);
 
     let count_one = 1usize;
     update_window_offsets(&mut offsets, &count_one);
-    update_day_filters(&mut filters, &count_one);
+    update_period_filters(&mut filters, &count_one);
 
     assert_eq!(offsets, vec![5]);
-    assert_eq!(filters, vec![Some(day)]);
+    assert_eq!(filters, vec![Some(PeriodFilter::Day(day))]);
+}
+
+#[test]
+fn test_build_display_stats_prepends_all_tools_view() {
+    let multi = MultiAnalyzerStats {
+        analyzer_stats: vec![
+            make_tool_stats("tool-a", true),
+            make_tool_stats("tool-b", true),
+        ],
+    };
+    let multi_view = multi.into_view();
+    let filtered_stats: Vec<_> = multi_view.analyzer_stats.clone();
+
+    let display_stats = build_display_stats(&filtered_stats);
+
+    assert_eq!(display_stats.len(), 3);
+
+    let all_tools = display_stats[0].read();
+    assert_eq!(&*all_tools.analyzer_name, "All Tools");
+    assert_eq!(all_tools.num_conversations, 2);
+    assert_eq!(
+        all_tools
+            .daily_stats
+            .get("2025-01-01")
+            .unwrap()
+            .conversations,
+        2
+    );
 }
 
 // ============================================================================
@@ -484,7 +513,25 @@ fn test_date_filter_monthly_keys() {
     assert!(date_matches_buffer("2025-06", "jun"));
     assert!(date_matches_buffer("2025-06", "6/2025"));
     assert!(date_matches_buffer("2025-06", "2025"));
+    assert!(date_matches_buffer("2025-06", "2025-06-15"));
     assert!(!date_matches_buffer("2025-06", "6-15"));
+}
+
+#[test]
+fn test_date_filter_weekly_keys() {
+    assert!(date_matches_buffer("2025-W20", "2025-W20"));
+    assert!(date_matches_buffer("2025-W20", "W20"));
+    assert!(date_matches_buffer("2025-W20", "20"));
+    assert!(date_matches_buffer("2025-W20", "2025-05-14"));
+    assert!(!date_matches_buffer("2025-W20", "2025-W21"));
+}
+
+#[test]
+fn test_date_filter_yearly_keys() {
+    assert!(date_matches_buffer("2025", "2025"));
+    assert!(date_matches_buffer("2025", "2025-06"));
+    assert!(date_matches_buffer("2025", "2025-06-15"));
+    assert!(!date_matches_buffer("2025", "2024"));
 }
 
 #[test]
@@ -521,10 +568,78 @@ fn test_aggregate_daily_stats_by_month_rolls_up_days() {
 }
 
 #[test]
+fn test_aggregate_daily_stats_by_week_rolls_up_iso_weeks() {
+    let mut daily_stats = BTreeMap::new();
+    daily_stats.insert(
+        "2024-12-30".to_string(),
+        make_daily_stats("2024-12-30", 100, 100, 1),
+    );
+    daily_stats.insert(
+        "2025-01-05".to_string(),
+        make_daily_stats("2025-01-05", 200, 200, 2),
+    );
+    daily_stats.insert(
+        "2025-01-06".to_string(),
+        make_daily_stats("2025-01-06", 50, 50, 1),
+    );
+
+    let weekly = aggregate_daily_stats_by_week(&daily_stats);
+
+    assert_eq!(weekly.len(), 2);
+
+    let first_week = weekly.get("2025-W01").unwrap();
+    assert_eq!(first_week.date, CompactDate::from_parts(2024, 12, 30));
+    assert_eq!(first_week.stats.input_tokens, 300);
+    assert_eq!(first_week.stats.cost_cents, 300);
+    assert_eq!(first_week.conversations, 3);
+
+    let second_week = weekly.get("2025-W02").unwrap();
+    assert_eq!(second_week.date, CompactDate::from_parts(2025, 1, 6));
+    assert_eq!(second_week.stats.input_tokens, 50);
+    assert_eq!(second_week.conversations, 1);
+}
+
+#[test]
+fn test_aggregate_daily_stats_by_year_rolls_up_years() {
+    let mut daily_stats = BTreeMap::new();
+    daily_stats.insert(
+        "2024-12-31".to_string(),
+        make_daily_stats("2024-12-31", 25, 25, 1),
+    );
+    daily_stats.insert(
+        "2025-01-01".to_string(),
+        make_daily_stats("2025-01-01", 75, 75, 2),
+    );
+    daily_stats.insert(
+        "2025-12-31".to_string(),
+        make_daily_stats("2025-12-31", 125, 125, 3),
+    );
+
+    let yearly = aggregate_daily_stats_by_year(&daily_stats);
+
+    assert_eq!(yearly.len(), 2);
+    assert_eq!(yearly.get("2024").unwrap().stats.input_tokens, 25);
+
+    let year_2025 = yearly.get("2025").unwrap();
+    assert_eq!(year_2025.date, CompactDate::from_parts(2025, 1, 1));
+    assert_eq!(year_2025.stats.input_tokens, 200);
+    assert_eq!(year_2025.stats.cost_cents, 200);
+    assert_eq!(year_2025.conversations, 5);
+}
+
+#[test]
 fn test_format_month_for_display_formats_month_and_year() {
     assert_eq!(format_month_for_display("unknown"), "Unknown");
     assert_eq!(format_month_for_display("invalid"), "invalid");
     assert_eq!(format_month_for_display("2025-02"), "2/2025");
+}
+
+#[test]
+fn test_format_week_and_year_for_display() {
+    assert_eq!(format_week_for_display("unknown"), "Unknown");
+    assert_eq!(format_week_for_display("1999-W02"), "1999-W02");
+    assert_eq!(format_year_for_display("unknown"), "Unknown");
+    assert_eq!(format_year_for_display("1999"), "1999");
 }
 
 #[test]

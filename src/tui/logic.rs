@@ -5,6 +5,7 @@ use crate::types::{
     CompactDate, ConversationMessage, DailyStats, MessageRole, ModelCounts, Stats, TuiStats,
     intern_model,
 };
+use chrono::{Datelike, NaiveDate, Weekday};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -36,6 +37,95 @@ fn parse_period_parts(day: &str) -> Option<(u32, u32, Option<u32>)> {
     }
 }
 
+fn parse_input_date(buffer: &str) -> Option<NaiveDate> {
+    let normalized = buffer.trim().replace('/', "-");
+    let trimmed = normalized.trim_end_matches('-');
+    let parts: Vec<&str> = trimmed.split('-').filter(|s| !s.is_empty()).collect();
+
+    let [p0, p1, p2] = parts.as_slice() else {
+        return None;
+    };
+
+    let (a, b, c) = (
+        p0.parse::<u32>().ok()?,
+        p1.parse::<u32>().ok()?,
+        p2.parse::<u32>().ok()?,
+    );
+
+    let (year, month, day) = if a > 31 {
+        (a as i32, b, c)
+    } else if c > 31 {
+        (c as i32, a, b)
+    } else {
+        return None;
+    };
+
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
+fn parse_week_key(period: &str) -> Option<(i32, u32)> {
+    let (year, week) = period.split_once("-W")?;
+    Some((year.parse().ok()?, week.parse().ok()?))
+}
+
+fn week_matches_buffer(week_year: i32, iso_week: u32, buffer: &str) -> bool {
+    if let Some(date) = parse_input_date(buffer) {
+        let input_week = date.iso_week();
+        return input_week.year() == week_year && input_week.week() == iso_week;
+    }
+
+    let normalized = buffer
+        .trim()
+        .to_uppercase()
+        .replace('/', "-")
+        .replace(' ', "");
+    let canonical = format!("{week_year:04}-W{iso_week:02}");
+
+    if normalized == canonical
+        || normalized == format!("{week_year:04}-W{iso_week}")
+        || normalized == format!("W{iso_week:02}")
+        || normalized == format!("W{iso_week}")
+        || normalized == format!("WEEK{iso_week:02}")
+        || normalized == format!("WEEK{iso_week}")
+    {
+        return true;
+    }
+
+    let parts: Vec<&str> = normalized.split('-').filter(|s| !s.is_empty()).collect();
+
+    match parts.as_slice() {
+        [single] => single
+            .parse::<u32>()
+            .map(|value| value == iso_week || value == week_year as u32)
+            .unwrap_or(false),
+        [year, week] => {
+            if let (Ok(year), Ok(week)) = (year.parse::<i32>(), week.parse::<u32>()) {
+                year == week_year && week == iso_week
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn year_matches_buffer(year: u32, buffer: &str) -> bool {
+    if let Some(date) = parse_input_date(buffer) {
+        return date.year() as u32 == year;
+    }
+
+    let normalized = buffer.trim().replace('/', "-");
+    if normalized == year.to_string() {
+        return true;
+    }
+
+    normalized
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .any(|value| value == year)
+}
+
 fn month_name_to_number(lower: &str) -> Option<u32> {
     match lower {
         s if "january".starts_with(s) && s.len() >= 3 => Some(1),
@@ -60,9 +150,25 @@ pub fn date_matches_buffer(day: &str, buffer: &str) -> bool {
         return true;
     }
 
+    if let Some((week_year, iso_week)) = parse_week_key(day) {
+        return week_matches_buffer(week_year, iso_week, buffer);
+    }
+
+    if let Ok(year) = day.parse::<u32>() {
+        return year_matches_buffer(year, buffer);
+    }
+
     let Some((day_year, day_month, day_number)) = parse_period_parts(day) else {
         return day == buffer;
     };
+
+    if let Some(date) = parse_input_date(buffer) {
+        return day_year == date.year() as u32
+            && day_month == date.month()
+            && day_number
+                .map(|actual_day| actual_day == date.day())
+                .unwrap_or(true);
+    }
 
     // Check for month name match first
     let lower = buffer.to_lowercase();
@@ -152,27 +258,81 @@ pub fn date_matches_buffer(day: &str, buffer: &str) -> bool {
 /// Groups daily stats by year-month (YYYY-MM) and sums all metrics. Each month
 /// entry uses day 1 of that month as its representative date. Returns a new
 /// map with monthly aggregated data.
-pub fn aggregate_daily_stats_by_month(
+fn aggregate_daily_stats_by_period<F>(
     daily_stats: &BTreeMap<String, DailyStats>,
-) -> BTreeMap<String, DailyStats> {
-    let mut monthly_stats = BTreeMap::new();
+    mut period_key_fn: F,
+) -> BTreeMap<String, DailyStats>
+where
+    F: FnMut(&DailyStats) -> (String, CompactDate),
+{
+    let mut aggregate_stats = BTreeMap::new();
 
     for day_stats in daily_stats.values() {
-        let year = day_stats.date.year();
-        let month = day_stats.date.month();
-        let month_key = format!("{year:04}-{month:02}");
+        let (period_key, period_date) = period_key_fn(day_stats);
 
-        let monthly_entry = monthly_stats
-            .entry(month_key)
+        let aggregate_entry = aggregate_stats
+            .entry(period_key)
             .or_insert_with(|| DailyStats {
-                date: CompactDate::from_parts(year, month, 1),
+                date: period_date,
                 ..DailyStats::default()
             });
 
-        *monthly_entry += day_stats;
+        *aggregate_entry += day_stats;
     }
 
-    monthly_stats
+    aggregate_stats
+}
+
+pub fn aggregate_daily_stats_by_month(
+    daily_stats: &BTreeMap<String, DailyStats>,
+) -> BTreeMap<String, DailyStats> {
+    aggregate_daily_stats_by_period(daily_stats, |day_stats| {
+        let year = day_stats.date.year();
+        let month = day_stats.date.month();
+        (
+            format!("{year:04}-{month:02}"),
+            CompactDate::from_parts(year, month, 1),
+        )
+    })
+}
+
+/// Roll up daily statistics into ISO weekly totals.
+///
+/// Weeks use ISO-8601 semantics, so they start on Monday and are keyed as
+/// `YYYY-Www`, where `YYYY` is the ISO week year.
+pub fn aggregate_daily_stats_by_week(
+    daily_stats: &BTreeMap<String, DailyStats>,
+) -> BTreeMap<String, DailyStats> {
+    aggregate_daily_stats_by_period(daily_stats, |day_stats| {
+        let date = NaiveDate::from_ymd_opt(
+            day_stats.date.year() as i32,
+            day_stats.date.month() as u32,
+            day_stats.date.day() as u32,
+        )
+        .expect("CompactDate should always contain a valid calendar date");
+        let iso_week = date.iso_week();
+        let week_start = NaiveDate::from_isoywd_opt(iso_week.year(), iso_week.week(), Weekday::Mon)
+            .expect("ISO week from a valid date should map back to a valid Monday");
+
+        (
+            format!("{:04}-W{:02}", iso_week.year(), iso_week.week()),
+            CompactDate::from_parts(
+                week_start.year() as u16,
+                week_start.month() as u8,
+                week_start.day() as u8,
+            ),
+        )
+    })
+}
+
+/// Roll up daily statistics into yearly totals.
+pub fn aggregate_daily_stats_by_year(
+    daily_stats: &BTreeMap<String, DailyStats>,
+) -> BTreeMap<String, DailyStats> {
+    aggregate_daily_stats_by_period(daily_stats, |day_stats| {
+        let year = day_stats.date.year();
+        (format!("{year:04}"), CompactDate::from_parts(year, 1, 1))
+    })
 }
 
 pub fn is_empty_period(stats: &DailyStats) -> bool {
