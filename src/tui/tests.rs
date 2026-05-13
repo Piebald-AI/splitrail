@@ -103,7 +103,7 @@ fn test_update_table_states_filters_and_preserves_selection() {
 }
 
 #[test]
-fn test_update_window_offsets_and_day_filters_resize() {
+fn test_update_window_offsets_and_period_filters_resize() {
     let mut offsets = vec![5usize];
     let day = CompactDate::from_str("2025-01-01").unwrap();
     let mut filters: Vec<Option<PeriodFilter>> = vec![Some(PeriodFilter::Day(day))];

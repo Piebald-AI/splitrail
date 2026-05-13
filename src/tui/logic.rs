@@ -253,11 +253,11 @@ pub fn date_matches_buffer(day: &str, buffer: &str) -> bool {
     false
 }
 
-/// Roll up daily statistics into monthly totals.
+/// Roll up daily statistics into periods derived by `period_key_fn`.
 ///
-/// Groups daily stats by year-month (YYYY-MM) and sums all metrics. Each month
-/// entry uses day 1 of that month as its representative date. Returns a new
-/// map with monthly aggregated data.
+/// `period_key_fn` returns a `(period_key, representative_date)` pair for each
+/// daily row. All rows with the same key are then merged via
+/// `DailyStats += &DailyStats`.
 fn aggregate_daily_stats_by_period<F>(
     daily_stats: &BTreeMap<String, DailyStats>,
     mut period_key_fn: F,

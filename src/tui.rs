@@ -365,7 +365,14 @@ pub(crate) fn build_display_stats(
             *entry += day_stats;
         }
 
-        combined_sessions.extend(view.session_aggregates.iter().cloned());
+        combined_sessions.extend(view.session_aggregates.iter().cloned().map(|mut session| {
+            let base_name = session
+                .session_name
+                .clone()
+                .unwrap_or_else(|| session.session_id.clone());
+            session.session_name = Some(format!("[{}] {}", session.analyzer_name, base_name));
+            session
+        }));
     }
 
     combined_sessions.sort_by_key(|session| session.first_timestamp);
@@ -2429,11 +2436,7 @@ fn update_window_offsets(window_offsets: &mut Vec<usize>, filtered_count: &usize
 ///
 /// Preserves existing filter values when growing; new entries default to `None`.
 fn update_period_filters(filters: &mut Vec<Option<PeriodFilter>>, filtered_count: &usize) {
-    let old_len = filters.len();
     filters.resize(*filtered_count, None);
-    if *filtered_count < old_len {
-        filters.truncate(*filtered_count);
-    }
 }
 
 /// Build a callback that prints upload progress to stdout with animated dots.
