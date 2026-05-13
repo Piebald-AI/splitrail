@@ -338,6 +338,8 @@ struct UiState<'a> {
     show_totals: bool,
 }
 
+/// Build the tab data shown in the TUI, prepending a synthetic "All Tools"
+/// view ahead of the individual analyzer tabs.
 pub(crate) fn build_display_stats(
     filtered_stats: &[SharedAnalyzerView],
 ) -> Vec<SharedAnalyzerView> {

@@ -283,6 +283,10 @@ where
     aggregate_stats
 }
 
+/// Roll up daily statistics into monthly totals.
+///
+/// Groups days by `YYYY-MM`, using the first day of the month as the
+/// representative `CompactDate` stored in the aggregated row.
 pub fn aggregate_daily_stats_by_month(
     daily_stats: &BTreeMap<String, DailyStats>,
 ) -> BTreeMap<String, DailyStats> {
@@ -326,6 +330,9 @@ pub fn aggregate_daily_stats_by_week(
 }
 
 /// Roll up daily statistics into yearly totals.
+///
+/// Yearly rows are keyed as `YYYY` and use January 1st as the representative
+/// `CompactDate`.
 pub fn aggregate_daily_stats_by_year(
     daily_stats: &BTreeMap<String, DailyStats>,
 ) -> BTreeMap<String, DailyStats> {
@@ -335,6 +342,7 @@ pub fn aggregate_daily_stats_by_year(
     })
 }
 
+/// Return whether a period contains no visible activity for the aggregate table.
 pub fn is_empty_period(stats: &DailyStats) -> bool {
     stats.stats.cost_cents == 0
         && stats.stats.cached_tokens == 0
@@ -347,6 +355,7 @@ pub fn is_empty_period(stats: &DailyStats) -> bool {
         && stats.stats.tool_calls == 0
 }
 
+/// Collect aggregate keys after applying empty-period filtering and sort order.
 pub fn filtered_aggregate_keys(
     aggregate_stats: &BTreeMap<String, DailyStats>,
     hide_empty_periods: bool,
