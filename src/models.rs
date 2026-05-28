@@ -631,6 +631,18 @@ fn populate_defaults(
 
     // Anthropic Models
     add_model!(
+        "claude-opus-4-8",
+        PricingStructure::Flat {
+            input_per_1m: 5.0,
+            output_per_1m: 25.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 6.25,
+            cache_read_per_1m: 0.5
+        },
+        false
+    );
+    add_model!(
         "claude-opus-4-7",
         PricingStructure::Flat {
             input_per_1m: 5.0,
@@ -1391,6 +1403,9 @@ fn populate_defaults(
     add_alias!("gpt-5.5-pro", "gpt-5.5-pro");
 
     // Anthropic aliases
+    add_alias!("claude-opus-4.8", "claude-opus-4-8");
+    add_alias!("claude-4.8-opus", "claude-opus-4-8");
+    add_alias!("claude-opus-4-8", "claude-opus-4-8");
     add_alias!("claude-opus-4.7", "claude-opus-4-7");
     add_alias!("claude-opus-4.6", "claude-opus-4-6");
     add_alias!("claude-4.6-opus", "claude-opus-4-6");
@@ -2008,6 +2023,20 @@ mod tests {
         assert!(get_model_info("review-invalid-tier-alias").is_none());
 
         reset_global_registry();
+    }
+
+    #[test]
+    fn claude_opus_4_8_alias_maps_to_pricing() {
+        let model_info = get_model_info("claude-4.8-opus").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("claude-4.8-opus", 1_000_000);
+        let output_cost = calculate_output_cost("claude-4.8-opus", 1_000_000);
+        let cache_cost = calculate_cache_cost("claude-4.8-opus", 1_000_000, 1_000_000);
+
+        approx_eq(input_cost, 5.0);
+        approx_eq(output_cost, 25.0);
+        approx_eq(cache_cost, 6.75);
     }
 
     #[test]
