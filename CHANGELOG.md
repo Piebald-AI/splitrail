@@ -5,12 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.3] - 2026-05-28
+- Add Claude Opus 4.8 pricing (#161) - @mike1858
+- feat: add all-tools period aggregation views (#158) - @jimyag
+- Fix Copilot CLI shutdown metric segmentation (#157) - @zhangzqs
+- Add pricing entries for newly observed models (#156) - @zhangzqs
+- fix: support newer Gemini CLI and Copilot session formats (#155) - @jimyag
+- Fix GPT-5.5 Pro pricing (#153) - @mike1858
+
 ## [3.5.2] - 2026-04-24
-- Add GPT-5.5 long-context pricing (#151) - mike1858
+- Add GPT-5.5 long-context pricing (#151) - @mike1858
 
 ## [3.5.1] - 2026-04-23
-- feat: add TUI defaults for sort and empty periods (#146) - jimyag
-- Add pricing for Gemini 3.1 Pro Preview Custom Tools (#148) - mike1858
+- feat: add TUI defaults for sort and empty periods (#146) - @jimyag
+- Add pricing for Gemini 3.1 Pro Preview Custom Tools (#148) - @mike1858
 - Add GPT-5.5 pricing (#149) - mike1858
 
 ## [3.5.0] - 2026-04-20
