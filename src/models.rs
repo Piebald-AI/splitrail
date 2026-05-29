@@ -629,6 +629,18 @@ fn populate_defaults(
         false
     );
 
+    // OpenAI open-weight safety models on Amazon Bedrock
+    // Source: https://aws.amazon.com/bedrock/pricing/
+    add_model!(
+        "gpt-oss-safeguard-120b",
+        PricingStructure::Flat {
+            input_per_1m: 0.15,
+            output_per_1m: 0.60
+        },
+        CachingSupport::None,
+        false
+    );
+
     // Anthropic Models
     add_model!(
         "claude-opus-4-8",
@@ -1184,8 +1196,31 @@ fn populate_defaults(
         },
         false
     );
+    // Source: https://api-docs.deepseek.com/quick_start/pricing/
+    add_model!(
+        "deepseek-v4-flash",
+        PricingStructure::Flat {
+            input_per_1m: 0.14,
+            output_per_1m: 0.28
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.0028
+        },
+        false
+    );
+    // Amazon Bedrock model ID. Source: https://aws.amazon.com/bedrock/pricing/
+    add_model!(
+        "deepseek.v3.2",
+        PricingStructure::Flat {
+            input_per_1m: 0.62,
+            output_per_1m: 1.85
+        },
+        CachingSupport::None,
+        false
+    );
 
     // Z.AI (Zhipu AI) - Additional Models
+    // Source: https://docs.z.ai/guides/overview/pricing
     add_model!(
         "glm-5",
         PricingStructure::Flat {
@@ -1194,6 +1229,17 @@ fn populate_defaults(
         },
         CachingSupport::OpenAI {
             cached_input_per_1m: 0.2
+        },
+        false
+    );
+    add_model!(
+        "glm-5.1",
+        PricingStructure::Flat {
+            input_per_1m: 1.40,
+            output_per_1m: 4.40
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.26
         },
         false
     );
@@ -1225,14 +1271,29 @@ fn populate_defaults(
     add_model!(
         "mimo-v2.5-pro",
         PricingStructure::Flat {
-            input_per_1m: 1.0,
-            output_per_1m: 3.0
+            input_per_1m: 0.435,
+            output_per_1m: 0.87
         },
-        CachingSupport::None,
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.0036
+        },
+        true
+    );
+    // Source: https://openrouter.ai/xiaomi/mimo-v2-omni
+    add_model!(
+        "mimo-v2-omni",
+        PricingStructure::Flat {
+            input_per_1m: 0.40,
+            output_per_1m: 2.0
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.08
+        },
         true
     );
 
     // MiniMax Models
+    // Source: https://platform.minimax.io/docs/api-reference/anthropic-api-compatible-cache
     add_model!(
         "minimax-m2.1",
         PricingStructure::Flat {
@@ -1240,6 +1301,18 @@ fn populate_defaults(
             output_per_1m: 1.20
         },
         CachingSupport::None,
+        false
+    );
+    add_model!(
+        "minimax-m2.7",
+        PricingStructure::Flat {
+            input_per_1m: 0.30,
+            output_per_1m: 1.20
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 0.375,
+            cache_read_per_1m: 0.06
+        },
         false
     );
     add_model!(
@@ -1253,18 +1326,57 @@ fn populate_defaults(
     );
 
     // Moonshot AI Models
-    // Source: https://openrouter.ai/moonshotai/kimi-k2.5
+    // Source: https://platform.kimi.ai/docs/pricing/chat-k26.md
+    add_model!(
+        "kimi-k2.6",
+        PricingStructure::Flat {
+            input_per_1m: 0.95,
+            output_per_1m: 4.0
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.16
+        },
+        false
+    );
+    // Source: https://platform.kimi.ai/docs/pricing/chat-k25.md
     add_model!(
         "kimi-k2.5",
         PricingStructure::Flat {
-            input_per_1m: 0.44,
-            output_per_1m: 2.0
+            input_per_1m: 0.60,
+            output_per_1m: 3.0
         },
-        CachingSupport::None,
-        true
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.10
+        },
+        false
     );
 
     // Qwen Models
+    // Source: https://docs.qwencloud.com/developer-guides/getting-started/pricing
+    // Context cache pricing: https://www.qwencloud.com/models/qwen3.6-plus
+    add_model!(
+        "qwen3.6-plus",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(256_000),
+                    input_per_1m: 0.50,
+                    output_per_1m: 3.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.0,
+                    output_per_1m: 6.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 0.625,
+            cache_read_per_1m: 0.05
+        },
+        false
+    );
     // Source: https://openrouter.ai/qwen/qwen3.5-35b-a3b
     add_model!(
         "qwen3.5-35b-a3b",
@@ -1401,6 +1513,7 @@ fn populate_defaults(
     add_alias!("gpt-5.5", "gpt-5.5");
     add_alias!("gpt-5.5-2026-04-23", "gpt-5.5");
     add_alias!("gpt-5.5-pro", "gpt-5.5-pro");
+    add_alias!("openai.gpt-oss-safeguard-120b", "gpt-oss-safeguard-120b");
 
     // Anthropic aliases
     add_alias!("claude-opus-4.8", "claude-opus-4-8");
@@ -1410,12 +1523,14 @@ fn populate_defaults(
     add_alias!("claude-opus-4.6", "claude-opus-4-6");
     add_alias!("claude-4.6-opus", "claude-opus-4-6");
     add_alias!("claude-4.6-opus-20260205", "claude-opus-4-6");
+    add_alias!("eu.anthropic.claude-opus-4-6-v1", "claude-opus-4-6");
     add_alias!("claude-opus-4-6", "claude-opus-4-6");
     add_alias!("claude-opus-4-5", "claude-opus-4-5");
     add_alias!("claude-opus-4.5", "claude-opus-4-5");
     add_alias!("claude-opus-4-5-20251101", "claude-opus-4-5");
     add_alias!("claude-opus-4", "claude-opus-4");
     add_alias!("claude-opus-4-20250514", "claude-opus-4");
+    add_alias!("us.anthropic.claude-opus-4-20250514-v1:0", "claude-opus-4");
     add_alias!("claude-opus-4-0", "claude-opus-4");
     add_alias!("claude-opus-4.1", "claude-opus-4-1");
     add_alias!("claude-opus-4-1-20250805", "claude-opus-4-1");
@@ -1423,6 +1538,7 @@ fn populate_defaults(
     add_alias!("claude-sonnet-4-20250514", "claude-sonnet-4");
     add_alias!("claude-sonnet-4-0", "claude-sonnet-4");
     add_alias!("claude-sonnet-4.6", "claude-sonnet-4-6");
+    add_alias!("global.anthropic.claude-sonnet-4-6", "claude-sonnet-4-6");
     add_alias!("claude-sonnet-4.5", "claude-sonnet-4-5");
     add_alias!("claude-4.5-sonnet", "claude-sonnet-4-5");
     add_alias!("claude-sonnet-4-5-20250929", "claude-sonnet-4-5");
@@ -1497,7 +1613,10 @@ fn populate_defaults(
 
     // Zhipu AI aliases
     add_alias!("zai-glm-4.6", "glm-4.6");
+    add_alias!("zai.glm-5", "glm-5");
     add_alias!("glm-5-20260211", "glm-5");
+    add_alias!("glm-5.1", "glm-5.1");
+    add_alias!("zai.glm-5.1", "glm-5.1");
     add_alias!("glm-5-code", "glm-5-code");
     add_alias!("glm-5-code-20260211", "glm-5-code");
     add_alias!("glm-4.5-air-20260211", "glm-4.5-air");
@@ -1514,9 +1633,20 @@ fn populate_defaults(
     add_alias!("minimax-m2.1", "minimax-m2.1");
     add_alias!("minimax-m2.5", "minimax-m2.5");
     add_alias!("minimax-m2.5-20260211", "minimax-m2.5");
+    add_alias!("minimax-m2.7", "minimax-m2.7");
 
-    // Moonshot / ByteDance / Meituan aliases
+    // Moonshot / ByteDance / Qwen / Xiaomi / Meituan aliases
     add_alias!("doubao-seed-code", "doubao-seed-2.0-code");
+    add_alias!("kimi-k2.6", "kimi-k2.6");
+    add_alias!("moonshotai.kimi-k2.6", "kimi-k2.6");
+    add_alias!("kimi-k2.5", "kimi-k2.5");
+    add_alias!("moonshotai.kimi-k2.5", "kimi-k2.5");
+    add_alias!("qwen3.6-plus", "qwen3.6-plus");
+    add_alias!("qwen.qwen3.6-plus", "qwen3.6-plus");
+    add_alias!("mimo-v2.5-pro", "mimo-v2.5-pro");
+    add_alias!("xiaomi.mimo-v2.5-pro", "mimo-v2.5-pro");
+    add_alias!("mimo-v2-omni", "mimo-v2-omni");
+    add_alias!("xiaomi.mimo-v2-omni", "mimo-v2-omni");
 
     // StepFun aliases
     add_alias!("step-3.5-flash", "step-3.5-flash");
@@ -2161,9 +2291,11 @@ mod tests {
 
         let input_cost = calculate_input_cost("mimo-v2.5-pro", 1_000_000);
         let output_cost = calculate_output_cost("mimo-v2.5-pro", 1_000_000);
+        let cache_cost = calculate_cache_cost("mimo-v2.5-pro", 0, 1_000_000);
 
-        approx_eq(input_cost, 1.0);
-        approx_eq(output_cost, 3.0);
+        approx_eq(input_cost, 0.435);
+        approx_eq(output_cost, 0.87);
+        approx_eq(cache_cost, 0.0036);
     }
 
     #[test]
@@ -2209,13 +2341,116 @@ mod tests {
     #[test]
     fn kimi_k2_5_pricing_is_available() {
         let model_info = get_model_info("kimi-k2.5").expect("model should exist");
-        assert!(model_info.is_estimated);
+        assert!(!model_info.is_estimated);
 
         let input_cost = calculate_input_cost("kimi-k2.5", 1_000_000);
         let output_cost = calculate_output_cost("kimi-k2.5", 1_000_000);
+        let cache_cost = calculate_cache_cost("kimi-k2.5", 0, 1_000_000);
 
-        approx_eq(input_cost, 0.44);
-        approx_eq(output_cost, 2.0);
+        approx_eq(input_cost, 0.60);
+        approx_eq(output_cost, 3.0);
+        approx_eq(cache_cost, 0.10);
+    }
+
+    #[test]
+    fn warning_model_names_resolve_to_pricing() {
+        let models = [
+            "kimi-k2.6",
+            "minimax-m2.7",
+            "glm-5.1",
+            "kimi-k2.5",
+            "mimo-v2-omni",
+            "zai.glm-5",
+            "qwen3.6-plus",
+            "mimo-v2.5-pro",
+            "global.anthropic.claude-sonnet-4-6",
+            "deepseek.v3.2",
+            "moonshotai.kimi-k2.5",
+            "eu.anthropic.claude-opus-4-6-v1",
+            "us.anthropic.claude-opus-4-20250514-v1:0",
+            "openai.gpt-oss-safeguard-120b",
+            "deepseek-v4-flash",
+        ];
+
+        for model in models {
+            assert!(get_model_info(model).is_some(), "{model} should resolve");
+        }
+    }
+
+    #[test]
+    fn newly_observed_models_have_expected_pricing() {
+        approx_eq(calculate_input_cost("kimi-k2.6", 1_000_000), 0.95);
+        approx_eq(calculate_output_cost("kimi-k2.6", 1_000_000), 4.0);
+        approx_eq(calculate_cache_cost("kimi-k2.6", 0, 1_000_000), 0.16);
+
+        approx_eq(calculate_input_cost("minimax-m2.7", 1_000_000), 0.30);
+        approx_eq(calculate_output_cost("minimax-m2.7", 1_000_000), 1.20);
+        approx_eq(
+            calculate_cache_cost("minimax-m2.7", 1_000_000, 1_000_000),
+            0.435,
+        );
+
+        approx_eq(calculate_input_cost("glm-5.1", 1_000_000), 1.40);
+        approx_eq(calculate_output_cost("glm-5.1", 1_000_000), 4.40);
+        approx_eq(calculate_cache_cost("glm-5.1", 0, 1_000_000), 0.26);
+
+        approx_eq(calculate_input_cost("qwen3.6-plus", 1_000_000), 2.0);
+        approx_eq(calculate_output_cost("qwen3.6-plus", 1_000_000), 6.0);
+        approx_eq(
+            calculate_cache_cost("qwen3.6-plus", 1_000_000, 1_000_000),
+            0.675,
+        );
+
+        approx_eq(calculate_input_cost("mimo-v2-omni", 1_000_000), 0.40);
+        approx_eq(calculate_output_cost("mimo-v2-omni", 1_000_000), 2.0);
+        approx_eq(calculate_cache_cost("mimo-v2-omni", 0, 1_000_000), 0.08);
+
+        approx_eq(calculate_input_cost("deepseek.v3.2", 1_000_000), 0.62);
+        approx_eq(calculate_output_cost("deepseek.v3.2", 1_000_000), 1.85);
+
+        approx_eq(calculate_input_cost("deepseek-v4-flash", 1_000_000), 0.14);
+        approx_eq(calculate_output_cost("deepseek-v4-flash", 1_000_000), 0.28);
+        approx_eq(
+            calculate_cache_cost("deepseek-v4-flash", 0, 1_000_000),
+            0.0028,
+        );
+
+        approx_eq(
+            calculate_input_cost("openai.gpt-oss-safeguard-120b", 1_000_000),
+            0.15,
+        );
+        approx_eq(
+            calculate_output_cost("openai.gpt-oss-safeguard-120b", 1_000_000),
+            0.60,
+        );
+    }
+
+    #[test]
+    fn bedrock_anthropic_aliases_map_to_existing_pricing() {
+        approx_eq(
+            calculate_input_cost("global.anthropic.claude-sonnet-4-6", 1_000_000),
+            3.0,
+        );
+        approx_eq(
+            calculate_output_cost("global.anthropic.claude-sonnet-4-6", 1_000_000),
+            15.0,
+        );
+        approx_eq(
+            calculate_input_cost("eu.anthropic.claude-opus-4-6-v1", 1_000_000),
+            5.0,
+        );
+        approx_eq(
+            calculate_output_cost("eu.anthropic.claude-opus-4-6-v1", 1_000_000),
+            25.0,
+        );
+        approx_eq(
+            calculate_input_cost("us.anthropic.claude-opus-4-20250514-v1:0", 1_000_000),
+            15.0,
+        );
+        approx_eq(
+            calculate_output_cost("us.anthropic.claude-opus-4-20250514-v1:0", 1_000_000),
+            75.0,
+        );
     }
 
     #[test]
