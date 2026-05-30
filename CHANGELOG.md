@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.4] - 2026-05-30
+- [codex] Add missing model pricing entries (#164) - @Wraient
+- Remove GPT-5.2 Codex pricing warning (#168) - @mike1858
+- Fix Piebald cached input accounting (#167) - @mike1858
+- Fixes to Cloud - @mike1858
+
 ## [3.5.3] - 2026-05-28
 - Add Claude Opus 4.8 pricing (#161) - @mike1858
 - feat: add all-tools period aggregation views (#158) - @jimyag
