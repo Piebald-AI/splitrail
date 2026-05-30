@@ -4,7 +4,7 @@
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::calculate_total_cost;
+use crate::models::{InputTokenSemantics, calculate_total_cost, get_model_info};
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::Result;
@@ -150,6 +150,17 @@ fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+fn normalize_input_tokens(model: Option<&str>, input_tokens: u64, cache_read_tokens: u64) -> u64 {
+    if model
+        .and_then(get_model_info)
+        .is_some_and(|info| info.input_token_semantics == InputTokenSemantics::IncludesCacheRead)
+    {
+        input_tokens.saturating_sub(cache_read_tokens)
+    } else {
+        input_tokens
+    }
+}
+
 /// Convert Piebald messages to splitrail's ConversationMessage format.
 fn convert_messages(
     chats: &[PiebaldChat],
@@ -196,11 +207,13 @@ fn convert_messages(
             };
 
             // Map token stats
-            let input_tokens = msg.input_tokens.unwrap_or(0) as u64;
+            let raw_input_tokens = msg.input_tokens.unwrap_or(0) as u64;
             let output_tokens = msg.output_tokens.unwrap_or(0) as u64;
             let reasoning_tokens = msg.reasoning_tokens.unwrap_or(0) as u64;
             let cache_read_tokens = msg.cache_read_tokens.unwrap_or(0) as u64;
             let cache_creation_tokens = msg.cache_write_tokens.unwrap_or(0) as u64;
+            let input_tokens =
+                normalize_input_tokens(model_str.as_deref(), raw_input_tokens, cache_read_tokens);
 
             // Calculate cost using splitrail's model pricing
             let cost = if let Some(ref model) = model_str {
@@ -330,6 +343,29 @@ mod tests {
         let result = analyzer.get_stats_with_sources(Vec::new());
         assert!(result.is_ok());
         assert!(result.unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_input_tokens_subtracts_openai_cached_reads() {
+        assert_eq!(normalize_input_tokens(Some("gpt-5"), 1_000, 300), 700);
+    }
+
+    #[test]
+    fn test_normalize_input_tokens_subtracts_tiered_openai_cached_reads() {
+        assert_eq!(normalize_input_tokens(Some("gpt-5.5"), 1_000, 300), 700);
+    }
+
+    #[test]
+    fn test_normalize_input_tokens_preserves_anthropic_input() {
+        assert_eq!(
+            normalize_input_tokens(Some("claude-sonnet-4-20250514"), 700, 300),
+            700
+        );
+    }
+
+    #[test]
+    fn test_normalize_input_tokens_saturates_for_openai() {
+        assert_eq!(normalize_input_tokens(Some("gpt-5"), 100, 300), 0);
     }
 
     #[test]

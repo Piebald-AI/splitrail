@@ -53,20 +53,30 @@ pub struct TieredCaching {
     pub bracket_pricing: bool,
 }
 
-/// Different caching support models
+/// Different cache pricing structures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CachingSupport {
-    /// Model does not support caching
+    /// Model does not support caching.
     None,
-    /// OpenAI-style caching (simple cached input pricing)
+    /// Flat cached input pricing.
     OpenAI { cached_input_per_1m: f64 },
-    /// Anthropic-style caching (separate write and read costs)
+    /// Separate cache write and cache read pricing.
     Anthropic {
         cache_write_per_1m: f64,
         cache_read_per_1m: f64,
     },
-    /// Google-style caching (may have tiers like input/output)
-    Google(TieredCaching),
+    /// Tiered cached input pricing.
+    Tiered(TieredCaching),
+}
+
+/// How a provider reports input tokens relative to cache reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputTokenSemantics {
+    /// Reported input tokens exclude cache reads and can be added to cached tokens.
+    #[default]
+    ExcludesCache,
+    /// Reported input tokens include cache reads; subtract cache reads before normalizing.
+    IncludesCacheRead,
 }
 
 /// Complete model information with all pricing details
@@ -76,6 +86,9 @@ pub struct ModelInfo {
     pub pricing: PricingStructure,
     /// Caching support and pricing
     pub caching: CachingSupport,
+    /// How provider usage reports input tokens relative to cache reads.
+    #[serde(default)]
+    pub input_token_semantics: InputTokenSemantics,
     /// Whether pricing is estimated (not officially published by provider)
     pub is_estimated: bool,
 }
@@ -122,7 +135,7 @@ impl Registry {
         };
 
         let caching_ok = match &info.caching {
-            CachingSupport::Google(tiered) => {
+            CachingSupport::Tiered(tiered) => {
                 Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
             }
             _ => true,
@@ -172,6 +185,19 @@ fn get_registry_lock() -> &'static RwLock<Registry> {
     REGISTRY.get_or_init(|| RwLock::new(Registry::new_with_defaults()))
 }
 
+fn input_token_semantics_for_model(model_name: &str) -> InputTokenSemantics {
+    let name = model_name
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(model_name);
+
+    if name.starts_with("gpt-") || name.starts_with('o') {
+        InputTokenSemantics::IncludesCacheRead
+    } else {
+        InputTokenSemantics::ExcludesCache
+    }
+}
+
 fn populate_defaults(
     index: &mut HashMap<String, Arc<ModelInfo>>,
     aliases: &mut HashMap<String, String>,
@@ -183,6 +209,7 @@ fn populate_defaults(
                 Arc::new(ModelInfo {
                     pricing: $pricing,
                     caching: $caching,
+                    input_token_semantics: input_token_semantics_for_model($name),
                     is_estimated: $est,
                 }),
             );
@@ -526,7 +553,7 @@ fn populate_defaults(
             ],
             bracket_pricing: false,
         }),
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
                     max_tokens: Some(272_000),
@@ -580,7 +607,7 @@ fn populate_defaults(
             ],
             bracket_pricing: false,
         }),
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
                     max_tokens: Some(272_000),
@@ -818,7 +845,7 @@ fn populate_defaults(
             input_per_1m: 0.5,
             output_per_1m: 3.0
         },
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![CachingTier {
                 max_tokens: None,
                 cached_input_per_1m: 0.05
@@ -844,7 +871,7 @@ fn populate_defaults(
             ],
             bracket_pricing: true,
         }),
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
                     max_tokens: Some(200_000),
@@ -896,7 +923,7 @@ fn populate_defaults(
             ],
             bracket_pricing: false,
         }),
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
                     max_tokens: Some(200_000),
@@ -917,7 +944,7 @@ fn populate_defaults(
             input_per_1m: 0.3,
             output_per_1m: 2.5
         },
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![CachingTier {
                 max_tokens: None,
                 cached_input_per_1m: 0.075
@@ -932,7 +959,7 @@ fn populate_defaults(
             input_per_1m: 0.1,
             output_per_1m: 0.4
         },
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![CachingTier {
                 max_tokens: None,
                 cached_input_per_1m: 0.025
@@ -947,7 +974,7 @@ fn populate_defaults(
             input_per_1m: 0.0,
             output_per_1m: 0.0
         },
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![CachingTier {
                 max_tokens: None,
                 cached_input_per_1m: 0.0
@@ -962,7 +989,7 @@ fn populate_defaults(
             input_per_1m: 0.1,
             output_per_1m: 0.4
         },
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![CachingTier {
                 max_tokens: None,
                 cached_input_per_1m: 0.025
@@ -997,7 +1024,7 @@ fn populate_defaults(
             ],
             bracket_pricing: false,
         }),
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
                     max_tokens: Some(128_000),
@@ -1029,7 +1056,7 @@ fn populate_defaults(
             ],
             bracket_pricing: false,
         }),
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
                     max_tokens: Some(128_000),
@@ -1061,7 +1088,7 @@ fn populate_defaults(
             ],
             bracket_pricing: false,
         }),
-        CachingSupport::Google(TieredCaching {
+        CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
                     max_tokens: Some(128_000),
@@ -1538,6 +1565,7 @@ fn get_free_model_info() -> Arc<ModelInfo> {
                 output_per_1m: 0.0,
             },
             caching: CachingSupport::None,
+            input_token_semantics: InputTokenSemantics::ExcludesCache,
             is_estimated: false,
         })
     }))
@@ -1677,7 +1705,7 @@ fn cache_cost_for_model(
             let read_cost = (cache_read_tokens as f64 / 1_000_000.0) * cache_read_per_1m;
             creation_cost + read_cost
         }
-        CachingSupport::Google(tiered) => {
+        CachingSupport::Tiered(tiered) => {
             calculate_tiered_cache_cost(cache_read_tokens, &tiered.tiers, tiered.bracket_pricing)
         }
     }
@@ -1821,8 +1849,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CachingSupport, CachingTier, ModelInfo, PricingStructure, PricingTier, Registry,
-        TieredCaching, TieredPricing, calculate_cache_cost, calculate_input_cost,
+        CachingSupport, CachingTier, InputTokenSemantics, ModelInfo, PricingStructure, PricingTier,
+        Registry, TieredCaching, TieredPricing, calculate_cache_cost, calculate_input_cost,
         calculate_output_cost, get_model_info, get_registry_lock, init_external_models,
     };
 
@@ -1858,6 +1886,7 @@ mod tests {
                     output_per_1m: 2000.0,
                 },
                 caching: CachingSupport::None,
+                input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
         );
@@ -1897,6 +1926,7 @@ mod tests {
                     output_per_1m: 2.0,
                 },
                 caching: CachingSupport::None,
+                input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
         );
@@ -1918,6 +1948,7 @@ mod tests {
                     output_per_1m: 4.0,
                 },
                 caching: CachingSupport::None,
+                input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
         );
@@ -1948,6 +1979,7 @@ mod tests {
                     output_per_1m: 2.5,
                 },
                 caching: CachingSupport::None,
+                input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
         );
@@ -1994,7 +2026,7 @@ mod tests {
                     ],
                     bracket_pricing: false,
                 }),
-                caching: CachingSupport::Google(TieredCaching {
+                caching: CachingSupport::Tiered(TieredCaching {
                     tiers: vec![
                         CachingTier {
                             max_tokens: Some(50),
@@ -2007,6 +2039,7 @@ mod tests {
                     ],
                     bracket_pricing: false,
                 }),
+                input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
         );
@@ -2144,7 +2177,7 @@ mod tests {
         }
 
         match (&first.caching, &second.caching) {
-            (CachingSupport::Google(first_tiered), CachingSupport::Google(second_tiered)) => {
+            (CachingSupport::Tiered(first_tiered), CachingSupport::Tiered(second_tiered)) => {
                 assert!(
                     std::ptr::eq(first_tiered.tiers.as_ptr(), second_tiered.tiers.as_ptr()),
                     "cache tiers should not be reallocated on each lookup"
