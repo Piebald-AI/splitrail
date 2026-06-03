@@ -398,6 +398,84 @@ async fn test_gemini_cli_warning_messages_are_ignored() {
     assert_eq!(messages[1].role, crate::types::MessageRole::Assistant);
 }
 
+#[test]
+fn test_gemini_cli_glob_patterns_include_jsonl() {
+    let analyzer = GeminiCliAnalyzer::new();
+    let patterns = analyzer.get_data_glob_patterns().join("\n");
+
+    assert!(patterns.contains("*.json"));
+    assert!(patterns.contains("*.jsonl"));
+}
+
+#[tokio::test]
+async fn test_gemini_cli_jsonl_set_messages_snapshot() {
+    let dir = tempdir().unwrap();
+    let session_dir = dir
+        .path()
+        .join("tmp")
+        .join("project-jsonl-set")
+        .join("chats");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let session_path = session_dir.join("session.jsonl");
+    let jsonl_content = r#"{"sessionId":"sess-jsonl-set","projectHash":"proj-hash","startTime":"2026-06-03T18:12:29.005Z","lastUpdated":"2026-06-03T18:12:29.005Z","kind":"main"}
+{"$set":{"messages":[{"id":"u-1","timestamp":"2026-06-03T18:12:35.384Z","type":"user","content":[{"text":"hello from the snapshot"}]},{"id":"g-1","timestamp":"2026-06-03T18:12:38.058Z","type":"gemini","content":"Hi there","thoughts":[],"tokens":{"input":17256,"output":26,"cached":0,"thoughts":133,"tool":0,"total":17415},"model":"gemini-3-flash-preview"}],"lastUpdated":"2026-06-03T18:12:38.058Z"}}
+{"$set":{"lastUpdated":"2026-06-03T18:12:38.058Z"}}
+"#;
+    let mut file = File::create(&session_path).unwrap();
+    file.write_all(jsonl_content.as_bytes()).unwrap();
+
+    let analyzer = GeminiCliAnalyzer::new();
+    let source = crate::analyzer::DataSource { path: session_path };
+    let messages = analyzer
+        .parse_source(&source)
+        .expect("jsonl $set.messages snapshots should parse successfully");
+
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, crate::types::MessageRole::User);
+    assert_eq!(
+        messages[0].session_name.as_deref(),
+        Some("hello from the snapshot")
+    );
+
+    let assistant = messages
+        .iter()
+        .find(|m| m.role == crate::types::MessageRole::Assistant)
+        .unwrap();
+    assert_eq!(assistant.stats.input_tokens, 17256);
+    assert_eq!(assistant.stats.output_tokens, 26);
+    assert_eq!(assistant.stats.reasoning_tokens, 133);
+}
+
+#[tokio::test]
+async fn test_gemini_cli_jsonl_internal_session_context_is_ignored() {
+    let dir = tempdir().unwrap();
+    let session_dir = dir
+        .path()
+        .join("tmp")
+        .join("project-jsonl-context")
+        .join("chats");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let session_path = session_dir.join("session.jsonl");
+    let jsonl_content = r#"{"sessionId":"sess-jsonl-context","projectHash":"proj-hash","startTime":"2026-06-03T18:12:29.005Z","lastUpdated":"2026-06-03T18:12:29.005Z","kind":"main"}
+{"$set":{"messages":[{"id":"context","timestamp":"2026-06-03T18:12:29.005Z","type":"user","content":[{"text":"<session_context>\nThis is the Gemini CLI.\n</session_context>"}]},{"id":"u-1","timestamp":"2026-06-03T18:12:35.384Z","type":"user","content":[{"text":"actual user prompt"}]},{"id":"g-1","timestamp":"2026-06-03T18:12:38.058Z","type":"gemini","content":"Hi there","thoughts":[],"tokens":{"input":10,"output":3,"cached":0,"thoughts":1,"tool":0,"total":14},"model":"gemini-3-flash-preview"}],"lastUpdated":"2026-06-03T18:12:38.058Z"}}
+"#;
+    let mut file = File::create(&session_path).unwrap();
+    file.write_all(jsonl_content.as_bytes()).unwrap();
+
+    let analyzer = GeminiCliAnalyzer::new();
+    let source = crate::analyzer::DataSource { path: session_path };
+    let messages = analyzer
+        .parse_source(&source)
+        .expect("jsonl sessions should parse successfully");
+
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, crate::types::MessageRole::User);
+    assert_eq!(
+        messages[0].session_name.as_deref(),
+        Some("actual user prompt")
+    );
+}
+
 #[tokio::test]
 async fn test_gemini_cli_jsonl_latest_message_version_wins() {
     let dir = tempdir().unwrap();
