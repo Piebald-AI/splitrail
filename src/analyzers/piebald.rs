@@ -4,7 +4,9 @@
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::{InputTokenSemantics, calculate_total_cost, get_model_info};
+use crate::models::{
+    InputTokenSemantics, ServiceTier, calculate_total_cost_for_service_tier, get_model_info,
+};
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::Result;
@@ -64,6 +66,7 @@ struct PiebaldMessage {
     reasoning_tokens: Option<i64>,
     cache_read_tokens: Option<i64>,
     cache_write_tokens: Option<i64>,
+    service_tier: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -91,10 +94,16 @@ fn query_chats(conn: &Connection) -> Result<Vec<PiebaldChat>> {
 /// Query all messages from the database.
 fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, parent_chat_id, role, model, input_tokens, output_tokens,
-                reasoning_tokens, cache_read_tokens, cache_write_tokens, created_at, updated_at
-         FROM messages
-         ORDER BY updated_at",
+        "SELECT m.id, m.parent_chat_id, m.role, m.model, m.input_tokens, m.output_tokens,
+                m.reasoning_tokens, m.cache_read_tokens, m.cache_write_tokens,
+                COALESCE(responses.service_tier, completions.service_tier) AS service_tier,
+                m.created_at, m.updated_at
+         FROM messages m
+         LEFT JOIN override_gen_cfg_data_openai_responses responses
+                ON responses.gen_cfg_id = m.config_id
+         LEFT JOIN override_gen_cfg_data_openai_completions completions
+                ON completions.gen_cfg_id = m.config_id
+         ORDER BY m.updated_at",
     )?;
 
     let messages = stmt
@@ -109,8 +118,9 @@ fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
                 reasoning_tokens: row.get(6)?,
                 cache_read_tokens: row.get(7)?,
                 cache_write_tokens: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                service_tier: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -148,6 +158,19 @@ fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(ts)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn parse_service_tier(service_tier: Option<&str>) -> ServiceTier {
+    match service_tier
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("priority") => ServiceTier::Priority,
+        Some("flex") => ServiceTier::Flex,
+        Some("batch") => ServiceTier::Batch,
+        _ => ServiceTier::Standard,
+    }
 }
 
 fn normalize_input_tokens(model: Option<&str>, input_tokens: u64, cache_read_tokens: u64) -> u64 {
@@ -215,10 +238,13 @@ fn convert_messages(
             let input_tokens =
                 normalize_input_tokens(model_str.as_deref(), raw_input_tokens, cache_read_tokens);
 
+            let service_tier = parse_service_tier(msg.service_tier.as_deref());
+
             // Calculate cost using splitrail's model pricing
             let cost = if let Some(ref model) = model_str {
-                calculate_total_cost(
+                calculate_total_cost_for_service_tier(
                     model,
+                    service_tier,
                     input_tokens,
                     output_tokens,
                     cache_creation_tokens,
@@ -343,6 +369,50 @@ mod tests {
         let result = analyzer.get_stats_with_sources(Vec::new());
         assert!(result.is_ok());
         assert!(result.unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn test_parse_service_tier_maps_known_values() {
+        assert_eq!(parse_service_tier(Some("priority")), ServiceTier::Priority);
+        assert_eq!(parse_service_tier(Some(" flex ")), ServiceTier::Flex);
+        assert_eq!(parse_service_tier(Some("BATCH")), ServiceTier::Batch);
+    }
+
+    #[test]
+    fn test_parse_service_tier_defaults_unknown_values_to_standard() {
+        assert_eq!(parse_service_tier(None), ServiceTier::Standard);
+        assert_eq!(parse_service_tier(Some("")), ServiceTier::Standard);
+        assert_eq!(parse_service_tier(Some("scale")), ServiceTier::Standard);
+    }
+
+    #[test]
+    fn test_convert_messages_uses_service_tier_pricing() {
+        let chats = vec![PiebaldChat {
+            id: 1,
+            title: Some("Priority chat".to_string()),
+            model: Some("gpt-5.4".to_string()),
+            current_directory: Some("/tmp/project".to_string()),
+        }];
+        let messages = vec![PiebaldMessage {
+            id: 10,
+            parent_chat_id: 1,
+            role: "assistant".to_string(),
+            model: Some("gpt-5.4".to_string()),
+            input_tokens: Some(1_000_000),
+            output_tokens: Some(1_000_000),
+            reasoning_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            service_tier: Some("priority".to_string()),
+            created_at: "2026-05-01T12:00:00Z".to_string(),
+            updated_at: "2026-05-01T12:00:01Z".to_string(),
+        }];
+        let tool_call_counts = HashMap::new();
+
+        let converted = convert_messages(&chats, messages, &tool_call_counts);
+
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].stats.cost, 35.0);
     }
 
     #[test]

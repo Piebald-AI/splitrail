@@ -69,6 +69,27 @@ pub enum CachingSupport {
     Tiered(TieredCaching),
 }
 
+/// Provider service tier used for pricing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ServiceTier {
+    /// Default on-demand pricing.
+    #[default]
+    Standard,
+    /// Premium low-latency pricing.
+    Priority,
+    /// Discounted flexible-latency pricing.
+    Flex,
+    /// Discounted batch API pricing.
+    Batch,
+}
+
+/// Pricing and caching for a specific provider service tier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceTierPricing {
+    pub pricing: PricingStructure,
+    pub caching: CachingSupport,
+}
+
 /// How a provider reports input tokens relative to cache reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputTokenSemantics {
@@ -86,6 +107,9 @@ pub struct ModelInfo {
     pub pricing: PricingStructure,
     /// Caching support and pricing
     pub caching: CachingSupport,
+    /// Optional overrides for provider service tiers such as Priority or Flex.
+    #[serde(default)]
+    pub service_tiers: HashMap<ServiceTier, ServiceTierPricing>,
     /// How provider usage reports input tokens relative to cache reads.
     #[serde(default)]
     pub input_token_semantics: InputTokenSemantics,
@@ -127,14 +151,22 @@ impl Registry {
     }
 
     fn validate_model_info(info: &ModelInfo) -> bool {
-        let pricing_ok = match &info.pricing {
+        Self::validate_pricing_and_caching(&info.pricing, &info.caching)
+            && info
+                .service_tiers
+                .values()
+                .all(|tier| Self::validate_pricing_and_caching(&tier.pricing, &tier.caching))
+    }
+
+    fn validate_pricing_and_caching(pricing: &PricingStructure, caching: &CachingSupport) -> bool {
+        let pricing_ok = match pricing {
             PricingStructure::Flat { .. } => true,
             PricingStructure::Tiered(tiered) => {
                 Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
             }
         };
 
-        let caching_ok = match &info.caching {
+        let caching_ok = match caching {
             CachingSupport::Tiered(tiered) => {
                 Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
             }
@@ -209,9 +241,128 @@ fn populate_defaults(
                 Arc::new(ModelInfo {
                     pricing: $pricing,
                     caching: $caching,
+                    service_tiers: HashMap::new(),
                     input_token_semantics: input_token_semantics_for_model($name),
                     is_estimated: $est,
                 }),
+            );
+        };
+    }
+
+    macro_rules! add_service_tier_pricing {
+        ($name:expr, $service_tier:expr, $pricing:expr, $caching:expr) => {
+            if let Some(model_info) = index.get_mut($name)
+                && let Some(model_info) = Arc::get_mut(model_info)
+            {
+                model_info.service_tiers.insert(
+                    $service_tier,
+                    ServiceTierPricing {
+                        pricing: $pricing,
+                        caching: $caching,
+                    },
+                );
+            }
+        };
+    }
+
+    macro_rules! add_flat_service_tier_pricing {
+        ($name:expr, $service_tier:expr, $input:expr, $cached:expr, $output:expr) => {
+            add_service_tier_pricing!(
+                $name,
+                $service_tier,
+                PricingStructure::Flat {
+                    input_per_1m: $input,
+                    output_per_1m: $output,
+                },
+                CachingSupport::OpenAI {
+                    cached_input_per_1m: $cached,
+                }
+            );
+        };
+        ($name:expr, $service_tier:expr, $input:expr, $output:expr) => {
+            add_service_tier_pricing!(
+                $name,
+                $service_tier,
+                PricingStructure::Flat {
+                    input_per_1m: $input,
+                    output_per_1m: $output,
+                },
+                CachingSupport::None
+            );
+        };
+    }
+
+    macro_rules! add_tiered_service_tier_pricing {
+        (
+            $name:expr,
+            $service_tier:expr,
+            $short_input:expr,
+            $short_cached:expr,
+            $short_output:expr,
+            $long_input:expr,
+            $long_cached:expr,
+            $long_output:expr
+        ) => {
+            add_service_tier_pricing!(
+                $name,
+                $service_tier,
+                PricingStructure::Tiered(TieredPricing {
+                    tiers: vec![
+                        PricingTier {
+                            max_tokens: Some(272_000),
+                            input_per_1m: $short_input,
+                            output_per_1m: $short_output,
+                        },
+                        PricingTier {
+                            max_tokens: None,
+                            input_per_1m: $long_input,
+                            output_per_1m: $long_output,
+                        },
+                    ],
+                    bracket_pricing: true,
+                }),
+                CachingSupport::Tiered(TieredCaching {
+                    tiers: vec![
+                        CachingTier {
+                            max_tokens: Some(272_000),
+                            cached_input_per_1m: $short_cached,
+                        },
+                        CachingTier {
+                            max_tokens: None,
+                            cached_input_per_1m: $long_cached,
+                        },
+                    ],
+                    bracket_pricing: true,
+                })
+            );
+        };
+        (
+            $name:expr,
+            $service_tier:expr,
+            $short_input:expr,
+            $short_output:expr,
+            $long_input:expr,
+            $long_output:expr
+        ) => {
+            add_service_tier_pricing!(
+                $name,
+                $service_tier,
+                PricingStructure::Tiered(TieredPricing {
+                    tiers: vec![
+                        PricingTier {
+                            max_tokens: Some(272_000),
+                            input_per_1m: $short_input,
+                            output_per_1m: $short_output,
+                        },
+                        PricingTier {
+                            max_tokens: None,
+                            input_per_1m: $long_input,
+                            output_per_1m: $long_output,
+                        },
+                    ],
+                    bracket_pricing: true,
+                }),
+                CachingSupport::None
             );
         };
     }
@@ -551,7 +702,7 @@ fn populate_defaults(
                     output_per_1m: 22.5
                 },
             ],
-            bracket_pricing: false,
+            bracket_pricing: true,
         }),
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
@@ -564,7 +715,7 @@ fn populate_defaults(
                     cached_input_per_1m: 0.50
                 },
             ],
-            bracket_pricing: false,
+            bracket_pricing: true,
         }),
         false
     );
@@ -584,7 +735,7 @@ fn populate_defaults(
                     output_per_1m: 270.0
                 },
             ],
-            bracket_pricing: false,
+            bracket_pricing: true,
         }),
         CachingSupport::None,
         false
@@ -605,7 +756,7 @@ fn populate_defaults(
                     output_per_1m: 45.0
                 },
             ],
-            bracket_pricing: false,
+            bracket_pricing: true,
         }),
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
@@ -618,7 +769,7 @@ fn populate_defaults(
                     cached_input_per_1m: 1.25
                 },
             ],
-            bracket_pricing: false,
+            bracket_pricing: true,
         }),
         false
     );
@@ -667,6 +818,37 @@ fn populate_defaults(
         CachingSupport::None,
         false
     );
+
+    add_flat_service_tier_pricing!("gpt-5.5", ServiceTier::Priority, 12.50, 1.25, 75.0);
+    add_flat_service_tier_pricing!("gpt-5.4", ServiceTier::Priority, 5.0, 0.50, 30.0);
+    add_flat_service_tier_pricing!("gpt-5.4-mini", ServiceTier::Priority, 1.50, 0.15, 9.0);
+
+    for service_tier in [ServiceTier::Flex, ServiceTier::Batch] {
+        add_tiered_service_tier_pricing!(
+            "gpt-5.5",
+            service_tier,
+            2.50,
+            0.25,
+            15.0,
+            5.0,
+            0.50,
+            22.50
+        );
+        add_flat_service_tier_pricing!("gpt-5.5-pro", service_tier, 15.0, 90.0);
+        add_tiered_service_tier_pricing!(
+            "gpt-5.4",
+            service_tier,
+            1.25,
+            0.13,
+            7.50,
+            2.50,
+            0.25,
+            11.25
+        );
+        add_flat_service_tier_pricing!("gpt-5.4-mini", service_tier, 0.375, 0.0375, 2.25);
+        add_flat_service_tier_pricing!("gpt-5.4-nano", service_tier, 0.10, 0.01, 0.625);
+        add_tiered_service_tier_pricing!("gpt-5.4-pro", service_tier, 15.0, 90.0, 30.0, 135.0);
+    }
 
     // Anthropic Models
     add_model!(
@@ -1695,6 +1877,7 @@ fn get_free_model_info() -> Arc<ModelInfo> {
                 output_per_1m: 0.0,
             },
             caching: CachingSupport::None,
+            service_tiers: HashMap::new(),
             input_token_semantics: InputTokenSemantics::ExcludesCache,
             is_estimated: false,
         })
@@ -1766,8 +1949,23 @@ pub fn is_model_estimated(model_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn input_cost_for_model(model_info: &ModelInfo, input_tokens: u64) -> f64 {
-    match &model_info.pricing {
+fn pricing_for_service_tier(
+    model_info: &ModelInfo,
+    service_tier: ServiceTier,
+) -> (&PricingStructure, &CachingSupport) {
+    if service_tier == ServiceTier::Standard {
+        return (&model_info.pricing, &model_info.caching);
+    }
+
+    model_info
+        .service_tiers
+        .get(&service_tier)
+        .map(|tier| (&tier.pricing, &tier.caching))
+        .unwrap_or((&model_info.pricing, &model_info.caching))
+}
+
+fn input_cost_for_pricing(pricing: &PricingStructure, input_tokens: u64) -> f64 {
+    match pricing {
         PricingStructure::Flat { input_per_1m, .. } => {
             (input_tokens as f64 / 1_000_000.0) * input_per_1m
         }
@@ -1777,10 +1975,22 @@ fn input_cost_for_model(model_info: &ModelInfo, input_tokens: u64) -> f64 {
     }
 }
 
-/// Calculate cost for input tokens using the model's pricing structure
+/// Calculate cost for input tokens using the model's standard pricing structure.
 pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
+    calculate_input_cost_for_service_tier(model_name, ServiceTier::Standard, input_tokens)
+}
+
+/// Calculate cost for input tokens using the requested service tier.
+pub fn calculate_input_cost_for_service_tier(
+    model_name: &str,
+    service_tier: ServiceTier,
+    input_tokens: u64,
+) -> f64 {
     match get_model_info(model_name) {
-        Some(model_info) => input_cost_for_model(&model_info, input_tokens),
+        Some(model_info) => {
+            let (pricing, _) = pricing_for_service_tier(&model_info, service_tier);
+            input_cost_for_pricing(pricing, input_tokens)
+        }
         None => {
             warn_once(format!(
                 "WARNING: Unknown model: {model_name}. Defaulting to $0."
@@ -1790,8 +2000,8 @@ pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
     }
 }
 
-fn output_cost_for_model(model_info: &ModelInfo, output_tokens: u64) -> f64 {
-    match &model_info.pricing {
+fn output_cost_for_pricing(pricing: &PricingStructure, output_tokens: u64) -> f64 {
+    match pricing {
         PricingStructure::Flat { output_per_1m, .. } => {
             (output_tokens as f64 / 1_000_000.0) * output_per_1m
         }
@@ -1801,10 +2011,22 @@ fn output_cost_for_model(model_info: &ModelInfo, output_tokens: u64) -> f64 {
     }
 }
 
-/// Calculate cost for output tokens using the model's pricing structure
+/// Calculate cost for output tokens using the model's standard pricing structure.
 pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
+    calculate_output_cost_for_service_tier(model_name, ServiceTier::Standard, output_tokens)
+}
+
+/// Calculate cost for output tokens using the requested service tier.
+pub fn calculate_output_cost_for_service_tier(
+    model_name: &str,
+    service_tier: ServiceTier,
+    output_tokens: u64,
+) -> f64 {
     match get_model_info(model_name) {
-        Some(model_info) => output_cost_for_model(&model_info, output_tokens),
+        Some(model_info) => {
+            let (pricing, _) = pricing_for_service_tier(&model_info, service_tier);
+            output_cost_for_pricing(pricing, output_tokens)
+        }
         None => {
             warn_once(format!(
                 "WARNING: Unknown model: {model_name}. Defaulting to $0."
@@ -1814,12 +2036,12 @@ pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
     }
 }
 
-fn cache_cost_for_model(
-    model_info: &ModelInfo,
+fn cache_cost_for_caching(
+    caching: &CachingSupport,
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
 ) -> f64 {
-    match &model_info.caching {
+    match caching {
         CachingSupport::None => 0.0,
         CachingSupport::OpenAI {
             cached_input_per_1m,
@@ -1841,15 +2063,31 @@ fn cache_cost_for_model(
     }
 }
 
-/// Calculate cost for cached tokens
+/// Calculate cost for cached tokens using the model's standard pricing structure.
 pub fn calculate_cache_cost(
     model_name: &str,
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
 ) -> f64 {
+    calculate_cache_cost_for_service_tier(
+        model_name,
+        ServiceTier::Standard,
+        cache_creation_tokens,
+        cache_read_tokens,
+    )
+}
+
+/// Calculate cost for cached tokens using the requested service tier.
+pub fn calculate_cache_cost_for_service_tier(
+    model_name: &str,
+    service_tier: ServiceTier,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            cache_cost_for_model(&model_info, cache_creation_tokens, cache_read_tokens)
+            let (_, caching) = pricing_for_service_tier(&model_info, service_tier);
+            cache_cost_for_caching(caching, cache_creation_tokens, cache_read_tokens)
         }
         None => {
             warn_once(format!(
@@ -1860,7 +2098,7 @@ pub fn calculate_cache_cost(
     }
 }
 
-/// Calculate total cost for a model usage
+/// Calculate total cost for a model usage using the model's standard pricing structure.
 pub fn calculate_total_cost(
     model_name: &str,
     input_tokens: u64,
@@ -1868,11 +2106,31 @@ pub fn calculate_total_cost(
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
 ) -> f64 {
+    calculate_total_cost_for_service_tier(
+        model_name,
+        ServiceTier::Standard,
+        input_tokens,
+        output_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    )
+}
+
+/// Calculate total cost for a model usage using the requested service tier.
+pub fn calculate_total_cost_for_service_tier(
+    model_name: &str,
+    service_tier: ServiceTier,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            input_cost_for_model(&model_info, input_tokens)
-                + output_cost_for_model(&model_info, output_tokens)
-                + cache_cost_for_model(&model_info, cache_creation_tokens, cache_read_tokens)
+            let (pricing, caching) = pricing_for_service_tier(&model_info, service_tier);
+            input_cost_for_pricing(pricing, input_tokens)
+                + output_cost_for_pricing(pricing, output_tokens)
+                + cache_cost_for_caching(caching, cache_creation_tokens, cache_read_tokens)
         }
         None => {
             warn_once(format!(
@@ -1980,8 +2238,11 @@ where
 mod tests {
     use super::{
         CachingSupport, CachingTier, InputTokenSemantics, ModelInfo, PricingStructure, PricingTier,
-        Registry, TieredCaching, TieredPricing, calculate_cache_cost, calculate_input_cost,
-        calculate_output_cost, get_model_info, get_registry_lock, init_external_models,
+        Registry, ServiceTier, TieredCaching, TieredPricing, calculate_cache_cost,
+        calculate_cache_cost_for_service_tier, calculate_input_cost,
+        calculate_input_cost_for_service_tier, calculate_output_cost,
+        calculate_output_cost_for_service_tier, get_model_info, get_registry_lock,
+        init_external_models,
     };
 
     use std::collections::HashMap;
@@ -2016,6 +2277,7 @@ mod tests {
                     output_per_1m: 2000.0,
                 },
                 caching: CachingSupport::None,
+                service_tiers: HashMap::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2056,6 +2318,7 @@ mod tests {
                     output_per_1m: 2.0,
                 },
                 caching: CachingSupport::None,
+                service_tiers: HashMap::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2078,6 +2341,7 @@ mod tests {
                     output_per_1m: 4.0,
                 },
                 caching: CachingSupport::None,
+                service_tiers: HashMap::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2109,6 +2373,7 @@ mod tests {
                     output_per_1m: 2.5,
                 },
                 caching: CachingSupport::None,
+                service_tiers: HashMap::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2169,6 +2434,7 @@ mod tests {
                     ],
                     bracket_pricing: false,
                 }),
+                service_tiers: HashMap::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2233,6 +2499,180 @@ mod tests {
     fn gemini_2_5_pro_remains_progressive() {
         let cost = calculate_input_cost("gemini-2.5-pro", 250_000);
         approx_eq(cost, 0.375);
+    }
+
+    #[test]
+    fn gpt_5_4_uses_long_context_pricing_for_full_session() {
+        let input_cost = calculate_input_cost("gpt-5.4", 1_000_000);
+        let output_cost = calculate_output_cost("gpt-5.4", 1_000_000);
+        let cache_cost = calculate_cache_cost("gpt-5.4", 0, 1_000_000);
+
+        approx_eq(input_cost, 5.0);
+        approx_eq(output_cost, 22.5);
+        approx_eq(cache_cost, 0.50);
+    }
+
+    #[test]
+    fn gpt_5_4_pro_uses_long_context_pricing_for_full_session() {
+        let input_cost = calculate_input_cost("gpt-5.4-pro", 1_000_000);
+        let output_cost = calculate_output_cost("gpt-5.4-pro", 1_000_000);
+
+        approx_eq(input_cost, 60.0);
+        approx_eq(output_cost, 270.0);
+    }
+
+    #[test]
+    fn gpt_5_5_uses_long_context_pricing_for_full_session() {
+        let input_cost = calculate_input_cost("gpt-5.5", 1_000_000);
+        let output_cost = calculate_output_cost("gpt-5.5", 1_000_000);
+        let cache_cost = calculate_cache_cost("gpt-5.5", 0, 1_000_000);
+
+        approx_eq(input_cost, 10.0);
+        approx_eq(output_cost, 45.0);
+        approx_eq(cache_cost, 1.25);
+    }
+
+    #[test]
+    fn gpt_priority_pricing_is_available_for_supported_models() {
+        approx_eq(
+            calculate_input_cost_for_service_tier("gpt-5.5", ServiceTier::Priority, 1_000_000),
+            12.50,
+        );
+        approx_eq(
+            calculate_output_cost_for_service_tier("gpt-5.5", ServiceTier::Priority, 1_000_000),
+            75.0,
+        );
+        approx_eq(
+            calculate_cache_cost_for_service_tier("gpt-5.5", ServiceTier::Priority, 0, 1_000_000),
+            1.25,
+        );
+
+        approx_eq(
+            calculate_input_cost_for_service_tier("gpt-5.4", ServiceTier::Priority, 1_000_000),
+            5.0,
+        );
+        approx_eq(
+            calculate_output_cost_for_service_tier("gpt-5.4", ServiceTier::Priority, 1_000_000),
+            30.0,
+        );
+        approx_eq(
+            calculate_cache_cost_for_service_tier("gpt-5.4", ServiceTier::Priority, 0, 1_000_000),
+            0.50,
+        );
+
+        approx_eq(
+            calculate_input_cost_for_service_tier("gpt-5.4-mini", ServiceTier::Priority, 1_000_000),
+            1.50,
+        );
+        approx_eq(
+            calculate_output_cost_for_service_tier(
+                "gpt-5.4-mini",
+                ServiceTier::Priority,
+                1_000_000,
+            ),
+            9.0,
+        );
+        approx_eq(
+            calculate_cache_cost_for_service_tier(
+                "gpt-5.4-mini",
+                ServiceTier::Priority,
+                0,
+                1_000_000,
+            ),
+            0.15,
+        );
+    }
+
+    #[test]
+    fn gpt_flex_and_batch_pricing_are_available_for_supported_models() {
+        for service_tier in [ServiceTier::Flex, ServiceTier::Batch] {
+            approx_eq(
+                calculate_input_cost_for_service_tier("gpt-5.5", service_tier, 1_000_000),
+                5.0,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier("gpt-5.5", service_tier, 1_000_000),
+                22.50,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier("gpt-5.5", service_tier, 0, 1_000_000),
+                0.50,
+            );
+
+            approx_eq(
+                calculate_input_cost_for_service_tier("gpt-5.4", service_tier, 200_000),
+                0.25,
+            );
+            approx_eq(
+                calculate_input_cost_for_service_tier("gpt-5.4", service_tier, 1_000_000),
+                2.50,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier("gpt-5.4", service_tier, 1_000_000),
+                11.25,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier("gpt-5.4", service_tier, 0, 200_000),
+                0.026,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier("gpt-5.4", service_tier, 0, 1_000_000),
+                0.25,
+            );
+
+            approx_eq(
+                calculate_input_cost_for_service_tier("gpt-5.5-pro", service_tier, 1_000_000),
+                15.0,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier("gpt-5.5-pro", service_tier, 1_000_000),
+                90.0,
+            );
+
+            approx_eq(
+                calculate_input_cost_for_service_tier("gpt-5.4-pro", service_tier, 1_000_000),
+                30.0,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier("gpt-5.4-pro", service_tier, 1_000_000),
+                135.0,
+            );
+
+            approx_eq(
+                calculate_input_cost_for_service_tier("gpt-5.4-mini", service_tier, 1_000_000),
+                0.375,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier("gpt-5.4-mini", service_tier, 1_000_000),
+                2.25,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier("gpt-5.4-mini", service_tier, 0, 1_000_000),
+                0.0375,
+            );
+
+            approx_eq(
+                calculate_input_cost_for_service_tier("gpt-5.4-nano", service_tier, 1_000_000),
+                0.10,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier("gpt-5.4-nano", service_tier, 1_000_000),
+                0.625,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier("gpt-5.4-nano", service_tier, 0, 1_000_000),
+                0.01,
+            );
+        }
+    }
+
+    #[test]
+    fn missing_service_tier_pricing_falls_back_to_standard() {
+        let standard_cost = calculate_input_cost("gpt-5.4-nano", 1_000_000);
+        let priority_cost =
+            calculate_input_cost_for_service_tier("gpt-5.4-nano", ServiceTier::Priority, 1_000_000);
+
+        approx_eq(priority_cost, standard_cost);
     }
 
     #[test]
