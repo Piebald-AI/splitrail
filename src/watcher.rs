@@ -273,7 +273,8 @@ impl RealtimeStatsManager {
 
         let last_date_uploaded = match UploadState::load() {
             Ok(state) => state.last_date_uploaded,
-            Err(_) => {
+            Err(e) => {
+                eprintln!("Failed to load upload state: {e:#}");
                 *self.upload_in_progress.lock() = false;
                 return;
             }

@@ -32,8 +32,15 @@ pub struct UploadConfig {
     pub retry_attempts: u32,
 }
 
+/// Runtime upload progress state, persisted separately from user configuration.
+///
+/// Stored in the platform state directory (e.g. `~/.local/state/splitrail/state.toml`
+/// on Linux) so that incremental upload checkpoints do not pollute the
+/// user-editable config file.
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct UploadState {
+    /// Timestamp (milliseconds since Unix epoch) of the last successfully uploaded message.
+    /// Used to filter out already-uploaded messages on the next run.
     pub last_date_uploaded: i64,
 }
 
@@ -169,6 +176,7 @@ struct LegacyUploadConfig {
 }
 
 impl UploadState {
+    /// Returns the path to the state file, using a test override when running under `cfg(test)`.
     pub fn state_path() -> Result<PathBuf> {
         #[cfg(test)]
         {
@@ -184,6 +192,11 @@ impl UploadState {
         Ok(state_root.join("splitrail").join("state.toml"))
     }
 
+    /// Load upload state from the state file.
+    ///
+    /// If the state file does not exist, attempts to migrate `last_date_uploaded`
+    /// from the legacy config location. Falls back to a zero-value default if
+    /// neither source is present.
     pub fn load() -> Result<Self> {
         let state_path = Self::state_path()?;
         if state_path.exists() {
@@ -201,6 +214,7 @@ impl UploadState {
         Ok(Self::default())
     }
 
+    /// Persist the current state to the state file, creating the directory if needed.
     pub fn save(&self) -> Result<()> {
         let state_path = Self::state_path()?;
         if let Some(parent) = state_path.parent() {
@@ -212,6 +226,8 @@ impl UploadState {
         Ok(())
     }
 
+    /// Read `last_date_uploaded` from the old `[upload]` section of the config file, if present.
+    /// Returns `None` when the config file does not exist or the field is absent.
     fn load_legacy_from_config() -> Result<Option<Self>> {
         let config_path = Config::config_path()?;
         if !config_path.exists() {

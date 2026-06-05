@@ -515,7 +515,13 @@ pub async fn perform_background_upload(
             return None;
         }
 
-        let last_date_uploaded = UploadState::load().ok()?.last_date_uploaded;
+        let last_date_uploaded = match UploadState::load() {
+            Ok(state) => state.last_date_uploaded,
+            Err(e) => {
+                eprintln!("Failed to load upload state: {e:#}");
+                return None;
+            }
+        };
 
         let all_messages: Vec<_> = stats
             .analyzer_stats
