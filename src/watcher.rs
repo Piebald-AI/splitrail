@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use crate::analyzer::AnalyzerRegistry;
-use crate::config::Config;
+use crate::config::{Config, UploadState};
 use crate::tui::UploadStatus;
 use crate::types::MultiAnalyzerStatsView;
 use crate::upload;
@@ -243,10 +243,10 @@ impl RealtimeStatsManager {
 
     async fn trigger_auto_upload_if_enabled(&mut self) {
         // Check if auto-upload is enabled
-        let config = match Config::load() {
-            Ok(Some(cfg)) if cfg.upload.auto_upload && cfg.is_configured() => cfg,
+        match Config::load() {
+            Ok(Some(cfg)) if cfg.upload.auto_upload && cfg.is_configured() => {}
             _ => return, // Auto-upload not enabled or config not available
-        };
+        }
 
         // Check if an upload is already in progress
         if *self.upload_in_progress.lock() {
@@ -271,12 +271,17 @@ impl RealtimeStatsManager {
         // Mark upload as in progress
         *self.upload_in_progress.lock() = true;
 
+        let last_date_uploaded = match UploadState::load() {
+            Ok(state) => state.last_date_uploaded,
+            Err(_) => {
+                *self.upload_in_progress.lock() = false;
+                return;
+            }
+        };
+
         // For incremental upload, load only changed/new messages
         // This avoids loading all historical data into memory
-        let messages = match self
-            .registry
-            .load_messages_for_upload(config.upload.last_date_uploaded)
-        {
+        let messages = match self.registry.load_messages_for_upload(last_date_uploaded) {
             Ok(msgs) => msgs,
             Err(_) => {
                 *self.upload_in_progress.lock() = false;
