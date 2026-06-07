@@ -52,7 +52,7 @@ struct PiebaldChat {
     id: i64,
     title: Option<String>,
     model: Option<String>,
-    current_directory: Option<String>,
+    project_directory: Option<String>,
 }
 
 /// Represents a message from Piebald's database.
@@ -73,8 +73,12 @@ struct PiebaldMessage {
 
 /// Query all chats from the database.
 fn query_chats(conn: &Connection) -> Result<Vec<PiebaldChat>> {
-    let mut stmt =
-        conn.prepare("SELECT id, title, model, current_directory FROM chats ORDER BY created_at")?;
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.title, c.model, p.directory
+         FROM chats c
+         LEFT JOIN projects p ON p.id = c.project_id
+         ORDER BY c.created_at",
+    )?;
 
     let chats = stmt
         .query_map([], |row| {
@@ -82,7 +86,7 @@ fn query_chats(conn: &Connection) -> Result<Vec<PiebaldChat>> {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 model: row.get(2)?,
-                current_directory: row.get(3)?,
+                project_directory: row.get(3)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -202,8 +206,8 @@ fn convert_messages(
             // (updated_at changes when tokens are added during streaming)
             let date = parse_timestamp(&msg.updated_at)?;
 
-            // Use project path from chat's current_directory, falling back to "ungrouped" if not set
-            let project_hash = hash_text(chat.current_directory.as_deref().unwrap_or("ungrouped"));
+            // Use project path from Piebald's projects table, falling back to "ungrouped" if not set.
+            let project_hash = hash_text(chat.project_directory.as_deref().unwrap_or("ungrouped"));
 
             // Generate globally unique hash using created_at timestamp + message ID.
             // Use created_at (not updated_at) so the hash stays stable across token updates.
@@ -391,7 +395,7 @@ mod tests {
             id: 1,
             title: Some("Priority chat".to_string()),
             model: Some("gpt-5.4".to_string()),
-            current_directory: Some("/tmp/project".to_string()),
+            project_directory: Some("/tmp/project".to_string()),
         }];
         let messages = vec![PiebaldMessage {
             id: 10,
