@@ -30,6 +30,17 @@ pub struct UploadConfig {
     pub auto_upload: bool,
     pub upload_today_only: bool,
     pub retry_attempts: u32,
+}
+
+/// Runtime upload progress state, persisted separately from user configuration.
+///
+/// Stored in the platform state directory (e.g. `~/.local/state/splitrail/state.toml`
+/// on Linux) so that incremental upload checkpoints do not pollute the
+/// user-editable config file.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct UploadState {
+    /// Timestamp (milliseconds since Unix epoch) of the last successfully uploaded message.
+    /// Used to filter out already-uploaded messages on the next run.
     pub last_date_uploaded: i64,
 }
 
@@ -58,7 +69,6 @@ impl Default for Config {
                 auto_upload: false,
                 upload_today_only: false,
                 retry_attempts: 3,
-                last_date_uploaded: 0,
             },
             formatting: FormattingConfig {
                 number_comma: false,
@@ -75,11 +85,17 @@ impl Default for Config {
 
 thread_local! {
     static TEST_CONFIG_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static TEST_STATE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub fn set_test_config_path(path: PathBuf) {
     TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = Some(path));
+}
+
+#[cfg(test)]
+pub fn set_test_state_path(path: PathBuf) {
+    TEST_STATE_PATH.with(|p| *p.borrow_mut() = Some(path));
 }
 
 impl Config {
@@ -146,9 +162,86 @@ impl Config {
     pub fn is_server_url_missing(&self) -> bool {
         self.server.url.is_empty()
     }
+}
 
-    pub fn set_last_date_uploaded(&mut self, date: i64) {
-        self.upload.last_date_uploaded = date;
+#[derive(Debug, Deserialize, Default)]
+struct LegacyConfigFile {
+    #[serde(default)]
+    upload: LegacyUploadConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LegacyUploadConfig {
+    last_date_uploaded: Option<i64>,
+}
+
+impl UploadState {
+    /// Returns the path to the state file, using a test override when running under `cfg(test)`.
+    pub fn state_path() -> Result<PathBuf> {
+        #[cfg(test)]
+        {
+            if let Some(path) = TEST_STATE_PATH.with(|p| p.borrow().clone()) {
+                return Ok(path);
+            }
+        }
+
+        let state_root = dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .context("Could not find platform state directory")?;
+
+        Ok(state_root.join("splitrail").join("state.toml"))
+    }
+
+    /// Load upload state from the state file.
+    ///
+    /// If the state file does not exist, attempts to migrate `last_date_uploaded`
+    /// from the legacy config location. Falls back to a zero-value default if
+    /// neither source is present.
+    pub fn load() -> Result<Self> {
+        let state_path = Self::state_path()?;
+        if state_path.exists() {
+            let content = fs::read_to_string(&state_path).context("Failed to read state file")?;
+            return toml::from_str(&content).context("Failed to parse state file");
+        }
+
+        if let Some(state) = Self::load_legacy_from_config()? {
+            if state.last_date_uploaded > 0 {
+                state.save()?;
+            }
+            return Ok(state);
+        }
+
+        Ok(Self::default())
+    }
+
+    /// Persist the current state to the state file, creating the directory if needed.
+    pub fn save(&self) -> Result<()> {
+        let state_path = Self::state_path()?;
+        if let Some(parent) = state_path.parent() {
+            fs::create_dir_all(parent).context("Failed to create state directory")?;
+        }
+
+        let content = toml::to_string_pretty(self).context("Failed to serialize state")?;
+        fs::write(&state_path, content).context("Failed to write state file")?;
+        Ok(())
+    }
+
+    /// Read `last_date_uploaded` from the old `[upload]` section of the config file, if present.
+    /// Returns `None` when the config file does not exist or the field is absent.
+    fn load_legacy_from_config() -> Result<Option<Self>> {
+        let config_path = Config::config_path()?;
+        if !config_path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(&config_path).context("Failed to read config file")?;
+        let legacy: LegacyConfigFile =
+            toml::from_str(&content).context("Failed to parse config file")?;
+
+        Ok(legacy
+            .upload
+            .last_date_uploaded
+            .map(|last_date_uploaded| Self { last_date_uploaded }))
     }
 }
 
@@ -272,11 +365,13 @@ mod tests {
     use crate::models::PricingStructure;
     use tempfile::TempDir;
 
-    fn setup_test_config() -> (TempDir, PathBuf) {
+    fn setup_test_config() -> (TempDir, PathBuf, PathBuf) {
         let dir = TempDir::new().expect("tempdir");
         let config_path = dir.path().join(".splitrail.toml");
+        let state_path = dir.path().join("state.toml");
         set_test_config_path(config_path.clone());
-        (dir, config_path)
+        set_test_state_path(state_path.clone());
+        (dir, config_path, state_path)
     }
 
     #[test]
@@ -290,7 +385,6 @@ api_token = "test-token"
 auto_upload = true
 upload_today_only = false
 retry_attempts = 5
-last_date_uploaded = 0
 
 [formatting]
 number_comma = true
@@ -329,7 +423,7 @@ is_estimated = true
 
     #[test]
     fn default_config_round_trip() {
-        let (_dir, _path) = setup_test_config();
+        let (_dir, config_path, _state_path) = setup_test_config();
         // Ensure there is a default config on disk using the CLI helper.
         create_default_config(true).expect("create_default_config");
 
@@ -343,11 +437,17 @@ is_estimated = true
         assert_eq!(loaded.formatting.locale, "en");
         assert!(!loaded.tui.reverse_sort_default);
         assert!(!loaded.tui.hide_empty_periods);
+
+        let saved = fs::read_to_string(config_path).expect("read saved config");
+        assert!(
+            !saved.contains("last_date_uploaded"),
+            "runtime upload state should not be persisted in config"
+        );
     }
 
     #[test]
     fn set_config_value_behaviour() {
-        let (_dir, _path) = setup_test_config();
+        let (_dir, _path, _state_path) = setup_test_config();
 
         // Ensure base config exists.
         create_default_config(true).expect("create_default_config");
@@ -391,6 +491,38 @@ is_estimated = true
     }
 
     #[test]
+    fn legacy_config_upload_checkpoint_migrates_to_state() {
+        let (_dir, config_path, state_path) = setup_test_config();
+        fs::write(
+            &config_path,
+            r#"
+[server]
+url = "https://splitrail.dev"
+api_token = ""
+
+[upload]
+auto_upload = false
+upload_today_only = false
+retry_attempts = 3
+last_date_uploaded = 1234
+
+[formatting]
+number_comma = false
+number_human = false
+locale = "en"
+decimal_places = 2
+"#,
+        )
+        .expect("write legacy config");
+
+        let state = UploadState::load().expect("load migrated state");
+        assert_eq!(state.last_date_uploaded, 1234);
+
+        let saved_state = fs::read_to_string(state_path).expect("read state file");
+        assert!(saved_state.contains("last_date_uploaded = 1234"));
+    }
+
+    #[test]
     fn config_toml_parses_tui_section() {
         let toml_str = r#"
 [server]
@@ -401,7 +533,6 @@ api_token = ""
 auto_upload = false
 upload_today_only = false
 retry_attempts = 3
-last_date_uploaded = 0
 
 [formatting]
 number_comma = false

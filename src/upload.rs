@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, UploadState};
 use crate::reqwest_simd_json::{ReqwestSimdJsonExt, ResponseSimdJsonExt};
 use crate::tui::UploadStatus;
 use crate::types::{ConversationMessage, ErrorResponse, MultiAnalyzerStats, UploadResponse};
@@ -91,7 +91,7 @@ mod tests;
 
 pub async fn upload_message_stats<F>(
     messages: &[ConversationMessage],
-    config: &mut Config,
+    config: &Config,
     mut progress_callback: F,
 ) -> Result<()>
 where
@@ -211,7 +211,7 @@ where
         if let Some(err) = last_err {
             // Save progress for any chunks that already succeeded
             if messages_processed > 0 {
-                save_chunk_progress(config, &sorted_messages, messages_processed, upload_debug);
+                save_chunk_progress(&sorted_messages, messages_processed, upload_debug);
             }
             return Err(err);
         }
@@ -221,7 +221,7 @@ where
         // Save incremental progress after each successful chunk so that a
         // later failure (or a manual re-run) only re-uploads the remaining
         // messages instead of re-sending everything from scratch.
-        save_chunk_progress(config, &sorted_messages, messages_processed, upload_debug);
+        save_chunk_progress(&sorted_messages, messages_processed, upload_debug);
     }
 
     // No additional save needed here — save_chunk_progress already persisted
@@ -236,7 +236,6 @@ where
 /// from the successfully uploaded portion.  On the next upload run, only
 /// messages newer than this timestamp will be re-sent.
 fn save_chunk_progress(
-    config: &mut Config,
     sorted_messages: &[&ConversationMessage],
     messages_processed: usize,
     upload_debug: bool,
@@ -249,8 +248,11 @@ fn save_chunk_progress(
     // uses >=) doesn't re-include this exact message.
     if let Some(last_msg) = sorted_messages.get(messages_processed - 1) {
         let checkpoint = last_msg.date.timestamp_millis() + 1;
-        config.set_last_date_uploaded(checkpoint);
-        if let Err(e) = config.save(true) {
+        if let Err(e) = (UploadState {
+            last_date_uploaded: checkpoint,
+        })
+        .save()
+        {
             if upload_debug {
                 upload_debug_log(format!(
                     "[splitrail upload] warning: failed to save chunk progress: {e:#}"
@@ -464,7 +466,7 @@ pub async fn perform_background_upload_messages<F>(
     }
 
     let upload_result = async {
-        let mut config = Config::load().ok().flatten()?;
+        let config = Config::load().ok().flatten()?;
         if !config.is_configured() {
             return None;
         }
@@ -475,7 +477,7 @@ pub async fn perform_background_upload_messages<F>(
 
         let result = upload_message_stats(
             &messages,
-            &mut config,
+            &config,
             make_progress_callback(upload_status.clone()),
         )
         .await;
@@ -513,13 +515,21 @@ pub async fn perform_background_upload(
             return None;
         }
 
+        let last_date_uploaded = match UploadState::load() {
+            Ok(state) => state.last_date_uploaded,
+            Err(e) => {
+                eprintln!("Failed to load upload state: {e:#}");
+                return None;
+            }
+        };
+
         let all_messages: Vec<_> = stats
             .analyzer_stats
             .into_iter()
             .flat_map(|s| s.messages)
             .collect();
 
-        utils::get_messages_later_than(config.upload.last_date_uploaded, all_messages)
+        utils::get_messages_later_than(last_date_uploaded, all_messages)
             .await
             .ok()
     }

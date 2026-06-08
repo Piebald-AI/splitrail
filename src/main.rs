@@ -25,6 +25,8 @@ mod utils;
 mod version_check;
 mod watcher;
 
+use crate::config::UploadState;
+
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -325,7 +327,10 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
     };
 
     match config::Config::load() {
-        Ok(Some(mut config)) if config.is_configured() => {
+        Ok(Some(config)) if config.is_configured() => {
+            let last_date_uploaded = UploadState::load()
+                .context("Failed to load upload state")?
+                .last_date_uploaded;
             let messages_to_upload = if args.full {
                 // --full flag: Flatten all messages from all analyzers
                 stats
@@ -347,7 +352,7 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
                         // For all other analyzers, only add new messages
                         messages.extend(
                             utils::get_messages_later_than(
-                                config.upload.last_date_uploaded,
+                                last_date_uploaded,
                                 analyzer_stats.messages,
                             )
                             .await?,
@@ -362,7 +367,7 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
                     .into_iter()
                     .flat_map(|s| s.messages)
                     .collect();
-                utils::get_messages_later_than(config.upload.last_date_uploaded, all_messages)
+                utils::get_messages_later_than(last_date_uploaded, all_messages)
                     .await
                     .context("Failed to get messages later than last saved date")?
             };
@@ -381,7 +386,7 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
             }
 
             let progress_callback = tui::create_upload_progress_callback(&format_options);
-            upload::upload_message_stats(&messages_to_upload, &mut config, progress_callback)
+            upload::upload_message_stats(&messages_to_upload, &config, progress_callback)
                 .await
                 .context("Failed to upload messages")?;
             tui::show_upload_success(messages_to_upload.len(), &format_options);

@@ -15,13 +15,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-use crate::config::set_test_config_path;
+use crate::config::{UploadState, set_test_config_path, set_test_state_path};
 
-fn setup_test_config() -> (TempDir, PathBuf) {
+fn setup_test_config() -> (TempDir, PathBuf, PathBuf) {
     let dir = TempDir::new().expect("tempdir");
     let config_path = dir.path().join(".splitrail.toml");
+    let state_path = dir.path().join("state.toml");
     set_test_config_path(config_path.clone());
-    (dir, config_path)
+    set_test_state_path(state_path.clone());
+    (dir, config_path, state_path)
 }
 
 fn make_test_message(conversation_hash: &str) -> ConversationMessage {
@@ -170,22 +172,26 @@ async fn start_test_server(
 
 #[tokio::test]
 async fn upload_message_stats_empty_messages_returns_ok_and_no_progress() {
-    let mut config = Config::default();
+    let (_dir, _config_path, _state_path) = setup_test_config();
+    let config = Config::default();
     let mut progress_calls = 0usize;
 
-    upload_message_stats(&[], &mut config, |_, _| {
+    upload_message_stats(&[], &config, |_, _| {
         progress_calls += 1;
     })
     .await
     .expect("upload should succeed");
 
     assert_eq!(progress_calls, 0);
-    assert_eq!(config.upload.last_date_uploaded, 0);
+    assert_eq!(
+        UploadState::load().expect("load state").last_date_uploaded,
+        0
+    );
 }
 
 #[tokio::test]
 async fn upload_message_stats_success_updates_progress_and_config() {
-    let (_dir, _path) = setup_test_config();
+    let (_dir, config_path, _state_path) = setup_test_config();
 
     let request_counter = Arc::new(AtomicUsize::new(0));
     let base_url = match start_test_server(
@@ -206,12 +212,13 @@ async fn upload_message_stats_success_updates_progress_and_config() {
     let mut config = Config::default();
     config.server.url = base_url;
     config.server.api_token = "TEST_TOKEN".to_string();
+    config.save(true).expect("save configured config");
 
     let messages = vec![make_test_message("c1")];
     let progress_values: Arc<Mutex<Vec<(usize, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let progress_values_clone = progress_values.clone();
 
-    upload_message_stats(&messages, &mut config, move |current, total| {
+    upload_message_stats(&messages, &config, move |current, total| {
         progress_values_clone.lock().push((current, total));
     })
     .await
@@ -225,23 +232,27 @@ async fn upload_message_stats_success_updates_progress_and_config() {
     assert_eq!(final_total, messages.len());
     assert_eq!(final_current, messages.len());
 
+    let state = UploadState::load().expect("load upload state");
     assert!(
-        config.upload.last_date_uploaded > 0,
+        state.last_date_uploaded > 0,
         "last_date_uploaded should be updated"
     );
 
     let saved = Config::load()
         .expect("load config")
         .expect("config should exist on disk");
-    assert_eq!(
-        saved.upload.last_date_uploaded,
-        config.upload.last_date_uploaded
+    assert_eq!(saved.upload.retry_attempts, config.upload.retry_attempts);
+
+    let config_contents = std::fs::read_to_string(config_path).expect("read saved config");
+    assert!(
+        !config_contents.contains("last_date_uploaded"),
+        "config should not persist upload runtime state"
     );
 }
 
 #[tokio::test]
 async fn upload_message_stats_server_error_plain_text_propagates_message() {
-    let (_dir, _path) = setup_test_config();
+    let (_dir, _path, _state_path) = setup_test_config();
 
     let request_counter = Arc::new(AtomicUsize::new(0));
     let base_url = match start_test_server(
@@ -267,7 +278,7 @@ async fn upload_message_stats_server_error_plain_text_propagates_message() {
 
     let messages = vec![make_test_message("c1")];
 
-    let err = upload_message_stats(&messages, &mut config, |_c, _t| {})
+    let err = upload_message_stats(&messages, &config, |_c, _t| {})
         .await
         .expect_err("upload should fail");
 
@@ -281,7 +292,7 @@ async fn upload_message_stats_server_error_plain_text_propagates_message() {
 
 #[tokio::test]
 async fn upload_message_stats_server_error_json_uses_error_field() {
-    let (_dir, _path) = setup_test_config();
+    let (_dir, _path, _state_path) = setup_test_config();
 
     let request_counter = Arc::new(AtomicUsize::new(0));
     let base_url = match start_test_server(
@@ -307,7 +318,7 @@ async fn upload_message_stats_server_error_json_uses_error_field() {
 
     let messages = vec![make_test_message("c1")];
 
-    let err = upload_message_stats(&messages, &mut config, |_c, _t| {})
+    let err = upload_message_stats(&messages, &config, |_c, _t| {})
         .await
         .expect_err("upload should fail");
 
@@ -321,7 +332,7 @@ async fn upload_message_stats_server_error_json_uses_error_field() {
 
 #[tokio::test]
 async fn upload_message_stats_large_batch_is_split_into_chunks() {
-    let (_dir, _path) = setup_test_config();
+    let (_dir, _path, _state_path) = setup_test_config();
 
     // Use more than 3000 messages to trigger multiple chunks.
     let message_count = 3005usize;
@@ -352,7 +363,7 @@ async fn upload_message_stats_large_batch_is_split_into_chunks() {
         messages.push(make_test_message(&format!("c{i}")));
     }
 
-    upload_message_stats(&messages, &mut config, |_c, _t| {})
+    upload_message_stats(&messages, &config, |_c, _t| {})
         .await
         .expect("upload should succeed");
 
@@ -365,7 +376,7 @@ async fn upload_message_stats_large_batch_is_split_into_chunks() {
 
 #[tokio::test]
 async fn perform_background_upload_no_config_keeps_status_unchanged() {
-    let (_dir, config_path) = setup_test_config();
+    let (_dir, config_path, _state_path) = setup_test_config();
 
     // Ensure there is no config file.
     if config_path.exists() {
@@ -390,7 +401,7 @@ async fn perform_background_upload_no_config_keeps_status_unchanged() {
 
 #[tokio::test]
 async fn perform_background_upload_unconfigured_config_keeps_status_unchanged() {
-    let (_dir, _path) = setup_test_config();
+    let (_dir, _path, _state_path) = setup_test_config();
 
     // Save a default config which is not configured (missing API token).
     let config = Config::default();
@@ -414,7 +425,7 @@ async fn perform_background_upload_unconfigured_config_keeps_status_unchanged() 
 
 #[tokio::test]
 async fn perform_background_upload_propagates_upload_errors_to_status() {
-    let (_dir, _path) = setup_test_config();
+    let (_dir, _path, _state_path) = setup_test_config();
 
     let request_counter = Arc::new(AtomicUsize::new(0));
     let base_url = match start_test_server(
@@ -465,7 +476,7 @@ async fn perform_background_upload_propagates_upload_errors_to_status() {
 
 #[tokio::test]
 async fn upload_message_stats_retries_on_failure_then_succeeds() {
-    let (_dir, _path) = setup_test_config();
+    let (_dir, _path, _state_path) = setup_test_config();
 
     // The server will fail on the first request and succeed on the second.
     // We use a shared counter so the server knows which response to give.
@@ -517,7 +528,7 @@ async fn upload_message_stats_retries_on_failure_then_succeeds() {
 
     let messages = vec![make_test_message("retry-c1")];
 
-    upload_message_stats(&messages, &mut config, |_c, _t| {})
+    upload_message_stats(&messages, &config, |_c, _t| {})
         .await
         .expect("upload should succeed after retry");
 
@@ -527,7 +538,10 @@ async fn upload_message_stats_retries_on_failure_then_succeeds() {
         "expected 2 requests: first fails, second succeeds"
     );
     assert!(
-        config.upload.last_date_uploaded > 0,
+        UploadState::load()
+            .expect("load upload state")
+            .last_date_uploaded
+            > 0,
         "last_date_uploaded should be updated after successful retry"
     );
 }
