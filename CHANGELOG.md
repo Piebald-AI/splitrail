@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.5] - 2026-06-09
+- Claude Fable 5 (#180) - @mike1858
+- Fix Gemini CLI JSONL session parsing (#171) - @mike1858
+- feat(codex): support loading fallback model from config file (#178) - @jimyag
+- feat: move upload state to platform state directory (#176) - @mcowger
+- Fix Piebald project directory query (#177) - @mike1858
+- Add support for priority tiers & better long-context surcharge (#172) - @mike1858
+
 ## [3.5.4] - 2026-05-30
 - [codex] Add missing model pricing entries (#164) - @Wraient
 - Remove GPT-5.2 Codex pricing warning (#168) - @mike1858
