@@ -1,3 +1,4 @@
+mod antigravity;
 mod claude_code;
 mod cline;
 mod codex_cli;
