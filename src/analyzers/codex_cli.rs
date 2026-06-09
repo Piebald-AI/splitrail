@@ -15,7 +15,36 @@ use crate::models::calculate_total_cost;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
 
+use std::sync::OnceLock;
+
 const DEFAULT_FALLBACK_MODEL: &str = "gpt-5";
+
+static FALLBACK_MODEL: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn get_fallback_model_with_home(home_dir: Option<PathBuf>) -> String {
+    home_dir
+        .map(|h| h.join(".codex").join("config.toml"))
+        .filter(|p| p.is_file())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|content| {
+            #[derive(Deserialize)]
+            struct CodexConfig {
+                model: Option<String>,
+            }
+            toml::from_str::<CodexConfig>(&content).ok()?.model
+        })
+        .unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_string())
+}
+
+fn get_fallback_model() -> &'static str {
+    FALLBACK_MODEL.get_or_init(|| {
+        if cfg!(test) {
+            DEFAULT_FALLBACK_MODEL.to_string()
+        } else {
+            get_fallback_model_with_home(dirs::home_dir())
+        }
+    })
+}
 
 pub struct CodexCliAnalyzer;
 
@@ -390,7 +419,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                         "assistant" if !saw_token_usage => {
                             let model_state = session_model.clone().unwrap_or_else(|| {
                                 let fallback = SessionModel::inferred(
-                                    DEFAULT_FALLBACK_MODEL.to_string(),
+                                    get_fallback_model().to_string(),
                                 );
                                 warn_once(format!(
                                     "WARNING: session {file_path_str} missing model metadata; using fallback model {} for cost estimation.",
@@ -450,7 +479,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                         if let Some(token_usage) = usage {
                             let model_state = session_model.clone().unwrap_or_else(|| {
                                 let fallback = SessionModel::inferred(
-                                    DEFAULT_FALLBACK_MODEL.to_string(),
+                                    get_fallback_model().to_string(),
                                 );
                                 warn_once(format!(
                                     "WARNING: session {file_path_str} missing model metadata; using fallback model {} for cost estimation.",
