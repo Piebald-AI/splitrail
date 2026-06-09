@@ -326,3 +326,61 @@ fn test_codex_availability() {
 
     // Don't assert - just print for debugging
 }
+
+#[test]
+fn test_get_fallback_model_with_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex_dir = dir.path().join(".codex");
+    std::fs::create_dir(&codex_dir).unwrap();
+    let config_path = codex_dir.join("config.toml");
+
+    // Test case 1: no config file
+    let model = get_fallback_model_with_home(Some(dir.path().to_path_buf()));
+    assert_eq!(model, "gpt-5");
+
+    // Test case 2: empty config file
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    file.write_all(b"").unwrap();
+    drop(file);
+    let model = get_fallback_model_with_home(Some(dir.path().to_path_buf()));
+    assert_eq!(model, "gpt-5");
+
+    // Test case 3: model configured in config file
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    file.write_all(b"model = \"gpt-5.5\"\n").unwrap();
+    drop(file);
+    let model = get_fallback_model_with_home(Some(dir.path().to_path_buf()));
+    assert_eq!(model, "gpt-5.5");
+
+    // Test case 4: empty string in config
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    file.write_all(b"model = \"\"\n").unwrap();
+    drop(file);
+    let model = get_fallback_model_with_home(Some(dir.path().to_path_buf()));
+    assert_eq!(model, "gpt-5");
+
+    // Test case 5: None home directory
+    let model = get_fallback_model_with_home(None);
+    assert_eq!(model, "gpt-5");
+
+    // Test case 6: whitespace-only model
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    file.write_all(b"model = \"   \"\n").unwrap();
+    drop(file);
+    let model = get_fallback_model_with_home(Some(dir.path().to_path_buf()));
+    assert_eq!(model, "gpt-5");
+
+    // Test case 7: invalid TOML syntax
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    file.write_all(b"model = \n").unwrap();
+    drop(file);
+    let model = get_fallback_model_with_home(Some(dir.path().to_path_buf()));
+    assert_eq!(model, "gpt-5");
+
+    // Test case 8: config file exists but model key is omitted
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    file.write_all(b"other_key = \"value\"\n").unwrap();
+    drop(file);
+    let model = get_fallback_model_with_home(Some(dir.path().to_path_buf()));
+    assert_eq!(model, "gpt-5");
+}
