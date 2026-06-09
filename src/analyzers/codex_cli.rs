@@ -31,7 +31,11 @@ pub(crate) fn get_fallback_model_with_home(home_dir: Option<PathBuf>) -> String 
             struct CodexConfig {
                 model: Option<String>,
             }
-            toml::from_str::<CodexConfig>(&content).ok()?.model
+            toml::from_str::<CodexConfig>(&content)
+                .ok()?
+                .model
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
         })
         .unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_string())
 }
