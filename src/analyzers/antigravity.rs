@@ -31,13 +31,13 @@ impl AntigravityCliAnalyzer {
 // Protobuf wire-format parser helper types and functions
 
 #[derive(Clone, Debug)]
-struct AgProtoField {
-    number: u32,
-    wire: u8,
-    varint: u64,
-    fixed: Vec<u8>,
-    bytes: Vec<u8>,
-    nested: Option<Vec<AgProtoField>>,
+pub(crate) struct AgProtoField {
+    pub(crate) number: u32,
+    pub(crate) wire: u8,
+    pub(crate) varint: u64,
+    pub(crate) fixed: Vec<u8>,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) nested: Option<Vec<AgProtoField>>,
 }
 
 const PB_WIRE_VARINT: u8 = 0;
@@ -62,7 +62,7 @@ fn read_varint(data: &[u8]) -> Option<(u64, &[u8])> {
     None
 }
 
-fn ag_proto_parse(data: &[u8]) -> Option<Vec<AgProtoField>> {
+pub(crate) fn ag_proto_parse(data: &[u8]) -> Option<Vec<AgProtoField>> {
     ag_proto_parse_depth(data, 0)
 }
 
@@ -370,6 +370,112 @@ fn antigravity_prompt_score(s: &str) -> i32 {
     score
 }
 
+// GenMetaInfo represents LLM generation metadata decoded from SQLite's `gen_metadata` table.
+//
+// The protobuf schema of this metadata corresponds to the Gemini/Google GenAI API response structure,
+// detailing the model ID, display name, and API usage stats (input/output/reasoning tokens).
+struct GenMetaInfo {
+    // Canonical model ID (e.g. "gemini-3-flash-a")
+    model_id: Option<String>,
+    // Human-readable model name (e.g. "Gemini 3.5 Flash (Medium)")
+    #[allow(dead_code)]
+    model_name: Option<String>,
+    // Number of tokens in the prompt (input)
+    input_tokens: u64,
+    // Number of tokens generated in the response (output, candidates)
+    output_tokens: u64,
+    // Sub-segment of output tokens spent on model reasoning/thinking
+    reasoning_tokens: u64,
+}
+
+// Parses raw protobuf wire-format fields from the `gen_metadata` table.
+//
+// Schema Mapping (from Google GenAI response structure):
+// - Field 1 (nested): The primary response metadata envelope
+//   - Field 19 (string): Model ID identifier
+//   - Field 21 (string): User-facing model name string
+//   - Field 4 (nested): Token usage statistics
+//     - Field 5 (varint): Total prompt input tokens
+//     - Field 2 (varint): Total output/candidates tokens
+//     - Field 3 (varint): Output tokens spent on reasoning
+fn parse_gen_metadata(fields: &[AgProtoField]) -> Option<GenMetaInfo> {
+    let f1 = fields.iter().find(|f| f.number == 1)?;
+    let nested = f1.nested.as_ref()?;
+
+    let mut model_id = None;
+    let mut model_name = None;
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut reasoning_tokens = 0;
+
+    for f in nested {
+        match f.number {
+            19 => {
+                model_id = ag_proto_string(f);
+            }
+            21 => {
+                model_name = ag_proto_string(f);
+            }
+            4 => {
+                if let Some(token_fields) = &f.nested {
+                    for tf in token_fields {
+                        match tf.number {
+                            5 => input_tokens = tf.varint,
+                            2 => output_tokens = tf.varint,
+                            3 => reasoning_tokens = tf.varint,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(GenMetaInfo {
+        model_id,
+        model_name,
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+    })
+}
+
+// Parses tool call events from step payload fields to extract action statistics.
+//
+// Schema Mapping (from Antigravity step action trajectory):
+// - Field 20 (nested): Execution metadata envelope
+//   - Field 7 (nested): Tool invocation call details
+//     - Field 2 (string): Name of the tool executed (e.g., "run_command", "view_file")
+fn extract_tool_stats_from_fields(fields: &[AgProtoField], stats: &mut Stats) {
+    let tool_calls = fields
+        .iter()
+        .filter(|f| f.number == 20)
+        .filter_map(|f| f.nested.as_deref())
+        .flatten()
+        .filter(|f20| f20.number == 7)
+        .filter_map(|f20| f20.nested.as_deref())
+        .filter_map(|nested7| {
+            nested7
+                .iter()
+                .find(|f7| f7.number == 2)
+                .and_then(ag_proto_string)
+        });
+
+    for tool_name in tool_calls {
+        stats.tool_calls += 1;
+        match tool_name.as_str() {
+            "run_command" => stats.terminal_commands += 1,
+            "view_file" => stats.files_read += 1,
+            "write_to_file" | "replace_file_content" | "multi_replace_file_content" => {
+                stats.files_edited += 1;
+            }
+            "grep_search" => stats.file_content_searches += 1,
+            _ => {}
+        }
+    }
+}
+
 #[async_trait]
 impl Analyzer for AntigravityCliAnalyzer {
     fn display_name(&self) -> &'static str {
@@ -410,6 +516,23 @@ impl Analyzer for AntigravityCliAnalyzer {
         )?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
+        let mut gen_meta_map = std::collections::HashMap::new();
+        if let Ok(mut gen_stmt) = conn.prepare("SELECT idx, data FROM gen_metadata") {
+            if let Ok(mut gen_rows) = gen_stmt.query([]) {
+                while let Ok(Some(row)) = gen_rows.next() {
+                    if let (Ok(idx), Ok(data)) = (row.get::<_, i32>(0), row.get::<_, Vec<u8>>(1)) {
+                        if !data.is_empty() {
+                            if let Some(fields) = ag_proto_parse(&data) {
+                                if let Some(info) = parse_gen_metadata(&fields) {
+                                    gen_meta_map.insert(idx, info);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut stmt =
             conn.prepare("SELECT idx, step_type, step_payload FROM steps ORDER BY idx")?;
 
@@ -423,6 +546,8 @@ impl Analyzer for AntigravityCliAnalyzer {
             .path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned());
+
+        let mut last_seen_model = None;
 
         while let Some(row) = rows.next()? {
             let idx: i32 = row.get(0)?;
@@ -457,17 +582,47 @@ impl Analyzer for AntigravityCliAnalyzer {
             let content = strs.join("\n\n");
 
             let (model, stats) = if role == MessageRole::Assistant {
-                let output_tokens = crate::analyzers::copilot::count_tokens(&content);
-                let cost =
-                    crate::models::calculate_total_cost("gemini-2.5-flash", 0, output_tokens, 0, 0);
-                (
-                    Some("gemini-2.5-flash".to_string()),
-                    Stats {
-                        output_tokens,
-                        cost,
-                        ..Default::default()
-                    },
-                )
+                let mut stats = Stats::default();
+                extract_tool_stats_from_fields(&fields, &mut stats);
+
+                if let Some(gen_meta) = gen_meta_map.get(&idx) {
+                    let model_name_str = gen_meta
+                        .model_id
+                        .clone()
+                        .unwrap_or_else(|| "gemini-3-flash-preview".to_string());
+                    let cost = crate::models::calculate_total_cost(
+                        &model_name_str,
+                        gen_meta.input_tokens,
+                        gen_meta.output_tokens,
+                        0,
+                        0,
+                    );
+                    stats.input_tokens = gen_meta.input_tokens;
+                    stats.output_tokens = gen_meta.output_tokens;
+                    stats.reasoning_tokens = gen_meta.reasoning_tokens;
+                    stats.cost = cost;
+                    last_seen_model = Some(model_name_str.clone());
+                    (Some(model_name_str), stats)
+                } else if gen_meta_map.is_empty() {
+                    // Fallback to estimation only if there's no gen_metadata at all in the db (e.g. unit tests)
+                    let model_name_str = last_seen_model
+                        .clone()
+                        .unwrap_or_else(|| "gemini-2.5-flash".to_string());
+                    let estimated_output_tokens = crate::analyzers::copilot::count_tokens(&content);
+                    let cost = crate::models::calculate_total_cost(
+                        &model_name_str,
+                        0,
+                        estimated_output_tokens,
+                        0,
+                        0,
+                    );
+                    stats.output_tokens = estimated_output_tokens;
+                    stats.cost = cost;
+                    (Some(model_name_str), stats)
+                } else {
+                    // Real database, but this step has no gen_metadata (e.g. tool execution step)
+                    (last_seen_model.clone(), stats)
+                }
             } else {
                 (None, Stats::default())
             };

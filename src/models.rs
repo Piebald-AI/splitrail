@@ -1773,6 +1773,7 @@ fn populate_defaults(
     add_alias!("gemini-3-flash-preview", "gemini-3-flash-preview");
     add_alias!("gemini-3-flash-preview-12-2025", "gemini-3-flash-preview");
     add_alias!("gemini-3-flash", "gemini-3-flash-preview");
+    add_alias!("gemini-3-flash-a", "gemini-3-flash-preview");
     add_alias!("gemini-3.1-pro-preview", "gemini-3.1-pro-preview");
     add_alias!(
         "gemini-3.1-pro-preview-customtools",
