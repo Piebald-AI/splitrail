@@ -265,6 +265,12 @@ fn is_gemini_cli_chat_path(path: &Path) -> bool {
             .any(|ancestor| ancestor.file_name().is_some_and(|name| name == "chats"))
 }
 
+fn is_internal_session_context(content: Option<&GeminiCliContent>) -> bool {
+    content
+        .map(GeminiCliContent::as_text)
+        .is_some_and(|text| text.trim_start().starts_with("<session_context>"))
+}
+
 fn messages_from_session(
     file_path: &Path,
     messages: Vec<GeminiCliMessage>,
@@ -282,6 +288,10 @@ fn messages_from_session(
                 timestamp,
                 content,
             } => {
+                if is_internal_session_context(content.as_ref()) {
+                    continue;
+                }
+
                 if fallback_session_name.is_none() {
                     let text_str = content
                         .as_ref()
@@ -368,6 +378,26 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
     Ok(messages_from_session(file_path, session.messages))
 }
 
+fn upsert_jsonl_message(
+    message_order: &mut Vec<String>,
+    latest_messages: &mut HashMap<String, GeminiCliMessage>,
+    message: GeminiCliMessage,
+) {
+    let id = match &message {
+        GeminiCliMessage::User { id, .. }
+        | GeminiCliMessage::Gemini { id, .. }
+        | GeminiCliMessage::System { id, .. }
+        | GeminiCliMessage::Error { id, .. }
+        | GeminiCliMessage::Info { id, .. }
+        | GeminiCliMessage::Warning { id, .. } => id.clone(),
+    };
+
+    if !latest_messages.contains_key(&id) {
+        message_order.push(id.clone());
+    }
+    latest_messages.insert(id, message);
+}
+
 fn parse_jsonl_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
     let content = std::fs::read_to_string(file_path)?;
     let mut message_order = Vec::new();
@@ -377,7 +407,16 @@ fn parse_jsonl_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>
         let mut line_bytes = line.as_bytes().to_vec();
         let value: simd_json::OwnedValue = simd_json::from_slice(&mut line_bytes)?;
 
-        if value.get("$set").is_some() {
+        if let Some(messages) = value
+            .get("$set")
+            .and_then(|set| set.get("messages"))
+            .and_then(|messages| messages.as_array())
+        {
+            for message_value in messages {
+                let mut message_bytes = simd_json::to_vec(message_value)?;
+                let message: GeminiCliMessage = simd_json::from_slice(&mut message_bytes)?;
+                upsert_jsonl_message(&mut message_order, &mut latest_messages, message);
+            }
             continue;
         }
 
@@ -385,18 +424,9 @@ fn parse_jsonl_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>
             continue;
         }
 
-        let id = match value.get("id").and_then(|v| v.as_str()) {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
-
         let mut message_bytes = line.as_bytes().to_vec();
         let message: GeminiCliMessage = simd_json::from_slice(&mut message_bytes)?;
-
-        if !latest_messages.contains_key(&id) {
-            message_order.push(id.clone());
-        }
-        latest_messages.insert(id, message);
+        upsert_jsonl_message(&mut message_order, &mut latest_messages, message);
     }
 
     let messages = message_order
@@ -419,6 +449,7 @@ impl Analyzer for GeminiCliAnalyzer {
         if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
             patterns.push(format!("{home_str}/.gemini/tmp/*/chats/*.json"));
+            patterns.push(format!("{home_str}/.gemini/tmp/*/chats/*.jsonl"));
         }
 
         patterns
