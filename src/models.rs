@@ -852,6 +852,18 @@ fn populate_defaults(
 
     // Anthropic Models
     add_model!(
+        "claude-fable-5",
+        PricingStructure::Flat {
+            input_per_1m: 10.0,
+            output_per_1m: 50.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 12.5,
+            cache_read_per_1m: 1.0
+        },
+        false
+    );
+    add_model!(
         "claude-opus-4-8",
         PricingStructure::Flat {
             input_per_1m: 5.0,
@@ -1725,6 +1737,10 @@ fn populate_defaults(
     add_alias!("openai.gpt-oss-safeguard-120b", "gpt-oss-safeguard-120b");
 
     // Anthropic aliases
+    add_alias!("claude-fable-5", "claude-fable-5");
+    add_alias!("claude-fable-5.0", "claude-fable-5");
+    add_alias!("claude-5-fable", "claude-fable-5");
+    add_alias!("claude-5.0-fable", "claude-fable-5");
     add_alias!("claude-opus-4.8", "claude-opus-4-8");
     add_alias!("claude-4.8-opus", "claude-opus-4-8");
     add_alias!("claude-opus-4-8", "claude-opus-4-8");
@@ -2466,6 +2482,20 @@ mod tests {
         approx_eq(input_cost, 5.0);
         approx_eq(output_cost, 25.0);
         approx_eq(cache_cost, 6.75);
+    }
+
+    #[test]
+    fn claude_fable_5_alias_maps_to_pricing() {
+        let model_info = get_model_info("claude-5-fable").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("claude-5-fable", 1_000_000);
+        let output_cost = calculate_output_cost("claude-5-fable", 1_000_000);
+        let cache_cost = calculate_cache_cost("claude-5-fable", 1_000_000, 1_000_000);
+
+        approx_eq(input_cost, 10.0);
+        approx_eq(output_cost, 50.0);
+        approx_eq(cache_cost, 13.5);
     }
 
     #[test]
