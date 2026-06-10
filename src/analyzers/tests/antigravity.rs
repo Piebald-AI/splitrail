@@ -31,9 +31,11 @@ fn encode_proto_string(field_number: u32, s: &str) -> Vec<u8> {
 
 fn encode_proto_timestamp(field_number: u32, seconds: i64, nanos: u32) -> Vec<u8> {
     let mut inner = Vec::new();
-    encode_varint((1 << 3) | 0, &mut inner);
+    // Field 1, wire type 0 (Varint)
+    encode_varint(1 << 3, &mut inner);
     encode_varint(seconds as u64, &mut inner);
-    encode_varint((2 << 3) | 0, &mut inner);
+    // Field 2, wire type 0 (Varint)
+    encode_varint(2 << 3, &mut inner);
     encode_varint(nanos as u64, &mut inner);
 
     let mut out = Vec::new();
