@@ -425,6 +425,124 @@ jobs:
           files: |
             artifacts/**
 
+  publish_homebrew:
+    name: Publish Homebrew formula
+    runs-on: ubuntu-latest
+    needs:
+      - crate_metadata
+      - publish_release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      HOMEBREW_TAP_REPOSITORY: Piebald-AI/homebrew-tap
+      HOMEBREW_TAP_FORMULA: splitrail
+      HOMEBREW_TAP_BRANCH: main
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+
+      - name: Fetch release app credentials from Infisical
+        uses: Infisical/secrets-action@8802effbe453d0576cd923567dcc2c97a1f54058 # v1.0.15
+        with:
+          method: oidc
+          identity-id: ${{ vars.INFISICAL_IDENTITY_ID }}
+          env-slug: prod
+          project-slug: ${{ vars.INFISICAL_PROJECT_SLUG }}
+
+      - name: Create GitHub App token
+        id: release-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ env.RELEASES_APP_CLIENT_ID }}
+          private-key: ${{ env.RELEASES_APP_PRIVATE_KEY }}
+          owner: Piebald-AI
+          repositories: homebrew-tap
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ env.HOMEBREW_TAP_REPOSITORY }}
+          token: ${{ steps.release-app-token.outputs.token }}
+          path: homebrew-tap
+          ref: ${{ env.HOMEBREW_TAP_BRANCH }}
+          persist-credentials: false
+
+      - name: Update formula URLs and checksums
+        shell: bash
+        env:
+          VERSION: ${{ needs.crate_metadata.outputs.version }}
+          FORMULA: ${{ env.HOMEBREW_TAP_FORMULA }}
+        run: |
+          set -euo pipefail
+
+          formula_path="homebrew-tap/Formula/${FORMULA}.rb"
+          release_base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}"
+          targets=(
+            "aarch64-apple-darwin"
+            "x86_64-apple-darwin"
+            "aarch64-unknown-linux-gnu"
+            "x86_64-unknown-linux-gnu"
+          )
+
+          if [[ ! -f "$formula_path" ]]; then
+            echo "Formula not found: $formula_path" >&2
+            exit 1
+          fi
+
+          for target in "${targets[@]}"; do
+            artifact="${FORMULA}-v${VERSION}-${target}.tar.gz"
+            artifact_path="artifacts/${artifact}/${artifact}"
+            url="${release_base_url}/${artifact}"
+
+            if [[ ! -f "$artifact_path" ]]; then
+              echo "Artifact not found: $artifact_path" >&2
+              exit 1
+            fi
+
+            sha256=$(sha256sum "$artifact_path" | awk '{print $1}')
+            TARGET="$target" URL="$url" SHA256="$sha256" ruby -e '
+              path = ARGV.fetch(0)
+              formula = ENV.fetch("FORMULA")
+              target = ENV.fetch("TARGET")
+              url = ENV.fetch("URL")
+              sha256 = ENV.fetch("SHA256")
+              lines = File.readlines(path)
+              index = lines.index { |line| line.include?("#{formula}-v") && line.include?("-#{target}.tar.gz") }
+              abort "could not find Homebrew url for #{formula} #{target}" unless index
+              abort "could not find Homebrew sha256 for #{target}" unless lines[index + 1]&.match?(/^\s*sha256 "/)
+              lines[index] = lines[index].sub(/url ".*"/, "url \"#{url}\"")
+              lines[index + 1] = lines[index + 1].sub(/sha256 "[0-9a-f]+"/, "sha256 \"#{sha256}\"")
+              File.write(path, lines.join)
+            ' "$formula_path"
+          done
+
+      - name: Commit and push formula update
+        shell: bash
+        working-directory: homebrew-tap
+        env:
+          VERSION: ${{ needs.crate_metadata.outputs.version }}
+          FORMULA: ${{ env.HOMEBREW_TAP_FORMULA }}
+          BRANCH: ${{ env.HOMEBREW_TAP_BRANCH }}
+          TAP_REPOSITORY: ${{ env.HOMEBREW_TAP_REPOSITORY }}
+          TAP_TOKEN: ${{ steps.release-app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "Piebald Releases"
+          git config user.email "releases@piebald.ai"
+
+          if git diff --quiet -- "Formula/${FORMULA}.rb"; then
+            echo "Formula/${FORMULA}.rb is already up to date"
+            exit 0
+          fi
+
+          git add "Formula/${FORMULA}.rb"
+          git commit -m "Update ${FORMULA} to v${VERSION}"
+          git -c http.extraheader="AUTHORIZATION: bearer ${TAP_TOKEN}" push "https://github.com/${TAP_REPOSITORY}.git" "HEAD:${BRANCH}"
+
   # TODO: Enable after initial release.
   # winget:
   #   name: Publish to Winget
