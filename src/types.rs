@@ -221,6 +221,7 @@ pub enum Application {
     OpenCode,
     PiAgent,
     Piebald,
+    AntigravityCli,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

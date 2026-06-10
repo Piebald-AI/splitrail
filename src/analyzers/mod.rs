@@ -1,3 +1,4 @@
+pub mod antigravity;
 pub mod claude_code;
 pub mod cline;
 pub mod codex_cli;
@@ -13,6 +14,7 @@ pub mod piebald;
 pub mod qwen_code;
 pub mod roo_code;
 
+pub use antigravity::AntigravityCliAnalyzer;
 pub use claude_code::ClaudeCodeAnalyzer;
 pub use cline::ClineAnalyzer;
 pub use codex_cli::CodexCliAnalyzer;
