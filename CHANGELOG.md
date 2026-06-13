@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.7] - 2026-06-13
+- feat(analyzer): add Antigravity CLI session parser with token and tool metrics (#179) - @jimyag
+- Do not quit on Esc; instead, Esc triggers drill-down → aggregate (#186) - @mike1858
+- Auto-update the Homebrew tap when releasing (#183) - @signadou
+- Fix commit author for Homebrew tap updates (#184) - @signadou
+
+## [3.5.6] - 2026-06-09
+- I forgot to update the version itself, so I released 3.5.6.
+
 ## [3.5.5] - 2026-06-09
 - Claude Fable 5 (#180) - @mike1858
 - Fix Gemini CLI JSONL session parsing (#171) - @mike1858
