@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
 
+# Serialize releases so two overlapping v* tags can't race on the Homebrew tap push.
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
 env:
   CICD_INTERMEDIATES_DIR: "_cicd-intermediates"
   CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
@@ -23,6 +28,18 @@ jobs:
           cargo metadata --no-deps --format-version 1 | jq -r '"version=" + .packages[0].version' | tee -a $GITHUB_OUTPUT
           cargo metadata --no-deps --format-version 1 | jq -r '"maintainer=" + .packages[0].authors[0]' | tee -a $GITHUB_OUTPUT
           cargo metadata --no-deps --format-version 1 | jq -r '"homepage=" + .packages[0].homepage' | tee -a $GITHUB_OUTPUT
+      - name: Verify tag matches crate version
+        shell: bash
+        env:
+          VERSION: ${{ steps.crate_metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$tag_version" != "$VERSION" ]]; then
+            echo "Tag v${tag_version} does not match crate version ${VERSION}" >&2
+            exit 1
+          fi
+          echo "Tag matches crate version: ${VERSION}"
     outputs:
       name: ${{ steps.crate_metadata.outputs.name }}
       version: ${{ steps.crate_metadata.outputs.version }}
@@ -90,7 +107,7 @@ jobs:
 
       - name: Fetch secrets from Infisical
         if: startsWith(matrix.job.os, 'windows-') || startsWith(matrix.job.os, 'macos-')
-        uses: Infisical/secrets-action@v1.0.15
+        uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995 # v1.0.16
         with:
           method: oidc
           identity-id: ${{ vars.INFISICAL_IDENTITY_ID }}
@@ -445,7 +462,7 @@ jobs:
           path: artifacts
 
       - name: Fetch release app credentials from Infisical
-        uses: Infisical/secrets-action@8802effbe453d0576cd923567dcc2c97a1f54058 # v1.0.15
+        uses: Infisical/secrets-action@77ab1f4ccd183a543cb5b42435fbd181189f4995 # v1.0.16
         with:
           method: oidc
           identity-id: ${{ vars.INFISICAL_IDENTITY_ID }}
@@ -460,6 +477,23 @@ jobs:
           private-key: ${{ env.RELEASES_APP_PRIVATE_KEY }}
           owner: Piebald-AI
           repositories: homebrew-tap
+          permission-contents: write
+
+      - name: Resolve release app identity
+        id: release-app-identity
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          user_id=$(gh api "/users/${APP_SLUG}[bot]" --jq .id)
+          # Guard against a missing/null id (jq prints "null" and exits 0) so a
+          # malformed value can't flow into the noreply commit email downstream.
+          if [[ ! "$user_id" =~ ^[0-9]+$ ]]; then
+            echo "Resolved an invalid user id for ${APP_SLUG}[bot]: '${user_id}'" >&2
+            exit 1
+          fi
+          echo "user-id=${user_id}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout Homebrew tap
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -513,10 +547,15 @@ jobs:
               index = lines.index { |line| line.include?("#{formula}-v") && line.include?("-#{target}.tar.gz") }
               abort "could not find Homebrew url for #{formula} #{target}" unless index
               abort "could not find Homebrew sha256 for #{target}" unless lines[index + 1]&.match?(/^\s*sha256 "/)
-              lines[index] = lines[index].sub(/url ".*"/, "url \"#{url}\"")
-              lines[index + 1] = lines[index + 1].sub(/sha256 "[0-9a-f]+"/, "sha256 \"#{sha256}\"")
+              abort "could not substitute url for #{formula} #{target}" if lines[index].sub!(/url ".*"/, "url \"#{url}\"").nil?
+              abort "could not substitute sha256 for #{formula} #{target}" if lines[index + 1].sub!(/sha256 "[0-9a-f]+"/, "sha256 \"#{sha256}\"").nil?
               File.write(path, lines.join)
             ' "$formula_path"
+
+            # Guard against the url/sha256 drifting apart: confirm both the exact
+            # rewritten url and its matching checksum are present in the formula.
+            grep -Fq "url \"${url}\"" "$formula_path" || { echo "Failed to update url for ${target} in $formula_path" >&2; exit 1; }
+            grep -Fq "sha256 \"${sha256}\"" "$formula_path" || { echo "Failed to update sha256 for ${target} in $formula_path" >&2; exit 1; }
           done
 
       - name: Commit and push formula update
@@ -528,11 +567,13 @@ jobs:
           BRANCH: ${{ env.HOMEBREW_TAP_BRANCH }}
           TAP_REPOSITORY: ${{ env.HOMEBREW_TAP_REPOSITORY }}
           TAP_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
+          APP_USER_ID: ${{ steps.release-app-identity.outputs.user-id }}
         run: |
           set -euo pipefail
 
-          git config user.name "Piebald Releases"
-          git config user.email "releases@piebald.ai"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
 
           if git diff --quiet -- "Formula/${FORMULA}.rb"; then
             echo "Formula/${FORMULA}.rb is already up to date"
@@ -541,7 +582,27 @@ jobs:
 
           git add "Formula/${FORMULA}.rb"
           git commit -m "Update ${FORMULA} to v${VERSION}"
-          git -c http.extraheader="AUTHORIZATION: bearer ${TAP_TOKEN}" push "https://github.com/${TAP_REPOSITORY}.git" "HEAD:${BRANCH}"
+
+          # Authenticate with the documented Basic form for ghs_ installation
+          # tokens over HTTPS (x-access-token:<token>), which is the path
+          # actions/checkout uses internally.
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${TAP_TOKEN}" | base64 -w0)"
+
+          # Retry against concurrent pushes to the tap branch: rebase onto the
+          # latest remote tip and try again rather than failing the release on a race.
+          remote="https://github.com/${TAP_REPOSITORY}.git"
+          for attempt in 1 2 3 4 5; do
+            if git -c http.extraheader="${auth_header}" push "$remote" "HEAD:${BRANCH}"; then
+              echo "Pushed formula update on attempt ${attempt}"
+              exit 0
+            fi
+            echo "Push attempt ${attempt} failed; rebasing on latest ${BRANCH} and retrying" >&2
+            git -c http.extraheader="${auth_header}" fetch "$remote" "${BRANCH}"
+            git rebase FETCH_HEAD
+            sleep $((attempt * 3))
+          done
+          echo "Failed to push formula update after multiple attempts" >&2
+          exit 1
 
   # TODO: Enable after initial release.
   # winget:
