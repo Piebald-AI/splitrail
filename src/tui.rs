@@ -611,8 +611,9 @@ async fn run_app(
                 _ => continue,
             };
 
-            // Handle quitting.
-            if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+            // Handle quitting. Esc is intentionally *not* a quit key; it acts as
+            // a context-aware "go back"/cancel below.
+            if matches!(key.code, KeyCode::Char('q')) {
                 break;
             }
 
@@ -995,6 +996,18 @@ async fn run_app(
 
                     needs_redraw = true;
                 }
+                // Esc acts as a context-aware "go back": from the period
+                // drill-down (session) view it returns to the aggregate view.
+                // At the top-level aggregate view it does nothing (date-jump
+                // cancellation is handled earlier, before this match).
+                KeyCode::Esc => {
+                    if let StatsViewMode::Session = *stats_view_mode {
+                        *stats_view_mode = StatsViewMode::Aggregate;
+                        date_jump_active = false;
+                        date_jump_buffer.clear();
+                        needs_redraw = true;
+                    }
+                }
                 KeyCode::Enter => {
                     if let StatsViewMode::Aggregate = *stats_view_mode
                         && let Some(current_stats) = display_stats.get(*selected_tab)
@@ -1256,11 +1269,11 @@ fn draw_ui(
                     };
 
                     format!(
-                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q/Esc to quit"
+                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q to quit"
                     )
                 }
                 StatsViewMode::Session => {
-                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • e to toggle empty periods • s to toggle summary • m to cycle day/week/month/year • Ctrl+T for aggregate view • q/Esc to quit".to_string()
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • e to toggle empty periods • s to toggle summary • m to cycle day/week/month/year • Esc or Ctrl+T for aggregate view • q to quit".to_string()
                 }
             };
 
@@ -1339,8 +1352,8 @@ fn draw_ui(
         frame.render_widget(no_data_message, chunks[1]);
 
         // Help text for no-data view
-        let help = Paragraph::new("Press q/Esc to quit")
-            .style(Style::default().add_modifier(Modifier::DIM));
+        let help =
+            Paragraph::new("Press q to quit").style(Style::default().add_modifier(Modifier::DIM));
         frame.render_widget(help, chunks[2]);
     }
 }
