@@ -144,6 +144,8 @@ async fn main() {
         decimal_places: cli
             .decimal_places
             .unwrap_or(config.formatting.decimal_places),
+        currency_symbol: config.formatting.currency_symbol,
+        cost_decimal_places: config.formatting.cost_decimal_places,
     };
 
     match cli.command {
@@ -325,6 +327,8 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
         use_human: config_file.formatting.number_human,
         locale: config_file.formatting.locale,
         decimal_places: config_file.formatting.decimal_places,
+        currency_symbol: config_file.formatting.currency_symbol,
+        cost_decimal_places: config_file.formatting.cost_decimal_places,
     };
 
     match config::Config::load() {

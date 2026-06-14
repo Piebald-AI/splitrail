@@ -273,6 +273,10 @@ pub struct DailyStats {
     /// Per-model aggregated statistics (tokens, cost, etc.) for this day.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_stats: BTreeMap<String, ModelStats>,
+    /// Apps/tools that contributed this period (populated for the combined
+    /// "All Tools" view so the table can list which apps were used).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub apps: BTreeMap<String, u32>,
 }
 
 impl std::ops::AddAssign<&DailyStats> for DailyStats {
@@ -289,6 +293,9 @@ impl std::ops::AddAssign<&DailyStats> for DailyStats {
                 .entry(model.clone())
                 .or_insert_with(|| ModelStats::new(model.clone()))
                 .add_model_stats(model_stat);
+        }
+        for (app, count) in &rhs.apps {
+            *self.apps.entry(app.clone()).or_insert(0) += count;
         }
     }
 }
@@ -312,6 +319,14 @@ impl std::ops::SubAssign<&DailyStats> for DailyStats {
                 existing.sub_model_stats(model_stat);
                 if existing.message_count == 0 {
                     self.model_stats.remove(model);
+                }
+            }
+        }
+        for (app, count) in &rhs.apps {
+            if let Some(existing) = self.apps.get_mut(app) {
+                *existing = existing.saturating_sub(*count);
+                if *existing == 0 {
+                    self.apps.remove(app);
                 }
             }
         }
@@ -833,6 +848,28 @@ mod tests {
         stats -= &day2;
         assert_eq!(stats.models.get("gpt-4"), None); // removed at 0
         assert_eq!(stats.models.get("claude"), None);
+    }
+
+    #[test]
+    fn daily_stats_apps_ref_counting() {
+        let mut stats = DailyStats::default();
+        let day1 = DailyStats {
+            apps: [("Claude Code".to_string(), 1)].into_iter().collect(),
+            ..Default::default()
+        };
+        let day2 = DailyStats {
+            apps: [("Codex CLI".to_string(), 1)].into_iter().collect(),
+            ..Default::default()
+        };
+
+        stats += &day1;
+        stats += &day2;
+        assert_eq!(stats.apps.get("Claude Code"), Some(&1));
+        assert_eq!(stats.apps.get("Codex CLI"), Some(&1));
+
+        stats -= &day1;
+        assert_eq!(stats.apps.get("Claude Code"), None); // removed at 0
+        assert_eq!(stats.apps.get("Codex CLI"), Some(&1));
     }
 
     fn make_session_contrib(

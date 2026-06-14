@@ -44,18 +44,87 @@ pub struct UploadState {
     pub last_date_uploaded: i64,
 }
 
+fn default_currency_symbol() -> String {
+    "$".to_string()
+}
+
+fn default_view() -> String {
+    "daily".to_string()
+}
+
+fn default_cost_decimal_places() -> usize {
+    2
+}
+
+fn default_accent_color() -> String {
+    "cyan".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FormattingConfig {
     pub number_comma: bool,
     pub number_human: bool,
     pub locale: String,
     pub decimal_places: usize,
+    /// Symbol shown before cost amounts (e.g. "$", "€", "£"). Default "$".
+    #[serde(default = "default_currency_symbol")]
+    pub currency_symbol: String,
+    /// Decimal places used for cost amounts (e.g. 2 -> $1.23, 0 -> $1). Default 2.
+    #[serde(default = "default_cost_decimal_places")]
+    pub cost_decimal_places: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TuiConfig {
+    #[serde(default)]
     pub reverse_sort_default: bool,
+    #[serde(default)]
     pub hide_empty_periods: bool,
+    /// Aggregation the TUI opens in: "daily" | "weekly" | "monthly" | "yearly".
+    #[serde(default = "default_view")]
+    pub default_view: String,
+    /// Tab the TUI opens on, by tool name (e.g. "Claude Code"). Empty / "All
+    /// Tools" opens the combined first tab.
+    #[serde(default)]
+    pub default_tab: String,
+    /// Require a second 'q' to confirm before quitting the TUI.
+    #[serde(default)]
+    pub confirm_quit: bool,
+    /// Columns to hide from the aggregate table, e.g. ["models", "cached",
+    /// "reason"]. Recognized: cached, input, output, reason, convs, tools,
+    /// apps, models.
+    #[serde(default)]
+    pub hidden_columns: Vec<String>,
+    /// Accent color for the title, tab bar and selected row: "cyan" | "green"
+    /// | "magenta" | "blue" | "red" | "yellow" | "white".
+    #[serde(default = "default_accent_color")]
+    pub accent_color: String,
+    /// Tint each Cost cell by magnitude (dim -> green -> yellow -> red).
+    #[serde(default)]
+    pub color_costs: bool,
+    /// Show the "AGENTIC DEVELOPMENT TOOL ACTIVITY ANALYSIS" header banner.
+    #[serde(default = "default_true")]
+    pub show_header: bool,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            reverse_sort_default: false,
+            hide_empty_periods: false,
+            default_view: default_view(),
+            default_tab: String::new(),
+            confirm_quit: false,
+            hidden_columns: Vec::new(),
+            accent_color: default_accent_color(),
+            color_costs: false,
+            show_header: true,
+        }
+    }
 }
 
 impl Default for Config {
@@ -75,6 +144,8 @@ impl Default for Config {
                 number_human: false,
                 locale: "en".to_string(),
                 decimal_places: 2,
+                currency_symbol: default_currency_symbol(),
+                cost_decimal_places: default_cost_decimal_places(),
             },
             tui: TuiConfig::default(),
             models: HashMap::new(),
