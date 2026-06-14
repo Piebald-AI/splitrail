@@ -28,6 +28,8 @@ pub struct NumberFormatOptions {
     pub use_human: bool,
     pub locale: String,
     pub decimal_places: usize,
+    pub currency_symbol: String,
+    pub cost_decimal_places: usize,
 }
 
 /// Format a number for display. Accepts both u32 and u64.
@@ -108,6 +110,8 @@ pub fn format_number_fit(
         use_human: true,
         use_comma: false,
         locale: options.locale.clone(),
+        currency_symbol: options.currency_symbol.clone(),
+        cost_decimal_places: options.cost_decimal_places,
         decimal_places: options.decimal_places,
     };
     let human = format_number(n, &human_options);
@@ -121,6 +125,8 @@ pub fn format_number_fit(
             use_human: true,
             use_comma: false,
             locale: options.locale.clone(),
+            currency_symbol: options.currency_symbol.clone(),
+            cost_decimal_places: options.cost_decimal_places,
             decimal_places: dp,
         };
         let compact = format_number(n, &compact_options);
@@ -140,6 +146,8 @@ pub fn format_number_fit(
         use_human: true,
         use_comma: false,
         locale: options.locale.clone(),
+        currency_symbol: options.currency_symbol.clone(),
+        cost_decimal_places: options.cost_decimal_places,
         decimal_places: 0,
     };
     format_number(n, &minimal)

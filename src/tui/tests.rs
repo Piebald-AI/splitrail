@@ -4,15 +4,69 @@ use crate::tui::logic::{
     aggregate_daily_stats_by_year, date_matches_buffer, filtered_aggregate_keys,
 };
 use crate::tui::{
-    PeriodFilter, build_display_stats, create_upload_progress_callback, format_month_for_display,
-    format_week_for_display, format_year_for_display, show_upload_error, show_upload_success,
+    AggregateViewMode, PeriodFilter, build_display_stats, cost_heat,
+    create_upload_progress_callback, format_month_for_display, format_week_for_display,
+    format_year_for_display, parse_accent, show_upload_error, show_upload_success,
     update_period_filters, update_table_states, update_window_offsets,
 };
 use crate::types::{
     AgenticCodingToolStats, CompactDate, DailyStats, MultiAnalyzerStats, Stats, TuiStats,
 };
+use ratatui::style::Color;
 use ratatui::widgets::TableState;
 use std::collections::BTreeMap;
+
+// ============================================================================
+// CONFIG-DRIVEN APPEARANCE TESTS
+// ============================================================================
+
+#[test]
+fn aggregate_view_from_config() {
+    assert!(matches!(
+        AggregateViewMode::from_config("daily"),
+        AggregateViewMode::Daily
+    ));
+    assert!(matches!(
+        AggregateViewMode::from_config("WEEK"),
+        AggregateViewMode::Weekly
+    ));
+    assert!(matches!(
+        AggregateViewMode::from_config(" Monthly "),
+        AggregateViewMode::Monthly
+    ));
+    assert!(matches!(
+        AggregateViewMode::from_config("year"),
+        AggregateViewMode::Yearly
+    ));
+    assert!(matches!(
+        AggregateViewMode::from_config("nonsense"),
+        AggregateViewMode::Daily
+    ));
+}
+
+#[test]
+fn accent_color_parsing() {
+    assert_eq!(parse_accent("green"), Color::Green);
+    assert_eq!(parse_accent("MAGENTA"), Color::Magenta);
+    assert_eq!(parse_accent("purple"), Color::Magenta);
+    assert_eq!(parse_accent("blue"), Color::Blue);
+    assert_eq!(parse_accent("not-a-color"), Color::Cyan); // default
+}
+
+#[test]
+fn cost_heatmap_scales_with_magnitude() {
+    // max == 0 -> green floor
+    assert_eq!(cost_heat(50, 0), Color::Green);
+    // higher cost -> more red, less green
+    if let (Color::Rgb(lr, lg, _), Color::Rgb(hr, hg, _)) =
+        (cost_heat(10, 100), cost_heat(100, 100))
+    {
+        assert!(hr > lr, "redder at higher cost");
+        assert!(hg < lg, "less green at higher cost");
+    } else {
+        panic!("expected Rgb colors");
+    }
+}
 
 // ============================================================================
 // TABLE STATE MANAGEMENT TESTS (tui.rs helpers)
@@ -34,6 +88,7 @@ fn make_tool_stats(name: &str, has_data: bool) -> AgenticCodingToolStats {
                     ..TuiStats::default()
                 },
                 model_stats: BTreeMap::new(),
+                apps: BTreeMap::new(),
             },
         );
     }
@@ -65,6 +120,7 @@ fn make_daily_stats(
             ..TuiStats::default()
         },
         model_stats: BTreeMap::new(),
+        apps: BTreeMap::new(),
     }
 }
 
@@ -161,6 +217,8 @@ fn test_upload_progress_callback_runs_without_panicking() {
         use_comma: false,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 2,
     };
 
@@ -177,6 +235,8 @@ fn test_show_upload_success_and_error_do_not_panic() {
         use_comma: true,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 2,
     };
 

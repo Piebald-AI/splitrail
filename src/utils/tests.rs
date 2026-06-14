@@ -9,6 +9,8 @@ fn test_format_number_comma() {
         use_comma: true,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 2,
     };
 
@@ -23,6 +25,8 @@ fn test_format_number_human() {
         use_comma: false,
         use_human: true,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 1,
     };
 
@@ -44,6 +48,8 @@ fn test_format_number_fit_preferred_format_fits() {
         use_comma: true,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 1,
     };
 
@@ -62,6 +68,8 @@ fn test_format_number_fit_comma_overflow_falls_back_to_human() {
         use_comma: true,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 1,
     };
 
@@ -85,6 +93,8 @@ fn test_format_number_fit_narrow_column_forces_compact() {
         use_comma: true,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 2,
     };
 
@@ -105,6 +115,8 @@ fn test_format_number_fit_plain_digits_fallback() {
         use_comma: true,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 2,
     };
 
@@ -122,6 +134,8 @@ fn test_format_number_fit_u64_totals() {
         use_comma: true,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 1,
     };
 
@@ -145,6 +159,8 @@ fn test_format_number_fit_human_mode_passthrough() {
         use_comma: false,
         use_human: true,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 1,
     };
 
@@ -159,6 +175,8 @@ fn test_format_number_fit_plain_mode_overflow() {
         use_comma: false,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 1,
     };
 
@@ -178,6 +196,8 @@ fn test_format_number_fit_zero() {
         use_comma: true,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 1,
     };
     assert_eq!(format_number_fit(0_u64, &options, 12), "0");
@@ -191,6 +211,8 @@ fn test_format_number_fit_exact_boundary() {
         use_comma: false,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 1,
     };
 
@@ -207,6 +229,8 @@ fn test_format_number_plain() {
         use_comma: false,
         use_human: false,
         locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
         decimal_places: 2,
     };
 

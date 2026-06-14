@@ -76,8 +76,18 @@ impl Analyzer for ClaudeCodeAnalyzer {
         let project_hash = extract_and_hash_project_id(&source.path);
         let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
         let file = File::open(&source.path)?;
-        let (messages, _, _, _) =
+        let (mut messages, summaries, _uuids, fallback) =
             parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
+        // Apply the within-file session name (summary, else first-message fallback)
+        // so the live TUI session view shows real titles, not just the upload path.
+        let name = summaries.into_iter().next().map(|(_, n)| n).or(fallback);
+        if let Some(name) = name {
+            for m in &mut messages {
+                if m.session_name.is_none() {
+                    m.session_name = Some(name.clone());
+                }
+            }
+        }
         Ok(messages)
     }
 

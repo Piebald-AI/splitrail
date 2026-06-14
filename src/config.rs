@@ -44,18 +44,87 @@ pub struct UploadState {
     pub last_date_uploaded: i64,
 }
 
+fn default_currency_symbol() -> String {
+    "$".to_string()
+}
+
+fn default_view() -> String {
+    "daily".to_string()
+}
+
+fn default_cost_decimal_places() -> usize {
+    2
+}
+
+fn default_accent_color() -> String {
+    "cyan".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FormattingConfig {
     pub number_comma: bool,
     pub number_human: bool,
     pub locale: String,
     pub decimal_places: usize,
+    /// Symbol shown before cost amounts (e.g. "$", "€", "£"). Default "$".
+    #[serde(default = "default_currency_symbol")]
+    pub currency_symbol: String,
+    /// Decimal places used for cost amounts (e.g. 2 -> $1.23, 0 -> $1). Default 2.
+    #[serde(default = "default_cost_decimal_places")]
+    pub cost_decimal_places: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TuiConfig {
+    #[serde(default)]
     pub reverse_sort_default: bool,
+    #[serde(default)]
     pub hide_empty_periods: bool,
+    /// Aggregation the TUI opens in: "daily" | "weekly" | "monthly" | "yearly".
+    #[serde(default = "default_view")]
+    pub default_view: String,
+    /// Tab the TUI opens on, by tool name (e.g. "Claude Code"). Empty / "All
+    /// Tools" opens the combined first tab.
+    #[serde(default)]
+    pub default_tab: String,
+    /// Require a second 'q' to confirm before quitting the TUI.
+    #[serde(default)]
+    pub confirm_quit: bool,
+    /// Columns to hide from the aggregate table, e.g. ["models", "cached",
+    /// "reason"]. Recognized: cached, input, output, reason, convs, tools,
+    /// apps, models.
+    #[serde(default)]
+    pub hidden_columns: Vec<String>,
+    /// Accent color for the title, tab bar and selected row: "cyan" | "green"
+    /// | "magenta" | "blue" | "red" | "yellow" | "white".
+    #[serde(default = "default_accent_color")]
+    pub accent_color: String,
+    /// Tint each Cost cell by magnitude (dim -> green -> yellow -> red).
+    #[serde(default)]
+    pub color_costs: bool,
+    /// Show the "AGENTIC DEVELOPMENT TOOL ACTIVITY ANALYSIS" header banner.
+    #[serde(default = "default_true")]
+    pub show_header: bool,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            reverse_sort_default: false,
+            hide_empty_periods: false,
+            default_view: default_view(),
+            default_tab: String::new(),
+            confirm_quit: false,
+            hidden_columns: Vec::new(),
+            accent_color: default_accent_color(),
+            color_costs: false,
+            show_header: true,
+        }
+    }
 }
 
 impl Default for Config {
@@ -75,6 +144,8 @@ impl Default for Config {
                 number_human: false,
                 locale: "en".to_string(),
                 decimal_places: 2,
+                currency_symbol: default_currency_symbol(),
+                cost_decimal_places: default_cost_decimal_places(),
             },
             tui: TuiConfig::default(),
             models: HashMap::new(),
@@ -281,6 +352,11 @@ pub fn show_config() -> Result<()> {
             println!("   Number Human: {}", config.formatting.number_human);
             println!("   Locale: {}", config.formatting.locale);
             println!("   Decimal Places: {}", config.formatting.decimal_places);
+            println!("   Currency Symbol: {}", config.formatting.currency_symbol);
+            println!(
+                "   Cost Decimal Places: {}",
+                config.formatting.cost_decimal_places
+            );
             println!(
                 "   TUI Reverse Sort Default: {}",
                 config.tui.reverse_sort_default
@@ -289,6 +365,27 @@ pub fn show_config() -> Result<()> {
                 "   TUI Hide Empty Periods: {}",
                 config.tui.hide_empty_periods
             );
+            println!("   TUI Default View: {}", config.tui.default_view);
+            println!(
+                "   TUI Default Tab: {}",
+                if config.tui.default_tab.is_empty() {
+                    "All Tools"
+                } else {
+                    &config.tui.default_tab
+                }
+            );
+            println!("   TUI Confirm Quit: {}", config.tui.confirm_quit);
+            println!(
+                "   TUI Hidden Columns: {}",
+                if config.tui.hidden_columns.is_empty() {
+                    "None".to_string()
+                } else {
+                    config.tui.hidden_columns.join(", ")
+                }
+            );
+            println!("   TUI Accent Color: {}", config.tui.accent_color);
+            println!("   TUI Color Costs: {}", config.tui.color_costs);
+            println!("   TUI Show Header: {}", config.tui.show_header);
             if !config.models.is_empty() {
                 println!("   Custom Models: {}", config.models.len());
             }
@@ -340,6 +437,13 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
             let places = value.parse::<usize>().context("Invalid number value")?;
             config.formatting.decimal_places = places;
         }
+        "currency-symbol" => {
+            config.formatting.currency_symbol = value.to_string();
+        }
+        "cost-decimal-places" => {
+            let places = value.parse::<usize>().context("Invalid number value")?;
+            config.formatting.cost_decimal_places = places;
+        }
         "reverse-sort-default" => {
             let enabled = value
                 .parse::<bool>()
@@ -351,6 +455,38 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
                 .parse::<bool>()
                 .context("Invalid boolean value. Use 'true' or 'false'")?;
             config.tui.hide_empty_periods = enabled;
+        }
+        "default-view" => {
+            config.tui.default_view = value.to_string();
+        }
+        "default-tab" => {
+            config.tui.default_tab = value.to_string();
+        }
+        "confirm-quit" => {
+            config.tui.confirm_quit = value
+                .parse::<bool>()
+                .context("Invalid boolean value. Use 'true' or 'false'")?;
+        }
+        "hidden-columns" => {
+            config.tui.hidden_columns = value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .collect();
+        }
+        "accent-color" => {
+            config.tui.accent_color = value.to_string();
+        }
+        "color-costs" => {
+            config.tui.color_costs = value
+                .parse::<bool>()
+                .context("Invalid boolean value. Use 'true' or 'false'")?;
+        }
+        "show-header" => {
+            config.tui.show_header = value
+                .parse::<bool>()
+                .context("Invalid boolean value. Use 'true' or 'false'")?;
         }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }
@@ -461,6 +597,15 @@ is_estimated = true
         set_config_value("decimal-places", "3").expect("set decimal-places");
         set_config_value("reverse-sort-default", "true").expect("set reverse-sort-default");
         set_config_value("hide-empty-periods", "true").expect("set hide-empty-periods");
+        set_config_value("currency-symbol", "€").expect("set currency-symbol");
+        set_config_value("cost-decimal-places", "0").expect("set cost-decimal-places");
+        set_config_value("default-view", "monthly").expect("set default-view");
+        set_config_value("default-tab", "Cline").expect("set default-tab");
+        set_config_value("confirm-quit", "true").expect("set confirm-quit");
+        set_config_value("hidden-columns", "reason, models").expect("set hidden-columns");
+        set_config_value("accent-color", "magenta").expect("set accent-color");
+        set_config_value("color-costs", "true").expect("set color-costs");
+        set_config_value("show-header", "false").expect("set show-header");
 
         let cfg = Config::load()
             .expect("load config")
@@ -475,6 +620,15 @@ is_estimated = true
         assert_eq!(cfg.formatting.decimal_places, 3);
         assert!(cfg.tui.reverse_sort_default);
         assert!(cfg.tui.hide_empty_periods);
+        assert_eq!(cfg.formatting.currency_symbol, "€");
+        assert_eq!(cfg.formatting.cost_decimal_places, 0);
+        assert_eq!(cfg.tui.default_view, "monthly");
+        assert_eq!(cfg.tui.default_tab, "Cline");
+        assert!(cfg.tui.confirm_quit);
+        assert_eq!(cfg.tui.hidden_columns, vec!["reason", "models"]);
+        assert_eq!(cfg.tui.accent_color, "magenta");
+        assert!(cfg.tui.color_costs);
+        assert!(!cfg.tui.show_header);
 
         let err = set_config_value("unknown-key", "value").unwrap_err();
         let msg = format!("{err}");

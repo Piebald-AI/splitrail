@@ -119,7 +119,7 @@ enum ConfigSubcommands {
     Show,
     /// Set configuration value
     Set {
-        /// Configuration key (api-token, auto-upload, number-comma, number-human, locale, decimal-places, reverse-sort-default, hide-empty-periods)
+        /// Configuration key (api-token, auto-upload, upload-today-only, number-comma, number-human, locale, decimal-places, currency-symbol, cost-decimal-places, reverse-sort-default, hide-empty-periods, default-view, default-tab, confirm-quit, hidden-columns, accent-color, color-costs, show-header)
         key: String,
         /// Configuration value
         value: String,
@@ -144,6 +144,8 @@ async fn main() {
         decimal_places: cli
             .decimal_places
             .unwrap_or(config.formatting.decimal_places),
+        currency_symbol: config.formatting.currency_symbol,
+        cost_decimal_places: config.formatting.cost_decimal_places,
     };
 
     match cli.command {
@@ -325,6 +327,8 @@ async fn run_upload(args: UploadArgs) -> Result<()> {
         use_human: config_file.formatting.number_human,
         locale: config_file.formatting.locale,
         decimal_places: config_file.formatting.decimal_places,
+        currency_symbol: config_file.formatting.currency_symbol,
+        cost_decimal_places: config_file.formatting.cost_decimal_places,
     };
 
     match config::Config::load() {

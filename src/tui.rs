@@ -63,6 +63,16 @@ enum AggregateViewMode {
 }
 
 impl AggregateViewMode {
+    /// Parse the configured startup view (tui.default_view).
+    fn from_config(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "weekly" | "week" => Self::Weekly,
+            "monthly" | "month" => Self::Monthly,
+            "yearly" | "year" => Self::Yearly,
+            _ => Self::Daily,
+        }
+    }
+
     fn next(self) -> Self {
         match self {
             Self::Daily => Self::Weekly,
@@ -336,6 +346,11 @@ struct UiState<'a> {
     sort_reversed: bool,
     hide_empty_periods: bool,
     show_totals: bool,
+    quit_pending: bool,
+    accent: Color,
+    hidden_cols: &'a std::collections::HashSet<String>,
+    color_costs: bool,
+    show_header: bool,
 }
 
 /// Build the tab data shown in the TUI, prepending a synthetic "All Tools"
@@ -354,6 +369,7 @@ pub(crate) fn build_display_stats(
     for stats in filtered_stats {
         let view = stats.read();
         combined_conversations += view.num_conversations;
+        let app_name = view.analyzer_name.to_string();
 
         for (key, day_stats) in &view.daily_stats {
             let entry = combined_daily_stats
@@ -363,6 +379,8 @@ pub(crate) fn build_display_stats(
                     ..DailyStats::default()
                 });
             *entry += day_stats;
+            // Record which app contributed this period (for the Apps column).
+            *entry.apps.entry(app_name.clone()).or_insert(0) += 1;
         }
 
         combined_sessions.extend(view.session_aggregates.iter().cloned().map(|mut session| {
@@ -415,7 +433,7 @@ pub fn run_tui(
 
     let mut selected_tab = 0;
     let mut scroll_offset = 0;
-    let mut aggregate_view_mode = AggregateViewMode::Daily;
+    let mut aggregate_view_mode = AggregateViewMode::from_config(&tui_config.default_view);
     let mut stats_view_mode = StatsViewMode::Aggregate;
 
     let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel::<WatcherEvent>();
@@ -475,6 +493,22 @@ async fn run_app(
     let mut sort_reversed = tui_config.reverse_sort_default;
     let mut hide_empty_periods = tui_config.hide_empty_periods;
     let mut show_totals = true;
+    let mut quit_pending = false;
+    // Appearance settings (constant for the session).
+    let accent = parse_accent(&tui_config.accent_color);
+    let color_costs = tui_config.color_costs;
+    let show_header = tui_config.show_header;
+    let hidden_cols: std::collections::HashSet<String> = tui_config
+        .hidden_columns
+        .iter()
+        .map(|s| match s.trim().to_lowercase().as_str() {
+            "inp" => "input".to_string(),
+            "outp" => "output".to_string(),
+            "reasoning" => "reason".to_string(),
+            "conversations" | "conv" => "convs".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
     let mut current_stats = stats_receiver.borrow().clone();
 
     // Initialize table states for current stats
@@ -502,6 +536,19 @@ async fn run_app(
         .cloned()
         .collect();
     let mut display_stats = build_display_stats(&filtered_stats);
+
+    // Open on the configured default tab (matched by tool name; empty or
+    // "All Tools" keeps the combined first tab).
+    if !tui_config.default_tab.trim().is_empty()
+        && let Some(idx) = display_stats.iter().position(|v| {
+            v.read()
+                .analyzer_name
+                .as_ref()
+                .eq_ignore_ascii_case(tui_config.default_tab.trim())
+        })
+    {
+        *selected_tab = idx;
+    }
 
     loop {
         // Check for update status changes
@@ -581,6 +628,11 @@ async fn run_app(
                     sort_reversed,
                     hide_empty_periods,
                     show_totals,
+                    quit_pending,
+                    accent,
+                    hidden_cols: &hidden_cols,
+                    color_costs,
+                    show_header,
                 };
                 draw_ui(
                     frame,
@@ -614,7 +666,17 @@ async fn run_app(
             // Handle quitting. Esc is intentionally *not* a quit key; it acts as
             // a context-aware "go back"/cancel below.
             if matches!(key.code, KeyCode::Char('q')) {
+                if tui_config.confirm_quit && !quit_pending {
+                    quit_pending = true;
+                    needs_redraw = true;
+                    continue;
+                }
                 break;
+            }
+            // Any other key cancels a pending quit confirmation.
+            if quit_pending {
+                quit_pending = false;
+                needs_redraw = true;
             }
 
             // Handle update notification dismissal
@@ -1094,10 +1156,10 @@ fn draw_ui(
     let (chunks, chunk_offset) = if has_data {
         if show_update_banner {
             let mut constraints = vec![
-                Constraint::Length(3), // Header
-                Constraint::Length(1), // Update banner
-                Constraint::Length(1), // Tabs
-                Constraint::Min(3),    // Main table
+                Constraint::Length(if ui_state.show_header { 3 } else { 0 }), // Header
+                Constraint::Length(1),                                        // Update banner
+                Constraint::Length(1),                                        // Tabs
+                Constraint::Min(3),                                           // Main table
             ];
             if ui_state.show_totals {
                 constraints.push(Constraint::Length(9)); // Summary stats
@@ -1109,9 +1171,9 @@ fn draw_ui(
             )
         } else {
             let mut constraints = vec![
-                Constraint::Length(3), // Header
-                Constraint::Length(1), // Tabs
-                Constraint::Min(3),    // Main table
+                Constraint::Length(if ui_state.show_header { 3 } else { 0 }), // Header
+                Constraint::Length(1),                                        // Tabs
+                Constraint::Min(3),                                           // Main table
             ];
             if ui_state.show_totals {
                 constraints.push(Constraint::Length(9)); // Summary stats
@@ -1125,9 +1187,9 @@ fn draw_ui(
     } else {
         (
             Layout::vertical([
-                Constraint::Length(3), // Header
-                Constraint::Min(3),    // No-data message
-                Constraint::Length(1), // Help text
+                Constraint::Length(if ui_state.show_header { 3 } else { 0 }), // Header
+                Constraint::Min(3),                                           // No-data message
+                Constraint::Length(1),                                        // Help text
             ])
             .split(frame.area()),
             0, // No offset (no banner in no-data view)
@@ -1138,11 +1200,15 @@ fn draw_ui(
     let header = Paragraph::new(Text::from(vec![
         Line::styled(
             "AGENTIC DEVELOPMENT TOOL ACTIVITY ANALYSIS",
-            Style::new().cyan().bold(),
+            Style::default()
+                .fg(ui_state.accent)
+                .add_modifier(Modifier::BOLD),
         ),
         Line::styled(
             "==========================================",
-            Style::new().cyan().bold(),
+            Style::default()
+                .fg(ui_state.accent)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
     frame.render_widget(header, chunks[0]);
@@ -1177,7 +1243,7 @@ fn draw_ui(
         let tabs = Tabs::new(tab_titles)
             .select(ui_state.selected_tab)
             // .style(Style::default().add_modifier(Modifier::DIM))
-            .highlight_style(Style::new().black().on_light_green())
+            .highlight_style(Style::default().fg(Color::Black).bg(ui_state.accent))
             .padding("", "")
             .divider(" | ");
 
@@ -1206,6 +1272,9 @@ fn draw_ui(
                             },
                             ui_state.hide_empty_periods,
                             ui_state.sort_reversed,
+                            ui_state.accent,
+                            ui_state.hidden_cols,
+                            ui_state.color_costs,
                         );
                         has_estimated
                     }
@@ -1277,14 +1346,23 @@ fn draw_ui(
                 }
             };
 
-            let help_text = if has_estimated_models {
+            let help_text = if ui_state.quit_pending {
+                "Quit splitrail?  Press q again to confirm  •  any other key to cancel".to_string()
+            } else if has_estimated_models {
                 format!("{} • * = estimated pricing", base_help_text)
             } else {
                 base_help_text
             };
 
+            let help_style = if ui_state.quit_pending {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            };
             let help = Paragraph::new(help_text)
-                .style(Style::default().add_modifier(Modifier::DIM))
+                .style(help_style)
                 .wrap(ratatui::widgets::Wrap { trim: true });
             frame.render_widget(help, help_chunks[0]);
 
@@ -1359,6 +1437,34 @@ fn draw_ui(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Parse the configured accent color name into a ratatui Color.
+fn parse_accent(s: &str) -> Color {
+    match s.trim().to_lowercase().as_str() {
+        "green" => Color::Green,
+        "magenta" | "purple" => Color::Magenta,
+        "blue" => Color::Blue,
+        "red" => Color::Red,
+        "yellow" => Color::Yellow,
+        "white" => Color::White,
+        "light_cyan" | "lightcyan" => Color::LightCyan,
+        "light_green" | "lightgreen" => Color::LightGreen,
+        _ => Color::Cyan,
+    }
+}
+
+/// Heatmap color for a cost cell: low -> green, mid -> yellow, high -> red.
+fn cost_heat(cents: u32, max: u32) -> Color {
+    if max == 0 {
+        return Color::Green;
+    }
+    let t = (cents as f64 / max as f64).clamp(0.0, 1.0);
+    let r = (90.0 + t * (235.0 - 90.0)) as u8;
+    let g = (200.0 - t * (200.0 - 80.0)) as u8;
+    let b = (110.0 - t * (110.0 - 70.0)) as u8;
+    Color::Rgb(r, g, b)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_aggregate_stats_table(
     frame: &mut Frame,
     area: Rect,
@@ -1369,6 +1475,9 @@ fn draw_aggregate_stats_table(
     date_filter: &str,
     hide_empty_periods: bool,
     sort_reversed: bool,
+    accent: Color,
+    hidden: &std::collections::HashSet<String>,
+    color_costs: bool,
 ) -> (usize, bool) {
     let period_header = match aggregate_view_mode {
         AggregateViewMode::Daily => "Date",
@@ -1383,21 +1492,49 @@ fn draw_aggregate_stats_table(
         filtered_aggregate_keys(aggregate_stats, hide_empty_periods, sort_reversed);
     clamp_table_selection(table_state, visible_periods.len() + 2);
 
-    let header = Row::new(vec![
+    // The Apps column is only meaningful in the combined "All Tools" view, where
+    // each period records which tools contributed. On single-tool tabs it is
+    // always empty, so collapse it entirely instead of reserving a blank gap.
+    let has_apps = aggregate_stats.values().any(|s| !s.apps.is_empty());
+    let show = |c: &str| {
+        if c == "apps" && !has_apps {
+            return false;
+        }
+        !hidden.contains(c)
+    };
+
+    let mut header_cells = vec![
         Cell::new(""),
         Cell::new(period_header),
         Cell::new(Text::from("Cost").right_aligned()),
-        Cell::new(Text::from("Cached Tks").right_aligned()),
-        Cell::new(Text::from("Inp Tks").right_aligned()),
-        Cell::new(Text::from("Outp Tks").right_aligned()),
-        Cell::new(Text::from("Reason Tks").right_aligned()),
-        Cell::new(Text::from("Convs").right_aligned()),
-        Cell::new(Text::from("Tools").right_aligned()),
-        // Cell::new(Text::from("Lines").right_aligned()),
-        Cell::new("Models"),
-    ])
-    .style(Style::default().add_modifier(Modifier::BOLD))
-    .height(1);
+    ];
+    if show("cached") {
+        header_cells.push(Cell::new(Text::from("Cached Tks").right_aligned()));
+    }
+    if show("input") {
+        header_cells.push(Cell::new(Text::from("Inp Tks").right_aligned()));
+    }
+    if show("output") {
+        header_cells.push(Cell::new(Text::from("Outp Tks").right_aligned()));
+    }
+    if show("reason") {
+        header_cells.push(Cell::new(Text::from("Reason Tks").right_aligned()));
+    }
+    if show("convs") {
+        header_cells.push(Cell::new(Text::from("Convs").right_aligned()));
+    }
+    if show("tools") {
+        header_cells.push(Cell::new(Text::from("Tools").right_aligned()));
+    }
+    if show("apps") {
+        header_cells.push(Cell::new("Apps"));
+    }
+    if show("models") {
+        header_cells.push(Cell::new("Models"));
+    }
+    let header = Row::new(header_cells)
+        .style(Style::default().add_modifier(Modifier::BOLD))
+        .height(1);
 
     // Find best values for highlighting
     // TODO: Let's refactor this.
@@ -1488,6 +1625,10 @@ fn draw_aggregate_stats_table(
         models_vec.sort();
         let models = models_vec.join(", ");
 
+        let mut apps_vec: Vec<String> = period_stats.apps.keys().cloned().collect();
+        apps_vec.sort();
+        let apps = apps_vec.join(", ");
+
         // Check if this is an empty row
         let is_empty_row = is_empty_period(period_stats);
 
@@ -1502,23 +1643,22 @@ fn draw_aggregate_stats_table(
             Line::from(Span::raw(period_text))
         };
 
-        let cost_cell = if is_empty_row {
-            Line::from(Span::styled(
-                format!("${:.2}", period_stats.stats.cost()),
-                Style::default().add_modifier(Modifier::DIM),
-            ))
+        let cost_str = format!(
+            "{}{:.prec$}",
+            format_options.currency_symbol,
+            period_stats.stats.cost(),
+            prec = format_options.cost_decimal_places
+        );
+        let cost_style = if is_empty_row {
+            Style::default().add_modifier(Modifier::DIM)
+        } else if color_costs {
+            Style::default().fg(cost_heat(period_stats.stats.cost_cents, best_cost_cents))
         } else if i == best_cost_i {
-            Line::from(Span::styled(
-                format!("${:.2}", period_stats.stats.cost()),
-                Style::default().fg(Color::Red),
-            ))
+            Style::default().fg(Color::Red)
         } else {
-            Line::from(Span::styled(
-                format!("${:.2}", period_stats.stats.cost()),
-                Style::default().fg(Color::Yellow),
-            ))
-        }
-        .right_aligned();
+            Style::default().fg(Color::Yellow)
+        };
+        let cost_cell = Line::from(Span::styled(cost_str, cost_style)).right_aligned();
 
         let tw = TOKEN_COL_WIDTH as usize;
 
@@ -1638,35 +1778,53 @@ fn draw_aggregate_stats_table(
             Style::default().add_modifier(Modifier::DIM),
         ));
 
+        let apps_cell = Line::from(Span::styled(
+            apps,
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+
         // Create arrow indicator for currently selected row
         let arrow_cell = if table_state.selected() == Some(i) {
             Line::from(Span::styled(
                 "→",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
         } else {
             Line::from(Span::raw(""))
         };
 
-        rows.push(Row::new(vec![
-            arrow_cell,
-            period_cell,
-            cost_cell,
-            cached_cell,
-            input_cell,
-            output_cell,
-            reasoning_cell,
-            conv_cell,
-            tool_cell,
-            models_cell,
-        ]));
+        let mut row_cells = vec![arrow_cell, period_cell, cost_cell];
+        if show("cached") {
+            row_cells.push(cached_cell);
+        }
+        if show("input") {
+            row_cells.push(input_cell);
+        }
+        if show("output") {
+            row_cells.push(output_cell);
+        }
+        if show("reason") {
+            row_cells.push(reasoning_cell);
+        }
+        if show("convs") {
+            row_cells.push(conv_cell);
+        }
+        if show("tools") {
+            row_cells.push(tool_cell);
+        }
+        if show("apps") {
+            row_cells.push(apps_cell);
+        }
+        if show("models") {
+            row_cells.push(models_cell);
+        }
+        rows.push(Row::new(row_cells));
     }
 
-    // Collect all unique models for the totals row
+    // Collect all unique models (and apps) for the totals row
     let mut all_models = HashSet::new();
     let mut has_estimated_models = false;
+    let mut all_apps = std::collections::BTreeSet::new();
     for period_stats in aggregate_stats.values() {
         for model in period_stats.models.keys() {
             all_models.insert(model);
@@ -1674,7 +1832,11 @@ fn draw_aggregate_stats_table(
                 has_estimated_models = true;
             }
         }
+        for app in period_stats.apps.keys() {
+            all_apps.insert(app.clone());
+        }
     }
+    let all_apps_text = all_apps.into_iter().collect::<Vec<_>>().join(", ");
 
     let mut all_models_vec: Vec<String> = all_models
         .iter()
@@ -1691,60 +1853,52 @@ fn draw_aggregate_stats_table(
 
     // Add separator row before totals
     let token_sep = "─".repeat(TOKEN_COL_WIDTH as usize);
-    rows.push(Row::new(vec![
+    let dim = |s: String| {
         Line::from(Span::styled(
-            "",
+            s,
             Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            "───────────",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            "──────────",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            token_sep.clone(),
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            token_sep.clone(),
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            token_sep.clone(),
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            token_sep,
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            "──────",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            "──────",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(Span::styled(
-            "─".repeat(all_models_text.len().max(18)),
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-    ]));
+        ))
+    };
+    let mut sep_cells = vec![
+        dim(String::new()),
+        dim("───────────".into()),
+        dim("──────────".into()),
+    ];
+    if show("cached") {
+        sep_cells.push(dim(token_sep.clone()));
+    }
+    if show("input") {
+        sep_cells.push(dim(token_sep.clone()));
+    }
+    if show("output") {
+        sep_cells.push(dim(token_sep.clone()));
+    }
+    if show("reason") {
+        sep_cells.push(dim(token_sep.clone()));
+    }
+    if show("convs") {
+        sep_cells.push(dim("──────".into()));
+    }
+    if show("tools") {
+        sep_cells.push(dim("──────".into()));
+    }
+    if show("apps") {
+        sep_cells.push(dim("─".repeat(all_apps_text.len().max(16))));
+    }
+    if show("models") {
+        sep_cells.push(dim("─".repeat(all_models_text.len().max(18))));
+    }
+    rows.push(Row::new(sep_cells));
 
     // Add totals row
     let total_cost = total_cost_cents as f64 / 100.0;
     let tw = TOKEN_COL_WIDTH as usize;
-    rows.push(Row::new(vec![
+    let mut totals_cells = vec![
         // Arrow indicator for totals row when selected
         if table_state.selected() == Some(rows.len()) {
             Line::from(Span::styled(
                 "→",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
         } else {
             Line::from(Span::raw(""))
@@ -1759,74 +1913,126 @@ fn draw_aggregate_stats_table(
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            format!("${total_cost:.2}"),
+            format!(
+                "{}{total_cost:.prec$}",
+                format_options.currency_symbol,
+                prec = format_options.cost_decimal_places
+            ),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ))
         .right_aligned(),
-        Line::from(Span::styled(
-            format_number_fit(total_cached, format_options, tw),
-            Style::default()
-                .add_modifier(Modifier::DIM)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .right_aligned(),
-        Line::from(Span::styled(
-            format_number_fit(total_input, format_options, tw),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))
-        .right_aligned(),
-        Line::from(Span::styled(
-            format_number_fit(total_output, format_options, tw),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))
-        .right_aligned(),
-        Line::from(Span::styled(
-            format_number_fit(total_reasoning, format_options, tw),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))
-        .right_aligned(),
-        Line::from(Span::styled(
-            format_number(total_conversations, format_options),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))
-        .right_aligned(),
-        Line::from(Span::styled(
-            format_number(total_tool_calls, format_options),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .right_aligned(),
-        Line::from(Span::styled(
+    ];
+    if show("cached") {
+        totals_cells.push(
+            Line::from(Span::styled(
+                format_number_fit(total_cached, format_options, tw),
+                Style::default()
+                    .add_modifier(Modifier::DIM)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
+    if show("input") {
+        totals_cells.push(
+            Line::from(Span::styled(
+                format_number_fit(total_input, format_options, tw),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
+    if show("output") {
+        totals_cells.push(
+            Line::from(Span::styled(
+                format_number_fit(total_output, format_options, tw),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
+    if show("reason") {
+        totals_cells.push(
+            Line::from(Span::styled(
+                format_number_fit(total_reasoning, format_options, tw),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
+    if show("convs") {
+        totals_cells.push(
+            Line::from(Span::styled(
+                format_number(total_conversations, format_options),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
+    if show("tools") {
+        totals_cells.push(
+            Line::from(Span::styled(
+                format_number(total_tool_calls, format_options),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
+    if show("apps") {
+        totals_cells.push(Line::from(Span::styled(
+            all_apps_text,
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    if show("models") {
+        totals_cells.push(Line::from(Span::styled(
             all_models_text,
             Style::default().add_modifier(Modifier::DIM),
-        )),
-    ]));
+        )));
+    }
+    rows.push(Row::new(totals_cells));
 
     // Save the row count before moving rows into the table
     let total_rows = rows.len();
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(1),               // Arrow
-            Constraint::Length(11),              // Date/Month
-            Constraint::Length(10),              // Cost
-            Constraint::Length(TOKEN_COL_WIDTH), // Cached
-            Constraint::Length(TOKEN_COL_WIDTH), // Input
-            Constraint::Length(TOKEN_COL_WIDTH), // Output
-            Constraint::Length(TOKEN_COL_WIDTH), // Reasoning
-            Constraint::Length(6),               // Convs
-            Constraint::Length(6),               // Tools
-            Constraint::Min(10),                 // Models
-        ],
-    )
-    .header(header)
-    .block(Block::default().title(""))
-    .row_highlight_style(Style::new().blue())
-    .column_spacing(2);
+    let mut widths = vec![
+        Constraint::Length(1),  // Arrow
+        Constraint::Length(11), // Date/Month
+        Constraint::Length(10), // Cost
+    ];
+    if show("cached") {
+        widths.push(Constraint::Length(TOKEN_COL_WIDTH));
+    }
+    if show("input") {
+        widths.push(Constraint::Length(TOKEN_COL_WIDTH));
+    }
+    if show("output") {
+        widths.push(Constraint::Length(TOKEN_COL_WIDTH));
+    }
+    if show("reason") {
+        widths.push(Constraint::Length(TOKEN_COL_WIDTH));
+    }
+    if show("convs") {
+        widths.push(Constraint::Length(6));
+    }
+    if show("tools") {
+        widths.push(Constraint::Length(6));
+    }
+    if show("apps") {
+        widths.push(Constraint::Min(16));
+    }
+    if show("models") {
+        widths.push(Constraint::Min(10));
+    }
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default().title(""))
+        .row_highlight_style(Style::default().fg(accent))
+        .column_spacing(2);
 
     frame.render_stateful_widget(table, area, table_state);
 
@@ -2027,12 +2233,22 @@ fn draw_session_stats_table(
 
             let cost_cell = if best_cost_i == Some(i) {
                 Line::from(Span::styled(
-                    format!("${:.2}", session.stats.cost()),
+                    format!(
+                        "{}{:.prec$}",
+                        format_options.currency_symbol,
+                        session.stats.cost(),
+                        prec = format_options.cost_decimal_places
+                    ),
                     Style::default().fg(Color::Red),
                 ))
             } else {
                 Line::from(Span::styled(
-                    format!("${:.2}", session.stats.cost()),
+                    format!(
+                        "{}{:.prec$}",
+                        format_options.currency_symbol,
+                        session.stats.cost(),
+                        prec = format_options.cost_decimal_places
+                    ),
                     Style::default().fg(Color::Yellow),
                 ))
             }
@@ -2195,7 +2411,11 @@ fn draw_session_stats_table(
                 )),
                 Line::from(Span::raw("")),
                 Line::from(Span::styled(
-                    format!("${total_cost:.2}"),
+                    format!(
+                        "{}{total_cost:.prec$}",
+                        format_options.currency_symbol,
+                        prec = format_options.cost_decimal_places
+                    ),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -2336,7 +2556,15 @@ fn draw_summary_stats(
             format_number(total_tool_calls, format_options),
             Color::LightGreen,
         ),
-        ("Cost:", format!("${total_cost:.2}"), Color::LightYellow),
+        (
+            "Cost:",
+            format!(
+                "{}{total_cost:.prec$}",
+                format_options.currency_symbol,
+                prec = format_options.cost_decimal_places
+            ),
+            Color::LightYellow,
+        ),
         ("Days tracked:", all_days.len().to_string(), Color::White),
     ];
 

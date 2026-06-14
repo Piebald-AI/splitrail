@@ -81,6 +81,10 @@ struct CopilotRequest {
     timestamp: i64,
     #[serde(default)]
     model_id: Option<String>,
+    /// Optional provider-reported cost in USD. Copilot IDE sessions don't normally
+    /// carry this; when present it is honored verbatim (mirrors Kilo/OpenCode).
+    #[serde(default)]
+    cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,6 +404,21 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
             stats.file_searches += file_ops.file_searches;
             stats.file_content_searches += file_ops.file_content_searches;
             stats.terminal_commands += file_ops.terminal_commands;
+        }
+
+        // Cost: Copilot IDE sessions don't natively record a dollar cost. Honor an
+        // explicit provider-reported cost when present; otherwise price the counted
+        // tokens with the shared pricing table, consistent with the other analyzers.
+        if let Some(cost) = request.cost.filter(|c| *c > 0.0) {
+            stats.cost = cost;
+        } else if let Some(model_name) = &model {
+            stats.cost = crate::models::calculate_total_cost(
+                model_name,
+                stats.input_tokens,
+                stats.output_tokens,
+                stats.cache_creation_tokens,
+                stats.cache_read_tokens,
+            );
         }
 
         entries.push(ConversationMessage {
