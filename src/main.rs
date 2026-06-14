@@ -119,7 +119,7 @@ enum ConfigSubcommands {
     Show,
     /// Set configuration value
     Set {
-        /// Configuration key (api-token, auto-upload, number-comma, number-human, locale, decimal-places, reverse-sort-default, hide-empty-periods)
+        /// Configuration key (api-token, auto-upload, upload-today-only, number-comma, number-human, locale, decimal-places, currency-symbol, cost-decimal-places, reverse-sort-default, hide-empty-periods, default-view, default-tab, confirm-quit, hidden-columns, accent-color, color-costs, show-header)
         key: String,
         /// Configuration value
         value: String,
