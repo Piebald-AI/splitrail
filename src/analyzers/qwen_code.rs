@@ -2,7 +2,7 @@ use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
 use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output_cost};
 use crate::types::{Application, ConversationMessage, FileCategory, MessageRole, Stats};
-use crate::utils::{deserialize_utc_timestamp, hash_text};
+use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -20,100 +20,145 @@ impl QwenCodeAnalyzer {
     }
 
     fn data_dir() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".qwen").join("tmp"))
+        dirs::home_dir().map(|h| h.join(".qwen").join("projects"))
     }
 }
 
-// Qwen Code-specific data structures (identical to Gemini CLI format)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct QwenCodeSession {
-    session_id: String,
-    project_hash: String,
-    start_time: String,
-    last_updated: String,
-    messages: Vec<QwenCodeMessage>,
+// Qwen Code session log format (since Qwen Code ~0.14+). Each session is a
+// JSONL file under `~/.qwen/projects/{PROJECT}/chats/{session}.jsonl`, where
+// every line is a record tagged with a `type` field. This mirrors the
+// Claude-Code-style transcript format that Qwen Code (and recent Gemini CLI
+// builds) adopted, replacing the old `~/.qwen/tmp/*/chats/*.json` single-blob
+// session format. See issue #190.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct QwenCodeRecord {
+    #[serde(default)]
+    uuid: Option<String>,
+    #[serde(rename = "type", default)]
+    record_type: String,
+    #[serde(default, deserialize_with = "deserialize_optional_utc_timestamp")]
+    timestamp: Option<DateTime<Utc>>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    message: Option<QwenCodeMessageBody>,
+    #[serde(rename = "usageMetadata", default)]
+    usage_metadata: Option<QwenCodeUsageMetadata>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum QwenCodeMessage {
-    User {
-        id: String,
-        #[serde(deserialize_with = "deserialize_utc_timestamp")]
-        timestamp: DateTime<Utc>,
-        content: String,
-    },
-    Qwen {
-        id: String,
-        #[serde(deserialize_with = "deserialize_utc_timestamp")]
-        timestamp: DateTime<Utc>,
-        content: String,
-        model: String,
-        #[serde(default)]
-        thoughts: Vec<simd_json::OwnedValue>,
-        tokens: Option<QwenCodeTokens>,
-        #[serde(rename = "toolCalls", default)]
-        tool_calls: Vec<simd_json::OwnedValue>,
-    },
-    System {
-        id: String,
-        #[serde(deserialize_with = "deserialize_utc_timestamp")]
-        timestamp: DateTime<Utc>,
-        content: String,
-    },
-    Error {
-        id: String,
-        #[serde(deserialize_with = "deserialize_utc_timestamp")]
-        timestamp: DateTime<Utc>,
-        content: String,
-    },
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct QwenCodeMessageBody {
+    #[serde(default)]
+    parts: Vec<QwenCodePart>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct QwenCodeTokens {
+/// A single `Part` of a Qwen Code message. A part may carry plain `text`
+/// (optionally flagged as a `thought`), a `functionCall` (a tool invocation),
+/// or a `functionResponse` (a tool result). Unknown part kinds are ignored.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct QwenCodePart {
     #[serde(default)]
-    input: u64,
+    text: Option<String>,
     #[serde(default)]
-    output: u64,
+    thought: Option<bool>,
+    #[serde(rename = "functionCall", default)]
+    function_call: Option<QwenCodeFunctionCall>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct QwenCodeFunctionCall {
     #[serde(default)]
-    cached: u64,
+    name: String,
     #[serde(default)]
+    args: Option<simd_json::OwnedValue>,
+}
+
+/// Token accounting attached to each `assistant` record. Field names match the
+/// Gemini `usageMetadata` schema that Qwen Code emits. Note that
+/// `promptTokenCount` is the *full* input token count and already includes
+/// `cachedContentTokenCount`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct QwenCodeUsageMetadata {
+    #[serde(rename = "promptTokenCount", default)]
+    prompt: u64,
+    #[serde(rename = "candidatesTokenCount", default)]
+    candidates: u64,
+    #[serde(rename = "thoughtsTokenCount", default)]
     thoughts: u64,
-    #[serde(default)]
-    tool: u64,
-    #[serde(default)]
+    #[serde(rename = "cachedContentTokenCount", default)]
+    cached: u64,
+    #[serde(rename = "totalTokenCount", default)]
+    #[allow(dead_code)]
     total: u64,
 }
 
-// Tool extraction and file operation mapping
-fn extract_tool_stats(tool_calls: &[simd_json::OwnedValue]) -> Stats {
+fn deserialize_optional_utc_timestamp<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Tolerate a missing/null/empty timestamp instead of aborting the parse.
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        Some(s) if !s.is_empty() => DateTime::parse_from_rfc3339(&s)
+            .map(|dt| Some(dt.into()))
+            .map_err(serde::de::Error::custom),
+        _ => Ok(None),
+    }
+}
+
+impl QwenCodePart {
+    /// Plain text of this part, ignoring "thought" parts (model reasoning) and
+    /// non-text parts (tool calls/results).
+    fn visible_text(&self) -> Option<&str> {
+        if self.thought.unwrap_or(false) {
+            return None;
+        }
+        self.text.as_deref().filter(|t| !t.is_empty())
+    }
+}
+
+impl QwenCodeMessageBody {
+    fn concatenated_text(&self) -> String {
+        let mut out = String::new();
+        for part in &self.parts {
+            if let Some(text) = part.visible_text() {
+                out.push_str(text);
+            }
+        }
+        out
+    }
+
+    fn function_calls(&self) -> impl Iterator<Item = &QwenCodeFunctionCall> {
+        self.parts
+            .iter()
+            .filter_map(|part| part.function_call.as_ref())
+    }
+}
+
+// Tool extraction and file operation mapping. Tool invocations now appear as
+// `functionCall` parts inside `assistant` records rather than a dedicated
+// `toolCalls` array.
+fn extract_tool_stats<'a>(function_calls: impl Iterator<Item = &'a QwenCodeFunctionCall>) -> Stats {
     let mut stats = Stats::default();
 
-    for tool_call in tool_calls {
-        let tool_name = if let Some(tool_name) = tool_call.get("name").and_then(|v| v.as_str()) {
-            tool_name
-        } else {
-            continue;
-        };
-        match tool_name {
+    for call in function_calls {
+        stats.tool_calls += 1;
+        match call.name.as_str() {
             "read_many_files" => {
-                let paths = if let Some(paths) = tool_call
-                    .get("args")
+                let paths = call
+                    .args
+                    .as_ref()
                     .and_then(|v| v.get("paths"))
-                    .and_then(|v| v.as_array())
-                {
-                    paths
-                } else {
+                    .and_then(|v| v.as_array());
+                let Some(paths) = paths else {
                     continue;
                 };
                 stats.files_read += paths.len() as u64;
 
-                // Categorize files and estimate composition stats
                 for path in paths {
-                    let path_str = if let Some(path_str) = path.as_str() {
-                        path_str
-                    } else {
+                    let Some(path_str) = path.as_str() else {
                         continue;
                     };
                     let ext = std::path::Path::new(path_str)
@@ -132,43 +177,51 @@ fn extract_tool_stats(tool_calls: &[simd_json::OwnedValue]) -> Stats {
                     }
                 }
 
-                // Simple estimation without complex heuristics
                 stats.lines_read += (paths.len() as u64) * 100;
                 stats.bytes_read += (paths.len() as u64) * 8000;
             }
-            "replace" => {
+            "read_file" => {
+                stats.files_read += 1;
+                stats.lines_read += 100;
+                stats.bytes_read += 8000;
+            }
+            "replace" | "edit" => {
                 stats.files_edited += 1;
-                // Simple counting without complex content analysis
                 stats.lines_edited += 10; // Conservative estimate
                 stats.bytes_edited += 800;
+            }
+            "write_file" => {
+                stats.files_added += 1;
+                stats.lines_added += 10;
+                stats.bytes_added += 800;
             }
             "run_shell_command" => {
                 stats.terminal_commands += 1;
             }
             "list_directory" => {
-                // Treat as a lightweight read operation
+                // Treat as a lightweight read operation.
                 stats.files_read += 1;
             }
-            _ => {} // Unknown tools - just skip
+            _ => {} // Unknown tools - just count the call above.
         }
     }
 
-    // Use existing utility functions for line estimation
-    stats.lines_added = (stats.lines_edited / 2).max(1); // Simple estimate
-    stats.lines_deleted = (stats.lines_edited / 3).max(1); // Simple estimate
+    // Estimate add/delete splits for edits (mirrors the historical behaviour).
+    if stats.lines_edited > 0 {
+        stats.lines_added = stats.lines_added.max(stats.lines_edited / 2).max(1);
+        stats.lines_deleted = (stats.lines_edited / 3).max(1);
+    }
 
     stats
 }
 
-// Helper function to extract project ID from Qwen Code file path and hash it
+// Helper function to extract project ID from Qwen Code file path and hash it.
 fn extract_and_hash_project_id_qwen_code(file_path: &Path) -> String {
-    // Qwen Code path format: ~/.qwen/tmp/{PROJECT_ID}/chats/{session}.json
-    // Example: "/home/user/.qwen/tmp/project-abc123/chats/session.json"
-
+    // Qwen Code path format: ~/.qwen/projects/{PROJECT_ID}/chats/{session}.jsonl
     let path_components: Vec<_> = file_path.components().collect();
     for (i, component) in path_components.iter().enumerate() {
         if let std::path::Component::Normal(name) = component
-            && name.to_str() == Some("tmp")
+            && name.to_str() == Some("projects")
             && i + 1 < path_components.len()
             && let std::path::Component::Normal(project_id) = &path_components[i + 1]
             && let Some(project_id_str) = project_id.to_str()
@@ -180,43 +233,82 @@ fn extract_and_hash_project_id_qwen_code(file_path: &Path) -> String {
     hash_text(&file_path.to_string_lossy())
 }
 
-// Cost calculation using the centralized model system
-fn calculate_qwen_cost(tokens: &QwenCodeTokens, model_name: &str) -> f64 {
-    let total_input_tokens = tokens.input + tokens.thoughts + tokens.tool;
+// Cost calculation using the centralized model system.
+fn calculate_qwen_cost(usage: &QwenCodeUsageMetadata, model_name: &str) -> f64 {
+    // `prompt` includes the cached portion; bill non-cached input at the input
+    // rate and cached input at the cache-read rate.
+    let non_cached_input = usage.prompt.saturating_sub(usage.cached);
+    let total_input_tokens = non_cached_input + usage.thoughts;
 
     let input_cost = calculate_input_cost(model_name, total_input_tokens);
-    let output_cost = calculate_output_cost(model_name, tokens.output);
-    let cache_cost = calculate_cache_cost(model_name, 0, tokens.cached); // Qwen Code doesn't have cache creation
+    let output_cost = calculate_output_cost(model_name, usage.candidates);
+    let cache_cost = calculate_cache_cost(model_name, 0, usage.cached); // No cache-creation concept here.
 
     input_cost + output_cost + cache_cost
 }
 
-// JSON session parsing (not JSONL)
-fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
+fn is_qwen_code_chat_path(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext == "jsonl" || ext == "json")
+        && path
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| ancestor.file_name().is_some_and(|name| name == "chats"))
+}
+
+fn is_internal_session_context(text: &str) -> bool {
+    text.trim_start().starts_with("<session_context>")
+}
+
+// JSONL session parsing.
+pub fn parse_jsonl_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
     let project_hash = extract_and_hash_project_id_qwen_code(file_path);
     let file_path_str = file_path.to_string_lossy();
+    let conversation_hash = hash_text(&file_path.to_string_lossy());
+    let content = std::fs::read_to_string(file_path)?;
+
     let mut entries = Vec::new();
     let mut fallback_session_name: Option<String> = None;
 
-    // Parse the complete session JSON
-    let session: QwenCodeSession =
-        simd_json::from_slice(&mut std::fs::read_to_string(file_path)?.into_bytes())?;
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let mut line_bytes = line.as_bytes().to_vec();
+        let record: QwenCodeRecord = match simd_json::from_slice(&mut line_bytes) {
+            Ok(record) => record,
+            // Skip malformed lines rather than aborting the whole session.
+            Err(_) => continue,
+        };
 
-    // Process each message in the session
-    for message in session.messages {
-        match message {
-            QwenCodeMessage::User {
-                id: _,
-                timestamp,
-                content,
-            } => {
-                if fallback_session_name.is_none() && !content.is_empty() {
-                    let text_str = content;
-                    let truncated = if text_str.chars().count() > 50 {
-                        let chars: String = text_str.chars().take(50).collect();
-                        format!("{}...", chars)
+        let Some(timestamp) = record.timestamp else {
+            continue;
+        };
+
+        let global_hash = match &record.uuid {
+            Some(uuid) => hash_text(&format!("{file_path_str}_{uuid}")),
+            None => hash_text(&format!("{}_{}", file_path_str, timestamp.to_rfc3339())),
+        };
+
+        match record.record_type.as_str() {
+            "user" => {
+                let text = record
+                    .message
+                    .as_ref()
+                    .map(QwenCodeMessageBody::concatenated_text)
+                    .unwrap_or_default();
+
+                // Skip system-injected context that is not a real user turn.
+                if is_internal_session_context(&text) {
+                    continue;
+                }
+
+                if fallback_session_name.is_none() && !text.is_empty() {
+                    let truncated = if text.chars().count() > 50 {
+                        let chars: String = text.chars().take(50).collect();
+                        format!("{chars}...")
                     } else {
-                        text_str
+                        text
                     };
                     fallback_session_name = Some(truncated);
                 }
@@ -226,57 +318,56 @@ fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>>
                     application: Application::QwenCode,
                     project_hash: project_hash.clone(),
                     local_hash: None,
-                    global_hash: hash_text(&format!(
-                        "{}_{}",
-                        file_path_str,
-                        timestamp.to_rfc3339()
-                    )),
-                    conversation_hash: hash_text(&file_path.to_string_lossy()),
+                    global_hash,
+                    conversation_hash: conversation_hash.clone(),
                     model: None,
                     stats: Stats::default(),
                     role: MessageRole::User,
-                    uuid: None,
+                    uuid: record.uuid.clone(),
                     session_name: fallback_session_name.clone(),
                 });
             }
-            QwenCodeMessage::Qwen {
-                id: _,
-                timestamp,
-                content: _,
-                model,
-                thoughts: _,
-                tokens: Some(tokens),
-                tool_calls,
-            } => {
-                let mut stats = extract_tool_stats(&tool_calls);
+            "assistant" => {
+                let Some(usage) = record.usage_metadata else {
+                    // An assistant record without usage metadata carries no
+                    // token information worth recording.
+                    continue;
+                };
 
-                // Update stats with token information
-                stats.input_tokens = tokens.input;
-                stats.output_tokens = tokens.output;
+                let mut stats = record
+                    .message
+                    .as_ref()
+                    .map(|body| extract_tool_stats(body.function_calls()))
+                    .unwrap_or_default();
+
+                // `promptTokenCount` already includes the cached tokens, so
+                // record only the non-cached portion as input to avoid
+                // double-counting in the input/cached columns.
+                stats.input_tokens = usage.prompt.saturating_sub(usage.cached);
+                stats.output_tokens = usage.candidates;
+                stats.reasoning_tokens = usage.thoughts;
                 stats.cache_creation_tokens = 0;
                 stats.cache_read_tokens = 0;
-                stats.cached_tokens = tokens.cached;
-                stats.cost = calculate_qwen_cost(&tokens, &model);
-                stats.tool_calls = tool_calls.len() as u32;
+                stats.cached_tokens = usage.cached;
+                let model = record.model.unwrap_or_default();
+                stats.cost = calculate_qwen_cost(&usage, &model);
 
                 entries.push(ConversationMessage {
                     application: Application::QwenCode,
                     model: Some(model),
                     local_hash: None,
-                    global_hash: hash_text(&format!(
-                        "{}_{}",
-                        file_path_str,
-                        timestamp.to_rfc3339()
-                    )),
+                    global_hash,
                     date: timestamp,
                     project_hash: project_hash.clone(),
-                    conversation_hash: hash_text(&file_path.to_string_lossy()),
+                    conversation_hash: conversation_hash.clone(),
                     stats,
                     role: MessageRole::Assistant,
-                    uuid: None,
+                    uuid: record.uuid.clone(),
                     session_name: fallback_session_name.clone(),
                 });
             }
+            // `tool_result`, `system` (telemetry, snapshots, slash commands),
+            // and any other record types carry no billable usage of their own.
             _ => {}
         }
     }
@@ -295,7 +386,8 @@ impl Analyzer for QwenCodeAnalyzer {
 
         if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
-            patterns.push(format!("{home_str}/.qwen/tmp/*/chats/*.json"));
+            patterns.push(format!("{home_str}/.qwen/projects/*/chats/*.jsonl"));
+            patterns.push(format!("{home_str}/.qwen/projects/*/chats/*.json"));
         }
 
         patterns
@@ -305,16 +397,9 @@ impl Analyzer for QwenCodeAnalyzer {
         let sources = Self::data_dir()
             .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3).into_iter())
+            .flat_map(|projects_dir| WalkDir::new(projects_dir).into_iter())
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type().is_file()
-                    && e.path().extension().is_some_and(|ext| ext == "json")
-                    && e.path()
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .is_some_and(|name| name == "chats")
-            })
+            .filter(|e| is_qwen_code_chat_path(e.path()))
             .map(|e| DataSource {
                 path: e.into_path(),
             })
@@ -327,20 +412,13 @@ impl Analyzer for QwenCodeAnalyzer {
         Self::data_dir()
             .filter(|d| d.is_dir())
             .into_iter()
-            .flat_map(|tmp_dir| WalkDir::new(tmp_dir).min_depth(3).max_depth(3).into_iter())
+            .flat_map(|projects_dir| WalkDir::new(projects_dir).into_iter())
             .filter_map(|e| e.ok())
-            .any(|e| {
-                e.file_type().is_file()
-                    && e.path().extension().is_some_and(|ext| ext == "json")
-                    && e.path()
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .is_some_and(|name| name == "chats")
-            })
+            .any(|e| is_qwen_code_chat_path(e.path()))
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
-        parse_json_session_file(&source.path)
+        parse_jsonl_session_file(&source.path)
     }
 
     fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
@@ -348,7 +426,7 @@ impl Analyzer for QwenCodeAnalyzer {
             .par_iter()
             .flat_map(|source| self.parse_source(source).unwrap_or_default())
             .collect();
-        crate::utils::deduplicate_by_local_hash(all_messages)
+        crate::utils::deduplicate_by_global_hash(all_messages)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
@@ -359,13 +437,7 @@ impl Analyzer for QwenCodeAnalyzer {
     }
 
     fn is_valid_data_path(&self, path: &Path) -> bool {
-        // Must be a .json file in a "chats" directory
-        path.is_file()
-            && path.extension().is_some_and(|ext| ext == "json")
-            && path
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|name| name == "chats")
+        is_qwen_code_chat_path(path)
     }
 
     fn contribution_strategy(&self) -> ContributionStrategy {
