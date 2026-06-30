@@ -428,7 +428,16 @@ fn to_conversation_message(
     let local_hash = Some(msg.id.clone());
     let global_hash = hash_text(&format!("{}_{}_{}", hash_prefix, msg.session_id, msg.id));
 
+    // `date` is used for display purposes and falls back to the Unix epoch
+    // when the source timestamp is missing/invalid (see `ms_to_datetime`).
+    // For pricing we need to distinguish "no timestamp" from "epoch
+    // timestamp", since the former should use default/undated pricing while
+    // the latter would otherwise spuriously match dated overrides.
     let date = ms_to_datetime(msg.time.created);
+    let effective_at = msg
+        .time
+        .created
+        .and_then(|ms| Utc.timestamp_millis_opt(ms).single());
 
     let mut stats = if msg.role == "assistant" {
         let mut s = extract_tool_stats_from_parts(part_root, &msg.id);
@@ -449,7 +458,7 @@ fn to_conversation_message(
                     s.output_tokens,
                     s.cache_creation_tokens,
                     s.cache_read_tokens,
-                    Some(date),
+                    effective_at,
                 );
             }
         }

@@ -15,6 +15,7 @@ Token pricing is defined in `src/models.rs`. Built-in models are populated by `p
    - `service_tiers`: Leave empty unless the provider has distinct priority/flex/batch rates.
    - `dated_pricing`: Leave empty unless pricing changes by usage date.
    - `is_estimated`: Set to `true` only when pricing is not confirmed by a provider/tool source.
+   - `input_token_semantics`: Auto-derived for built-in models (defaults to `ExcludesCache`); only GPT/o-series models typically need `IncludesCacheRead`. External model configs should set this explicitly if it affects cache-read counting.
 2. If the model has aliases (date suffixes, provider-prefixed names, regional names, etc.), add entries to the alias section mapping each observed name to the canonical model name.
 3. Add or update tests in `src/models.rs` for canonical pricing, aliases, caching, and estimated/non-estimated status.
 

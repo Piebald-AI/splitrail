@@ -797,17 +797,10 @@ pub fn merge_message_into(
         dst.stats.todos_completed += src.stats.todos_completed;
         dst.stats.todos_in_progress += src.stats.todos_in_progress;
 
-        // Recalculate cost
-        if let Some(model) = &dst.model {
-            dst.stats.cost = calculate_total_cost_for_service_tier_at(
-                model,
-                crate::models::ServiceTier::Standard,
-                dst.stats.input_tokens,
-                dst.stats.output_tokens,
-                dst.stats.cache_creation_tokens,
-                dst.stats.cache_read_tokens,
-                Some(dst.date),
-            );
-        }
+        // Preserve each message's timestamp-aware price: `dst.stats.cost` was
+        // already priced at `dst.date`, and `src.stats.cost` was already
+        // priced at `src.date`, so just accumulate rather than recomputing
+        // the whole total at `dst.date` (which would reprice `src`'s tokens).
+        dst.stats.cost += src.stats.cost;
     }
 }

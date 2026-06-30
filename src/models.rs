@@ -2149,10 +2149,16 @@ fn standard_pricing_for_date(
 ) -> (&PricingStructure, &CachingSupport) {
     if let Some(effective_at) = effective_at {
         let usage_date = effective_at.date_naive();
+        // Pick the *nearest* matching override rather than the first one in
+        // the vector. Built-in models are kept sorted by `add_dated_pricing!`,
+        // but externally-merged `ModelInfo.dated_pricing` (from
+        // `Registry::merge`) is only validated, not sorted, so `.find(...)`
+        // could otherwise pick the wrong override depending on input order.
         if let Some(dated) = model_info
             .dated_pricing
             .iter()
-            .find(|dated| usage_date < dated.valid_until)
+            .filter(|dated| usage_date < dated.valid_until)
+            .min_by_key(|dated| dated.valid_until)
         {
             return (&dated.pricing, &dated.caching);
         }

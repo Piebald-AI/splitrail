@@ -26,4 +26,26 @@ ignore = [
     # Re-evaluate once phf_generator adopts rand >= 0.10 or quinn-proto
     # releases a version using rand >= 0.10.
     "RUSTSEC-2026-0097",
+
+    # RUSTSEC-2026-0189: DNS rebinding vulnerability in rmcp's Streamable
+    # HTTP server transport (CVE-2026-42559), fixed in rmcp >= 1.4.0.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0189
+    #
+    # Not applicable to splitrail:
+    #   * The vulnerable code lives entirely in
+    #     `rmcp::transport::streamable_http_server`, which is only compiled
+    #     in when the `transport-streamable-http-server` feature (or its
+    #     `server-side-http` dependency) is enabled.
+    #   * We depend on rmcp with `features = ["server", "macros",
+    #     "transport-io"]`. `transport-io` is the stdio transport; it does
+    #     not pull in `server-side-http` or any HTTP transport, so the
+    #     advisory's affected module is never compiled into our binary.
+    #   * Per the advisory, non-HTTP transports (stdio, child-process) are
+    #     explicitly unaffected.
+    #
+    # Re-evaluate if splitrail ever enables an HTTP-based MCP transport, or
+    # when upgrading rmcp past its current 0.x line (a >=1.4.0 upgrade is a
+    # separate, larger change due to upstream API churn between rmcp 0.12
+    # and 1.x).
+    "RUSTSEC-2026-0189",
 ]
