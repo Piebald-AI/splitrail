@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::calculate_total_cost;
+use crate::models::calculate_total_cost_for_service_tier_at;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{fast_hash, hash_text};
 use walkdir::WalkDir;
@@ -545,13 +545,32 @@ pub fn extract_tool_stats(
     stats
 }
 
+#[cfg(test)]
 pub fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
-    calculate_total_cost(
+    calculate_total_cost_for_service_tier_at(
         model_name,
+        crate::models::ServiceTier::Standard,
         usage.input_tokens,
         usage.output_tokens,
         usage.cache_creation_input_tokens,
         usage.cache_read_input_tokens,
+        None,
+    )
+}
+
+pub fn calculate_cost_from_tokens_at(
+    usage: &Usage,
+    model_name: &str,
+    effective_at: DateTime<Utc>,
+) -> f64 {
+    calculate_total_cost_for_service_tier_at(
+        model_name,
+        crate::models::ServiceTier::Standard,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_creation_input_tokens,
+        usage.cache_read_input_tokens,
+        Some(effective_at),
     )
 }
 
@@ -654,7 +673,8 @@ pub fn parse_jsonl_file<R: Read>(
                         msg.stats.cache_read_tokens = usage_val.cache_read_input_tokens;
                         msg.stats.cached_tokens = usage_val.cache_creation_input_tokens
                             + usage_val.cache_read_input_tokens;
-                        msg.stats.cost = calculate_cost_from_tokens(&usage_val, &model_name);
+                        msg.stats.cost =
+                            calculate_cost_from_tokens_at(&usage_val, &model_name, timestamp);
 
                         if let Some(request_id) = request_id
                             && let Some(message_id) = message_id
@@ -777,15 +797,10 @@ pub fn merge_message_into(
         dst.stats.todos_completed += src.stats.todos_completed;
         dst.stats.todos_in_progress += src.stats.todos_in_progress;
 
-        // Recalculate cost
-        if let Some(model) = &dst.model {
-            dst.stats.cost = calculate_total_cost(
-                model,
-                dst.stats.input_tokens,
-                dst.stats.output_tokens,
-                dst.stats.cache_creation_tokens,
-                dst.stats.cache_read_tokens,
-            );
-        }
+        // Preserve each message's timestamp-aware price: `dst.stats.cost` was
+        // already priced at `dst.date`, and `src.stats.cost` was already
+        // priced at `src.date`, so just accumulate rather than recomputing
+        // the whole total at `dst.date` (which would reprice `src`'s tokens).
+        dst.stats.cost += src.stats.cost;
     }
 }

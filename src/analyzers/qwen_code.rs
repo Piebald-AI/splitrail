@@ -1,6 +1,9 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output_cost};
+use crate::models::{
+    ServiceTier, calculate_cache_cost_for_service_tier_at,
+    calculate_input_cost_for_service_tier_at, calculate_output_cost_for_service_tier_at,
+};
 use crate::types::{Application, ConversationMessage, FileCategory, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::Result;
@@ -236,15 +239,35 @@ fn extract_and_hash_project_id_qwen_code(file_path: &Path) -> String {
 }
 
 // Cost calculation using the centralized model system.
-fn calculate_qwen_cost(usage: &QwenCodeUsageMetadata, model_name: &str) -> f64 {
+fn calculate_qwen_cost(
+    usage: &QwenCodeUsageMetadata,
+    model_name: &str,
+    effective_at: DateTime<Utc>,
+) -> f64 {
     // `prompt` includes the cached portion; bill non-cached input at the input
     // rate and cached input at the cache-read rate. Reasoning (`thoughts`)
     // tokens are billed at the *output* rate, matching Qwen's pricing.
     let non_cached_input = usage.prompt.saturating_sub(usage.cached);
 
-    let input_cost = calculate_input_cost(model_name, non_cached_input);
-    let output_cost = calculate_output_cost(model_name, usage.candidates + usage.thoughts);
-    let cache_cost = calculate_cache_cost(model_name, 0, usage.cached); // No cache-creation concept here.
+    let input_cost = calculate_input_cost_for_service_tier_at(
+        model_name,
+        ServiceTier::Standard,
+        non_cached_input,
+        Some(effective_at),
+    );
+    let output_cost = calculate_output_cost_for_service_tier_at(
+        model_name,
+        ServiceTier::Standard,
+        usage.candidates + usage.thoughts,
+        Some(effective_at),
+    );
+    let cache_cost = calculate_cache_cost_for_service_tier_at(
+        model_name,
+        ServiceTier::Standard,
+        0,
+        usage.cached,
+        Some(effective_at),
+    ); // No cache-creation concept here.
 
     input_cost + output_cost + cache_cost
 }
@@ -363,7 +386,7 @@ pub fn parse_jsonl_session_file(file_path: &Path) -> Result<Vec<ConversationMess
                 stats.cache_read_tokens = 0;
                 stats.cached_tokens = usage.cached;
                 let model = record.model.unwrap_or_default();
-                stats.cost = calculate_qwen_cost(&usage, &model);
+                stats.cost = calculate_qwen_cost(&usage, &model, timestamp);
 
                 entries.push(ConversationMessage {
                     application: Application::QwenCode,

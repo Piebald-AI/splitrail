@@ -1,6 +1,6 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::calculate_total_cost;
+use crate::models::{ServiceTier, calculate_total_cost_for_service_tier_at};
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
@@ -217,14 +217,16 @@ impl CopilotCliLiveContext {
     }
 }
 
-fn calculate_copilot_cli_cost(stats: &Stats, model_name: &str) -> f64 {
+fn calculate_copilot_cli_cost(stats: &Stats, model_name: &str, effective_at: DateTime<Utc>) -> f64 {
     let actual_input_tokens = stats.input_tokens.saturating_sub(stats.cache_read_tokens);
-    calculate_total_cost(
+    calculate_total_cost_for_service_tier_at(
         model_name,
+        ServiceTier::Standard,
         actual_input_tokens,
         stats.output_tokens,
         stats.cache_creation_tokens,
         stats.cache_read_tokens,
+        Some(effective_at),
     )
 }
 
@@ -479,7 +481,8 @@ fn apply_copilot_cli_shutdown_metrics(
             message.stats.cache_creation_tokens = cache_write_distribution[position];
             message.stats.cached_tokens =
                 message.stats.cache_read_tokens + message.stats.cache_creation_tokens;
-            message.stats.cost = calculate_copilot_cli_cost(&message.stats, model_name);
+            message.stats.cost =
+                calculate_copilot_cli_cost(&message.stats, model_name, message.date);
         }
     }
 }
@@ -533,7 +536,8 @@ fn apply_copilot_cli_live_prompt_overhead(
             .cache_creation_tokens
             .saturating_add(message.stats.cache_read_tokens);
         if let Some(model_name) = message.model.as_deref() {
-            message.stats.cost = calculate_copilot_cli_cost(&message.stats, model_name);
+            message.stats.cost =
+                calculate_copilot_cli_cost(&message.stats, model_name, message.date);
         }
     }
 }
@@ -602,7 +606,8 @@ fn flush_copilot_cli_turn(
         assistant_stats.cached_tokens =
             assistant_stats.cache_read_tokens + assistant_stats.cache_creation_tokens;
         if let Some(model_name) = model.as_deref() {
-            assistant_stats.cost = calculate_copilot_cli_cost(&assistant_stats, model_name);
+            assistant_stats.cost =
+                calculate_copilot_cli_cost(&assistant_stats, model_name, assistant_date);
         }
 
         entries.push(ConversationMessage {

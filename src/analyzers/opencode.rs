@@ -1,6 +1,6 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::calculate_total_cost;
+use crate::models::{ServiceTier, calculate_total_cost_for_service_tier_at};
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
@@ -286,7 +286,11 @@ pub(crate) fn ms_to_datetime(ms: Option<i64>) -> DateTime<Utc> {
 
 /// Compute stats from an [`OpenCodeMessage`], optionally merging in pre-loaded
 /// tool-call stats (from parts data).
-pub(crate) fn compute_message_stats(msg: &OpenCodeMessage, tool_stats: Stats) -> Stats {
+pub(crate) fn compute_message_stats_at(
+    msg: &OpenCodeMessage,
+    tool_stats: Stats,
+    effective_at: DateTime<Utc>,
+) -> Stats {
     if msg.role != "assistant" {
         return Stats::default();
     }
@@ -302,12 +306,14 @@ pub(crate) fn compute_message_stats(msg: &OpenCodeMessage, tool_stats: Stats) ->
         s.cached_tokens = tokens.cache.write + tokens.cache.read;
 
         if let Some(model_name) = msg.model_name() {
-            s.cost = calculate_total_cost(
+            s.cost = calculate_total_cost_for_service_tier_at(
                 &model_name,
+                ServiceTier::Standard,
                 s.input_tokens,
                 s.output_tokens,
                 s.cache_creation_tokens,
                 s.cache_read_tokens,
+                Some(effective_at),
             );
         }
     }
@@ -327,6 +333,10 @@ pub(crate) fn compute_message_stats(msg: &OpenCodeMessage, tool_stats: Stats) ->
     }
 
     s
+}
+
+pub(crate) fn compute_message_stats(msg: &OpenCodeMessage, tool_stats: Stats) -> Stats {
+    compute_message_stats_at(msg, tool_stats, ms_to_datetime(msg.time.created))
 }
 
 /// Build a [`ConversationMessage`] from an [`OpenCodeMessage`] and pre-computed stats.

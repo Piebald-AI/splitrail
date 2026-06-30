@@ -412,12 +412,14 @@ pub(crate) fn parse_copilot_session_file(session_file: &Path) -> Result<Vec<Conv
         if let Some(cost) = request.cost.filter(|c| *c > 0.0) {
             stats.cost = cost;
         } else if let Some(model_name) = &model {
-            stats.cost = crate::models::calculate_total_cost(
+            stats.cost = crate::models::calculate_total_cost_for_service_tier_at(
                 model_name,
+                crate::models::ServiceTier::Standard,
                 stats.input_tokens,
                 stats.output_tokens,
                 stats.cache_creation_tokens,
                 stats.cache_read_tokens,
+                Some(assistant_date),
             );
         }
 

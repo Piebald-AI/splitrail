@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::calculate_total_cost;
+use crate::models::{ServiceTier, calculate_total_cost_for_service_tier_at};
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
 
@@ -493,7 +493,11 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 fallback
                             });
 
-                            let mut stats = stats_from_usage(&token_usage, &model_state.name);
+                            let mut stats = stats_from_usage(
+                                &token_usage,
+                                &model_state.name,
+                                wrapper.timestamp,
+                            );
                             stats.tool_calls = current_tool_call_ids.len() as u32;
                             current_tool_call_ids.clear();
 
@@ -534,7 +538,11 @@ pub(crate) fn parse_codex_cli_jsonl_file(
     Ok((entries, detected_model))
 }
 
-fn calculate_cost_from_tokens(usage: &CodexCliTokenUsage, model_name: &str) -> f64 {
+fn calculate_cost_from_tokens(
+    usage: &CodexCliTokenUsage,
+    model_name: &str,
+    effective_at: DateTime<Utc>,
+) -> f64 {
     // Codex's output_tokens already include any reasoning tokens. Treat them as-is
     // so we don't double-charge for structured reasoning output.
     let total_output_tokens = usage.output_tokens;
@@ -543,21 +551,27 @@ fn calculate_cost_from_tokens(usage: &CodexCliTokenUsage, model_name: &str) -> f
     // since Codex input_tokens is a superset that includes cached tokens
     let actual_input_tokens = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
 
-    calculate_total_cost(
+    calculate_total_cost_for_service_tier_at(
         model_name,
+        ServiceTier::Standard,
         actual_input_tokens,
         total_output_tokens,
         0, // Codex CLI doesn't have separate cache creation tokens
         usage.cached_input_tokens,
+        Some(effective_at),
     )
 }
 
-fn stats_from_usage(usage: &CodexCliTokenUsage, model_name: &str) -> Stats {
+fn stats_from_usage(
+    usage: &CodexCliTokenUsage,
+    model_name: &str,
+    effective_at: DateTime<Utc>,
+) -> Stats {
     // Keep the reported output token count; reasoning tokens are informational only.
     let total_output_tokens = usage.output_tokens;
     let actual_input_tokens = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
 
-    let cost = calculate_cost_from_tokens(usage, model_name);
+    let cost = calculate_cost_from_tokens(usage, model_name, effective_at);
 
     Stats {
         input_tokens: actual_input_tokens,

@@ -8,7 +8,7 @@
 /// individual analyzer modules are thin wrappers.
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::calculate_total_cost;
+use crate::models::{ServiceTier, calculate_total_cost_for_service_tier_at};
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
 use anyhow::{Context, Result};
@@ -428,7 +428,16 @@ fn to_conversation_message(
     let local_hash = Some(msg.id.clone());
     let global_hash = hash_text(&format!("{}_{}_{}", hash_prefix, msg.session_id, msg.id));
 
+    // `date` is used for display purposes and falls back to the Unix epoch
+    // when the source timestamp is missing/invalid (see `ms_to_datetime`).
+    // For pricing we need to distinguish "no timestamp" from "epoch
+    // timestamp", since the former should use default/undated pricing while
+    // the latter would otherwise spuriously match dated overrides.
     let date = ms_to_datetime(msg.time.created);
+    let effective_at = msg
+        .time
+        .created
+        .and_then(|ms| Utc.timestamp_millis_opt(ms).single());
 
     let mut stats = if msg.role == "assistant" {
         let mut s = extract_tool_stats_from_parts(part_root, &msg.id);
@@ -442,12 +451,14 @@ fn to_conversation_message(
             s.cached_tokens = tokens.cache.write + tokens.cache.read;
 
             if let Some(model_name) = msg.model_name() {
-                s.cost = calculate_total_cost(
+                s.cost = calculate_total_cost_for_service_tier_at(
                     &model_name,
+                    ServiceTier::Standard,
                     s.input_tokens,
                     s.output_tokens,
                     s.cache_creation_tokens,
                     s.cache_read_tokens,
+                    effective_at,
                 );
             }
         }
