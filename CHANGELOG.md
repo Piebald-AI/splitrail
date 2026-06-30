@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.8] - 2026-06-30
+- GPT-5.6 (Sol, Terra, Luna) (#192) - @mike1858
+- Claude Sonnet 5 (#193) - @mike1858
+- Rewrite Qwen analyzer (#191) - @mike1858
+- Add TUI config options, Apps column, and analyzer fixes (#189) - (@basekevin)
+
 ## [3.5.7] - 2026-06-13
 - feat(analyzer): add Antigravity CLI session parser with token and tool metrics (#179) - @jimyag
 - Do not quit on Esc; instead, Esc triggers drill-down → aggregate (#186) - @mike1858
