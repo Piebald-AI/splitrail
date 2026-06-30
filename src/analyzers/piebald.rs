@@ -5,7 +5,7 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
 use crate::models::{
-    InputTokenSemantics, ServiceTier, calculate_total_cost_for_service_tier, get_model_info,
+    InputTokenSemantics, ServiceTier, calculate_total_cost_for_service_tier_at, get_model_info,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
@@ -246,13 +246,14 @@ fn convert_messages(
 
             // Calculate cost using splitrail's model pricing
             let cost = if let Some(ref model) = model_str {
-                calculate_total_cost_for_service_tier(
+                calculate_total_cost_for_service_tier_at(
                     model,
                     service_tier,
                     input_tokens,
                     output_tokens,
                     cache_creation_tokens,
                     cache_read_tokens,
+                    Some(date),
                 )
             } else {
                 0.0

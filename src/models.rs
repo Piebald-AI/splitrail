@@ -1,3 +1,4 @@
+use chrono::{DateTime, NaiveDate, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -95,6 +96,14 @@ pub struct ServiceTierPricing {
     pub caching: CachingSupport,
 }
 
+/// Pricing and caching that apply for usage before an exclusive end date.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatedPricing {
+    pub valid_until: NaiveDate,
+    pub pricing: PricingStructure,
+    pub caching: CachingSupport,
+}
+
 /// How a provider reports input tokens relative to cache reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputTokenSemantics {
@@ -115,6 +124,10 @@ pub struct ModelInfo {
     /// Optional overrides for provider service tiers such as Priority or Flex.
     #[serde(default)]
     pub service_tiers: HashMap<ServiceTier, ServiceTierPricing>,
+    /// Optional dated standard-pricing overrides, ordered by exclusive end date.
+    /// A dated override applies when the usage date is earlier than `valid_until`.
+    #[serde(default)]
+    pub dated_pricing: Vec<DatedPricing>,
     /// How provider usage reports input tokens relative to cache reads.
     #[serde(default)]
     pub input_token_semantics: InputTokenSemantics,
@@ -161,6 +174,10 @@ impl Registry {
                 .service_tiers
                 .values()
                 .all(|tier| Self::validate_pricing_and_caching(&tier.pricing, &tier.caching))
+            && info
+                .dated_pricing
+                .iter()
+                .all(|dated| Self::validate_pricing_and_caching(&dated.pricing, &dated.caching))
     }
 
     fn validate_pricing_and_caching(pricing: &PricingStructure, caching: &CachingSupport) -> bool {
@@ -247,10 +264,28 @@ fn populate_defaults(
                     pricing: $pricing,
                     caching: $caching,
                     service_tiers: HashMap::new(),
+                    dated_pricing: Vec::new(),
                     input_token_semantics: input_token_semantics_for_model($name),
                     is_estimated: $est,
                 }),
             );
+        };
+    }
+
+    macro_rules! add_dated_pricing {
+        ($name:expr, $valid_until:expr, $pricing:expr, $caching:expr) => {
+            if let Some(model_info) = index.get_mut($name)
+                && let Some(model_info) = Arc::get_mut(model_info)
+            {
+                model_info.dated_pricing.push(DatedPricing {
+                    valid_until: $valid_until,
+                    pricing: $pricing,
+                    caching: $caching,
+                });
+                model_info
+                    .dated_pricing
+                    .sort_by_key(|dated| dated.valid_until);
+            }
         };
     }
 
@@ -969,6 +1004,30 @@ fn populate_defaults(
             cache_read_per_1m: 1.0
         },
         false
+    );
+    add_model!(
+        "claude-sonnet-5",
+        PricingStructure::Flat {
+            input_per_1m: 3.0,
+            output_per_1m: 15.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 3.75,
+            cache_read_per_1m: 0.3
+        },
+        false
+    );
+    add_dated_pricing!(
+        "claude-sonnet-5",
+        NaiveDate::from_ymd_opt(2026, 9, 1).expect("valid date"),
+        PricingStructure::Flat {
+            input_per_1m: 2.0,
+            output_per_1m: 10.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 2.5,
+            cache_read_per_1m: 0.2
+        }
     );
     add_model!(
         "claude-opus-4-8",
@@ -1853,6 +1912,11 @@ fn populate_defaults(
     add_alias!("claude-fable-5.0", "claude-fable-5");
     add_alias!("claude-5-fable", "claude-fable-5");
     add_alias!("claude-5.0-fable", "claude-fable-5");
+    add_alias!("claude-sonnet-5", "claude-sonnet-5");
+    add_alias!("claude-sonnet-5.0", "claude-sonnet-5");
+    add_alias!("claude-5-sonnet", "claude-sonnet-5");
+    add_alias!("claude-5.0-sonnet", "claude-sonnet-5");
+    add_alias!("global.anthropic.claude-sonnet-5", "claude-sonnet-5");
     add_alias!("claude-opus-4.8", "claude-opus-4-8");
     add_alias!("claude-4.8-opus", "claude-opus-4-8");
     add_alias!("claude-opus-4-8", "claude-opus-4-8");
@@ -2007,6 +2071,7 @@ fn get_free_model_info() -> Arc<ModelInfo> {
             },
             caching: CachingSupport::None,
             service_tiers: HashMap::new(),
+            dated_pricing: Vec::new(),
             input_token_semantics: InputTokenSemantics::ExcludesCache,
             is_estimated: false,
         })
@@ -2078,19 +2143,40 @@ pub fn is_model_estimated(model_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn standard_pricing_for_date(
+    model_info: &ModelInfo,
+    effective_at: Option<DateTime<Utc>>,
+) -> (&PricingStructure, &CachingSupport) {
+    if let Some(effective_at) = effective_at {
+        let usage_date = effective_at.date_naive();
+        if let Some(dated) = model_info
+            .dated_pricing
+            .iter()
+            .find(|dated| usage_date < dated.valid_until)
+        {
+            return (&dated.pricing, &dated.caching);
+        }
+    }
+
+    (&model_info.pricing, &model_info.caching)
+}
+
 fn pricing_for_service_tier(
     model_info: &ModelInfo,
     service_tier: ServiceTier,
+    effective_at: Option<DateTime<Utc>>,
 ) -> (&PricingStructure, &CachingSupport) {
+    let standard = standard_pricing_for_date(model_info, effective_at);
+
     if service_tier == ServiceTier::Standard {
-        return (&model_info.pricing, &model_info.caching);
+        return standard;
     }
 
     model_info
         .service_tiers
         .get(&service_tier)
         .map(|tier| (&tier.pricing, &tier.caching))
-        .unwrap_or((&model_info.pricing, &model_info.caching))
+        .unwrap_or(standard)
 }
 
 fn input_cost_for_pricing(pricing: &PricingStructure, input_tokens: u64) -> f64 {
@@ -2105,19 +2191,31 @@ fn input_cost_for_pricing(pricing: &PricingStructure, input_tokens: u64) -> f64 
 }
 
 /// Calculate cost for input tokens using the model's standard pricing structure.
+#[allow(dead_code)]
 pub fn calculate_input_cost(model_name: &str, input_tokens: u64) -> f64 {
     calculate_input_cost_for_service_tier(model_name, ServiceTier::Standard, input_tokens)
 }
 
 /// Calculate cost for input tokens using the requested service tier.
+#[allow(dead_code)]
 pub fn calculate_input_cost_for_service_tier(
     model_name: &str,
     service_tier: ServiceTier,
     input_tokens: u64,
 ) -> f64 {
+    calculate_input_cost_for_service_tier_at(model_name, service_tier, input_tokens, None)
+}
+
+/// Calculate cost for input tokens using the requested service tier and usage date.
+pub fn calculate_input_cost_for_service_tier_at(
+    model_name: &str,
+    service_tier: ServiceTier,
+    input_tokens: u64,
+    effective_at: Option<DateTime<Utc>>,
+) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            let (pricing, _) = pricing_for_service_tier(&model_info, service_tier);
+            let (pricing, _) = pricing_for_service_tier(&model_info, service_tier, effective_at);
             input_cost_for_pricing(pricing, input_tokens)
         }
         None => {
@@ -2141,19 +2239,31 @@ fn output_cost_for_pricing(pricing: &PricingStructure, output_tokens: u64) -> f6
 }
 
 /// Calculate cost for output tokens using the model's standard pricing structure.
+#[allow(dead_code)]
 pub fn calculate_output_cost(model_name: &str, output_tokens: u64) -> f64 {
     calculate_output_cost_for_service_tier(model_name, ServiceTier::Standard, output_tokens)
 }
 
 /// Calculate cost for output tokens using the requested service tier.
+#[allow(dead_code)]
 pub fn calculate_output_cost_for_service_tier(
     model_name: &str,
     service_tier: ServiceTier,
     output_tokens: u64,
 ) -> f64 {
+    calculate_output_cost_for_service_tier_at(model_name, service_tier, output_tokens, None)
+}
+
+/// Calculate cost for output tokens using the requested service tier and usage date.
+pub fn calculate_output_cost_for_service_tier_at(
+    model_name: &str,
+    service_tier: ServiceTier,
+    output_tokens: u64,
+    effective_at: Option<DateTime<Utc>>,
+) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            let (pricing, _) = pricing_for_service_tier(&model_info, service_tier);
+            let (pricing, _) = pricing_for_service_tier(&model_info, service_tier, effective_at);
             output_cost_for_pricing(pricing, output_tokens)
         }
         None => {
@@ -2197,6 +2307,7 @@ fn cache_cost_for_caching(
 }
 
 /// Calculate cost for cached tokens using the model's standard pricing structure.
+#[allow(dead_code)]
 pub fn calculate_cache_cost(
     model_name: &str,
     cache_creation_tokens: u64,
@@ -2211,15 +2322,33 @@ pub fn calculate_cache_cost(
 }
 
 /// Calculate cost for cached tokens using the requested service tier.
+#[allow(dead_code)]
 pub fn calculate_cache_cost_for_service_tier(
     model_name: &str,
     service_tier: ServiceTier,
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
 ) -> f64 {
+    calculate_cache_cost_for_service_tier_at(
+        model_name,
+        service_tier,
+        cache_creation_tokens,
+        cache_read_tokens,
+        None,
+    )
+}
+
+/// Calculate cost for cached tokens using the requested service tier and usage date.
+pub fn calculate_cache_cost_for_service_tier_at(
+    model_name: &str,
+    service_tier: ServiceTier,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    effective_at: Option<DateTime<Utc>>,
+) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            let (_, caching) = pricing_for_service_tier(&model_info, service_tier);
+            let (_, caching) = pricing_for_service_tier(&model_info, service_tier, effective_at);
             cache_cost_for_caching(caching, cache_creation_tokens, cache_read_tokens)
         }
         None => {
@@ -2232,6 +2361,7 @@ pub fn calculate_cache_cost_for_service_tier(
 }
 
 /// Calculate total cost for a model usage using the model's standard pricing structure.
+#[allow(dead_code)]
 pub fn calculate_total_cost(
     model_name: &str,
     input_tokens: u64,
@@ -2250,6 +2380,7 @@ pub fn calculate_total_cost(
 }
 
 /// Calculate total cost for a model usage using the requested service tier.
+#[allow(dead_code)]
 pub fn calculate_total_cost_for_service_tier(
     model_name: &str,
     service_tier: ServiceTier,
@@ -2258,9 +2389,31 @@ pub fn calculate_total_cost_for_service_tier(
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
 ) -> f64 {
+    calculate_total_cost_for_service_tier_at(
+        model_name,
+        service_tier,
+        input_tokens,
+        output_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+        None,
+    )
+}
+
+/// Calculate total cost for a model usage using the requested service tier and usage date.
+pub fn calculate_total_cost_for_service_tier_at(
+    model_name: &str,
+    service_tier: ServiceTier,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    effective_at: Option<DateTime<Utc>>,
+) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            let (pricing, caching) = pricing_for_service_tier(&model_info, service_tier);
+            let (pricing, caching) =
+                pricing_for_service_tier(&model_info, service_tier, effective_at);
             input_cost_for_pricing(pricing, input_tokens)
                 + output_cost_for_pricing(pricing, output_tokens)
                 + cache_cost_for_caching(caching, cache_creation_tokens, cache_read_tokens)
@@ -2372,12 +2525,15 @@ mod tests {
     use super::{
         CachingSupport, CachingTier, InputTokenSemantics, ModelInfo, PricingStructure, PricingTier,
         Registry, ServiceTier, TieredCaching, TieredPricing, calculate_cache_cost,
-        calculate_cache_cost_for_service_tier, calculate_input_cost,
-        calculate_input_cost_for_service_tier, calculate_output_cost,
-        calculate_output_cost_for_service_tier, get_model_info, get_registry_lock,
+        calculate_cache_cost_for_service_tier, calculate_cache_cost_for_service_tier_at,
+        calculate_input_cost, calculate_input_cost_for_service_tier,
+        calculate_input_cost_for_service_tier_at, calculate_output_cost,
+        calculate_output_cost_for_service_tier, calculate_output_cost_for_service_tier_at,
+        calculate_total_cost_for_service_tier_at, get_model_info, get_registry_lock,
         init_external_models,
     };
 
+    use chrono::{TimeZone, Utc};
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -2411,6 +2567,7 @@ mod tests {
                 },
                 caching: CachingSupport::None,
                 service_tiers: HashMap::new(),
+                dated_pricing: Vec::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2452,6 +2609,7 @@ mod tests {
                 },
                 caching: CachingSupport::None,
                 service_tiers: HashMap::new(),
+                dated_pricing: Vec::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2475,6 +2633,7 @@ mod tests {
                 },
                 caching: CachingSupport::None,
                 service_tiers: HashMap::new(),
+                dated_pricing: Vec::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2507,6 +2666,7 @@ mod tests {
                 },
                 caching: CachingSupport::None,
                 service_tiers: HashMap::new(),
+                dated_pricing: Vec::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2568,6 +2728,7 @@ mod tests {
                     bracket_pricing: false,
                 }),
                 service_tiers: HashMap::new(),
+                dated_pricing: Vec::new(),
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -2613,6 +2774,100 @@ mod tests {
         approx_eq(input_cost, 10.0);
         approx_eq(output_cost, 50.0);
         approx_eq(cache_cost, 13.5);
+    }
+
+    #[test]
+    fn claude_sonnet_5_alias_maps_to_sticker_pricing_by_default() {
+        let model_info = get_model_info("claude-5-sonnet").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        let input_cost = calculate_input_cost("claude-5-sonnet", 1_000_000);
+        let output_cost = calculate_output_cost("claude-5-sonnet", 1_000_000);
+        let cache_cost = calculate_cache_cost("claude-5-sonnet", 1_000_000, 1_000_000);
+
+        approx_eq(input_cost, 3.0);
+        approx_eq(output_cost, 15.0);
+        approx_eq(cache_cost, 4.05);
+    }
+
+    #[test]
+    fn claude_sonnet_5_uses_introductory_pricing_through_august_2026() {
+        let effective_at = Utc.with_ymd_and_hms(2026, 8, 31, 23, 59, 59).unwrap();
+
+        approx_eq(
+            calculate_input_cost_for_service_tier_at(
+                "claude-5-sonnet",
+                ServiceTier::Standard,
+                1_000_000,
+                Some(effective_at),
+            ),
+            2.0,
+        );
+        approx_eq(
+            calculate_output_cost_for_service_tier_at(
+                "claude-5-sonnet",
+                ServiceTier::Standard,
+                1_000_000,
+                Some(effective_at),
+            ),
+            10.0,
+        );
+        approx_eq(
+            calculate_cache_cost_for_service_tier_at(
+                "claude-5-sonnet",
+                ServiceTier::Standard,
+                1_000_000,
+                1_000_000,
+                Some(effective_at),
+            ),
+            2.7,
+        );
+    }
+
+    #[test]
+    fn claude_sonnet_5_uses_sticker_pricing_after_introductory_window() {
+        let effective_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+
+        approx_eq(
+            calculate_total_cost_for_service_tier_at(
+                "claude-5-sonnet",
+                ServiceTier::Standard,
+                1_000_000,
+                1_000_000,
+                1_000_000,
+                1_000_000,
+                Some(effective_at),
+            ),
+            22.05,
+        );
+    }
+
+    #[test]
+    fn claude_sonnet_5_global_anthropic_alias_maps_to_dated_pricing() {
+        let model_info = get_model_info("global.anthropic.claude-sonnet-5")
+            .expect("global Anthropic alias should resolve");
+        assert!(!model_info.is_estimated);
+
+        let effective_at = Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap();
+
+        approx_eq(
+            calculate_input_cost_for_service_tier_at(
+                "global.anthropic.claude-sonnet-5",
+                ServiceTier::Standard,
+                1_000_000,
+                Some(effective_at),
+            ),
+            2.0,
+        );
+        approx_eq(
+            calculate_output_cost_for_service_tier_at(
+                "global.anthropic.claude-sonnet-5",
+                ServiceTier::Standard,
+                1_000_000,
+                Some(effective_at),
+            ),
+            10.0,
+        );
     }
 
     #[test]
@@ -3190,6 +3445,7 @@ mod tests {
             "qwen3.6-plus",
             "mimo-v2.5-pro",
             "global.anthropic.claude-sonnet-4-6",
+            "global.anthropic.claude-sonnet-5",
             "deepseek.v3.2",
             "moonshotai.kimi-k2.5",
             "eu.anthropic.claude-opus-4-6-v1",

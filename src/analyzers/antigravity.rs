@@ -590,12 +590,14 @@ impl Analyzer for AntigravityCliAnalyzer {
                         .model_id
                         .clone()
                         .unwrap_or_else(|| "gemini-3-flash-preview".to_string());
-                    let cost = crate::models::calculate_total_cost(
+                    let cost = crate::models::calculate_total_cost_for_service_tier_at(
                         &model_name_str,
+                        crate::models::ServiceTier::Standard,
                         gen_meta.input_tokens,
                         gen_meta.output_tokens,
                         0,
                         0,
+                        Some(ts),
                     );
                     stats.input_tokens = gen_meta.input_tokens;
                     stats.output_tokens = gen_meta.output_tokens;
@@ -609,12 +611,14 @@ impl Analyzer for AntigravityCliAnalyzer {
                         .clone()
                         .unwrap_or_else(|| "gemini-2.5-flash".to_string());
                     let estimated_output_tokens = crate::analyzers::copilot::count_tokens(&content);
-                    let cost = crate::models::calculate_total_cost(
+                    let cost = crate::models::calculate_total_cost_for_service_tier_at(
                         &model_name_str,
+                        crate::models::ServiceTier::Standard,
                         0,
                         estimated_output_tokens,
                         0,
                         0,
+                        Some(ts),
                     );
                     stats.output_tokens = estimated_output_tokens;
                     stats.cost = cost;

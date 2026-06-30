@@ -1,6 +1,9 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::{calculate_cache_cost, calculate_input_cost, calculate_output_cost};
+use crate::models::{
+    ServiceTier, calculate_cache_cost_for_service_tier_at,
+    calculate_input_cost_for_service_tier_at, calculate_output_cost_for_service_tier_at,
+};
 use crate::types::{Application, ConversationMessage, FileCategory, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text};
 use anyhow::Result;
@@ -243,12 +246,32 @@ fn extract_and_hash_project_id_gemini_cli(file_path: &Path) -> String {
 }
 
 // Cost calculation using the centralized model system
-fn calculate_gemini_cost(tokens: &GeminiCliTokens, model_name: &str) -> f64 {
+fn calculate_gemini_cost(
+    tokens: &GeminiCliTokens,
+    model_name: &str,
+    effective_at: DateTime<Utc>,
+) -> f64 {
     let total_input_tokens = tokens.input + tokens.thoughts + tokens.tool;
 
-    let input_cost = calculate_input_cost(model_name, total_input_tokens);
-    let output_cost = calculate_output_cost(model_name, tokens.output);
-    let cache_cost = calculate_cache_cost(model_name, 0, tokens.cached); // Gemini CLI doesn't have cache creation
+    let input_cost = calculate_input_cost_for_service_tier_at(
+        model_name,
+        ServiceTier::Standard,
+        total_input_tokens,
+        Some(effective_at),
+    );
+    let output_cost = calculate_output_cost_for_service_tier_at(
+        model_name,
+        ServiceTier::Standard,
+        tokens.output,
+        Some(effective_at),
+    );
+    let cache_cost = calculate_cache_cost_for_service_tier_at(
+        model_name,
+        ServiceTier::Standard,
+        0,
+        tokens.cached,
+        Some(effective_at),
+    ); // Gemini CLI doesn't have cache creation
 
     input_cost + output_cost + cache_cost
 }
@@ -343,7 +366,7 @@ fn messages_from_session(
                 stats.cache_creation_tokens = 0;
                 stats.cache_read_tokens = 0;
                 stats.cached_tokens = tokens.cached;
-                stats.cost = calculate_gemini_cost(&tokens, &model);
+                stats.cost = calculate_gemini_cost(&tokens, &model, timestamp);
                 stats.tool_calls = tool_calls.len() as u32;
 
                 entries.push(ConversationMessage {
