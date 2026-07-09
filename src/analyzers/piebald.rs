@@ -177,14 +177,25 @@ fn parse_service_tier(service_tier: Option<&str>) -> ServiceTier {
     }
 }
 
-fn normalize_input_tokens(model: Option<&str>, input_tokens: u64, cache_read_tokens: u64) -> u64 {
-    if model
+fn model_uses_openai_token_semantics(model: Option<&str>) -> bool {
+    model
         .and_then(get_model_info)
         .is_some_and(|info| info.input_token_semantics == InputTokenSemantics::IncludesCacheRead)
-    {
+}
+
+fn normalize_input_tokens(model: Option<&str>, input_tokens: u64, cache_read_tokens: u64) -> u64 {
+    if model_uses_openai_token_semantics(model) {
         input_tokens.saturating_sub(cache_read_tokens)
     } else {
         input_tokens
+    }
+}
+
+fn billable_output_tokens(model: Option<&str>, output_tokens: u64, reasoning_tokens: u64) -> u64 {
+    if model_uses_openai_token_semantics(model) {
+        output_tokens.saturating_add(reasoning_tokens)
+    } else {
+        output_tokens
     }
 }
 
@@ -244,13 +255,16 @@ fn convert_messages(
 
             let service_tier = parse_service_tier(msg.service_tier.as_deref());
 
-            // Calculate cost using splitrail's model pricing
+            // Calculate cost using splitrail's model pricing. OpenAI-style reasoning tokens are
+            // billed at the output rate, while remaining separate in display stats.
+            let billable_output =
+                billable_output_tokens(model_str.as_deref(), output_tokens, reasoning_tokens);
             let cost = if let Some(ref model) = model_str {
                 calculate_total_cost_for_service_tier_at(
                     model,
                     service_tier,
                     input_tokens,
-                    output_tokens,
+                    billable_output,
                     cache_creation_tokens,
                     cache_read_tokens,
                     Some(date),
@@ -405,7 +419,7 @@ mod tests {
             model: Some("gpt-5.4".to_string()),
             input_tokens: Some(1_000_000),
             output_tokens: Some(1_000_000),
-            reasoning_tokens: Some(0),
+            reasoning_tokens: Some(100_000),
             cache_read_tokens: Some(0),
             cache_write_tokens: Some(0),
             service_tier: Some("priority".to_string()),
@@ -417,7 +431,22 @@ mod tests {
         let converted = convert_messages(&chats, messages, &tool_call_counts);
 
         assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0].stats.cost, 35.0);
+        assert_eq!(converted[0].stats.output_tokens, 1_000_000);
+        assert_eq!(converted[0].stats.reasoning_tokens, 100_000);
+        assert_eq!(converted[0].stats.cost, 38.0);
+    }
+
+    #[test]
+    fn test_billable_output_tokens_includes_openai_reasoning() {
+        assert_eq!(billable_output_tokens(Some("gpt-5.5"), 1_000, 300), 1_300);
+    }
+
+    #[test]
+    fn test_billable_output_tokens_preserves_anthropic_output() {
+        assert_eq!(
+            billable_output_tokens(Some("claude-sonnet-4-20250514"), 1_000, 300),
+            1_000
+        );
     }
 
     #[test]
