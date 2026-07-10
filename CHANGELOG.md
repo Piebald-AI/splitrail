@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.9] - 2026-06-10
+- Fix GPT-5.6 priority pricing and cache accounting (#197) - @mike1858
+- Bill OpenAI reasoning tokens as output (#195) - @mike1858
+- Include Copilot CLI in the Leaderboard in the filter - @mike1858
+
 ## [3.5.8] - 2026-06-30
 - GPT-5.6 (Sol, Terra, Luna) (#192) - @mike1858
 - Claude Sonnet 5 (#193) - @mike1858
