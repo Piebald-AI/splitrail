@@ -916,26 +916,26 @@ fn populate_defaults(
     add_flat_service_tier_pricing_with_cache_writes!(
         "gpt-5.6-sol",
         ServiceTier::Priority,
+        10.0,
         12.50,
-        15.625,
-        1.25,
-        75.0
+        1.0,
+        60.0
     );
     add_flat_service_tier_pricing_with_cache_writes!(
         "gpt-5.6-terra",
         ServiceTier::Priority,
+        5.0,
         6.25,
-        7.8125,
-        0.625,
-        37.50
+        0.50,
+        30.0
     );
     add_flat_service_tier_pricing_with_cache_writes!(
         "gpt-5.6-luna",
         ServiceTier::Priority,
+        2.0,
         2.50,
-        3.125,
-        0.25,
-        15.0
+        0.20,
+        12.0
     );
     add_flat_service_tier_pricing!("gpt-5.5", ServiceTier::Priority, 12.50, 1.25, 75.0);
     add_flat_service_tier_pricing!("gpt-5.4", ServiceTier::Priority, 5.0, 0.50, 30.0);
@@ -2991,11 +2991,11 @@ mod tests {
     fn gpt_priority_pricing_is_available_for_supported_models() {
         approx_eq(
             calculate_input_cost_for_service_tier("gpt-5.6-sol", ServiceTier::Priority, 1_000_000),
-            12.50,
+            10.0,
         );
         approx_eq(
             calculate_output_cost_for_service_tier("gpt-5.6-sol", ServiceTier::Priority, 1_000_000),
-            75.0,
+            60.0,
         );
         approx_eq(
             calculate_cache_cost_for_service_tier(
@@ -3004,7 +3004,7 @@ mod tests {
                 0,
                 1_000_000,
             ),
-            1.25,
+            1.0,
         );
         approx_eq(
             calculate_cache_cost_for_service_tier(
@@ -3013,7 +3013,7 @@ mod tests {
                 1_000_000,
                 1_000_000,
             ),
-            16.875,
+            13.50,
         );
 
         approx_eq(
@@ -3022,7 +3022,7 @@ mod tests {
                 ServiceTier::Priority,
                 1_000_000,
             ),
-            6.25,
+            5.0,
         );
         approx_eq(
             calculate_output_cost_for_service_tier(
@@ -3030,7 +3030,7 @@ mod tests {
                 ServiceTier::Priority,
                 1_000_000,
             ),
-            37.50,
+            30.0,
         );
         approx_eq(
             calculate_cache_cost_for_service_tier(
@@ -3039,7 +3039,7 @@ mod tests {
                 0,
                 1_000_000,
             ),
-            0.625,
+            0.50,
         );
         approx_eq(
             calculate_cache_cost_for_service_tier(
@@ -3048,12 +3048,12 @@ mod tests {
                 1_000_000,
                 1_000_000,
             ),
-            8.4375,
+            6.75,
         );
 
         approx_eq(
             calculate_input_cost_for_service_tier("gpt-5.6-luna", ServiceTier::Priority, 1_000_000),
-            2.50,
+            2.0,
         );
         approx_eq(
             calculate_output_cost_for_service_tier(
@@ -3061,7 +3061,7 @@ mod tests {
                 ServiceTier::Priority,
                 1_000_000,
             ),
-            15.0,
+            12.0,
         );
         approx_eq(
             calculate_cache_cost_for_service_tier(
@@ -3070,7 +3070,7 @@ mod tests {
                 0,
                 1_000_000,
             ),
-            0.25,
+            0.20,
         );
         approx_eq(
             calculate_cache_cost_for_service_tier(
@@ -3079,7 +3079,7 @@ mod tests {
                 1_000_000,
                 1_000_000,
             ),
-            3.375,
+            2.70,
         );
 
         approx_eq(
