@@ -8,7 +8,7 @@ use crate::models::{
     InputTokenSemantics, ServiceTier, calculate_total_cost_for_service_tier_at, get_model_info,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
-use crate::utils::{hash_text, warn_once};
+use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -194,12 +194,6 @@ fn normalize_input_tokens(
     }
 
     let Some(cache_write_tokens) = cache_write_tokens else {
-        if model.is_some_and(|name| name.starts_with("gpt-5.6")) {
-            warn_once(
-                "WARNING: GPT-5.6 cache write usage was not captured; cost is a lower-bound estimate."
-                    .to_string(),
-            );
-        }
         return input_tokens.saturating_sub(cache_read_tokens);
     };
 
