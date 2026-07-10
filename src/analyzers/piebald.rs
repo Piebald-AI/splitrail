@@ -8,7 +8,7 @@ use crate::models::{
     InputTokenSemantics, ServiceTier, calculate_total_cost_for_service_tier_at, get_model_info,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
-use crate::utils::hash_text;
+use crate::utils::{hash_text, warn_once};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -183,12 +183,29 @@ fn model_uses_openai_token_semantics(model: Option<&str>) -> bool {
         .is_some_and(|info| info.input_token_semantics == InputTokenSemantics::IncludesCacheRead)
 }
 
-fn normalize_input_tokens(model: Option<&str>, input_tokens: u64, cache_read_tokens: u64) -> u64 {
-    if model_uses_openai_token_semantics(model) {
-        input_tokens.saturating_sub(cache_read_tokens)
-    } else {
-        input_tokens
+fn normalize_input_tokens(
+    model: Option<&str>,
+    input_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: Option<u64>,
+) -> u64 {
+    if !model_uses_openai_token_semantics(model) {
+        return input_tokens;
     }
+
+    let Some(cache_write_tokens) = cache_write_tokens else {
+        if model.is_some_and(|name| name.starts_with("gpt-5.6")) {
+            warn_once(
+                "WARNING: GPT-5.6 cache write usage was not captured; cost is a lower-bound estimate."
+                    .to_string(),
+            );
+        }
+        return input_tokens.saturating_sub(cache_read_tokens);
+    };
+
+    // OpenAI may report overlapping reads and writes. Remove their union from
+    // ordinary input so no token is billed at all three input rates.
+    input_tokens.saturating_sub(cache_read_tokens.max(cache_write_tokens))
 }
 
 fn billable_output_tokens(model: Option<&str>, output_tokens: u64, reasoning_tokens: u64) -> u64 {
@@ -249,9 +266,14 @@ fn convert_messages(
             let output_tokens = msg.output_tokens.unwrap_or(0) as u64;
             let reasoning_tokens = msg.reasoning_tokens.unwrap_or(0) as u64;
             let cache_read_tokens = msg.cache_read_tokens.unwrap_or(0) as u64;
-            let cache_creation_tokens = msg.cache_write_tokens.unwrap_or(0) as u64;
-            let input_tokens =
-                normalize_input_tokens(model_str.as_deref(), raw_input_tokens, cache_read_tokens);
+            let cache_write_tokens = msg.cache_write_tokens.map(|tokens| tokens as u64);
+            let cache_creation_tokens = cache_write_tokens.unwrap_or(0);
+            let input_tokens = normalize_input_tokens(
+                model_str.as_deref(),
+                raw_input_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            );
 
             let service_tier = parse_service_tier(msg.service_tier.as_deref());
 
@@ -451,25 +473,76 @@ mod tests {
 
     #[test]
     fn test_normalize_input_tokens_subtracts_openai_cached_reads() {
-        assert_eq!(normalize_input_tokens(Some("gpt-5"), 1_000, 300), 700);
+        assert_eq!(normalize_input_tokens(Some("gpt-5"), 1_000, 300, None), 700);
     }
 
     #[test]
     fn test_normalize_input_tokens_subtracts_tiered_openai_cached_reads() {
-        assert_eq!(normalize_input_tokens(Some("gpt-5.5"), 1_000, 300), 700);
+        assert_eq!(
+            normalize_input_tokens(Some("gpt-5.5"), 1_000, 300, None),
+            700
+        );
+    }
+
+    #[test]
+    fn test_normalize_input_tokens_subtracts_openai_cache_write_union() {
+        assert_eq!(
+            normalize_input_tokens(Some("gpt-5.6-sol"), 4_583, 3_945, Some(4_580)),
+            3
+        );
+    }
+
+    #[test]
+    fn test_normalize_input_tokens_subtracts_larger_openai_cache_read() {
+        assert_eq!(
+            normalize_input_tokens(Some("gpt-5.6-sol"), 5_000, 4_000, Some(3_000)),
+            1_000
+        );
+    }
+
+    #[test]
+    fn test_convert_messages_uses_cache_write_rate_without_double_charging() {
+        let chats = vec![PiebaldChat {
+            id: 1,
+            title: Some("Cached chat".to_string()),
+            model: Some("gpt-5.6-sol".to_string()),
+            project_directory: Some("/tmp/project".to_string()),
+        }];
+        let messages = vec![PiebaldMessage {
+            id: 10,
+            parent_chat_id: 1,
+            role: "assistant".to_string(),
+            model: Some("gpt-5.6-sol".to_string()),
+            input_tokens: Some(4_583),
+            output_tokens: Some(0),
+            reasoning_tokens: Some(0),
+            cache_read_tokens: Some(3_945),
+            cache_write_tokens: Some(4_580),
+            service_tier: None,
+            created_at: "2026-07-10T12:00:00Z".to_string(),
+            updated_at: "2026-07-10T12:00:01Z".to_string(),
+        }];
+
+        let converted = convert_messages(&chats, messages, &HashMap::new());
+        let stats = &converted[0].stats;
+
+        assert_eq!(stats.input_tokens, 3);
+        assert_eq!(stats.cache_read_tokens, 3_945);
+        assert_eq!(stats.cache_creation_tokens, 4_580);
+        assert!((stats.cost - 0.030_612_5).abs() < 1e-9);
     }
 
     #[test]
     fn test_normalize_input_tokens_preserves_anthropic_input() {
         assert_eq!(
-            normalize_input_tokens(Some("claude-sonnet-4-20250514"), 700, 300),
+            normalize_input_tokens(Some("claude-sonnet-4-20250514"), 700, 300, Some(200)),
             700
         );
     }
 
     #[test]
     fn test_normalize_input_tokens_saturates_for_openai() {
-        assert_eq!(normalize_input_tokens(Some("gpt-5"), 100, 300), 0);
+        assert_eq!(normalize_input_tokens(Some("gpt-5"), 100, 300, None), 0);
     }
 
     #[test]
