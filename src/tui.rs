@@ -2398,7 +2398,7 @@ fn draw_session_stats_table(
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
-                    "──────",
+                    "─".repeat(COUNT_COL_WIDTH as usize),
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(

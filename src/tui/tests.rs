@@ -242,6 +242,10 @@ fn aggregate_table_preserves_leading_digit_in_large_tool_total() {
         rendered.contains("204.92k"),
         "rendered table clipped the tool total: {rendered}"
     );
+    assert!(
+        rendered.contains("───────"),
+        "rendered table did not align count separators to their columns: {rendered}"
+    );
 }
 
 #[test]
