@@ -5,16 +5,21 @@ use crate::tui::logic::{
 };
 use crate::tui::{
     AggregateViewMode, PeriodFilter, build_display_stats, cost_heat,
-    create_upload_progress_callback, format_month_for_display, format_week_for_display,
-    format_year_for_display, parse_accent, show_upload_error, show_upload_success,
-    update_period_filters, update_table_states, update_window_offsets,
+    create_upload_progress_callback, draw_aggregate_stats_table, format_month_for_display,
+    format_week_for_display, format_year_for_display, parse_accent, show_upload_error,
+    show_upload_success, update_period_filters, update_table_states, update_window_offsets,
 };
 use crate::types::{
-    AgenticCodingToolStats, CompactDate, DailyStats, MultiAnalyzerStats, Stats, TuiStats,
+    AgenticCodingToolStats, AnalyzerStatsView, CompactDate, DailyStats, MultiAnalyzerStats, Stats,
+    TuiStats,
 };
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::widgets::TableState;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 // ============================================================================
 // CONFIG-DRIVEN APPEARANCE TESTS
@@ -177,6 +182,66 @@ fn test_update_window_offsets_and_period_filters_resize() {
 
     assert_eq!(offsets, vec![5]);
     assert_eq!(filters, vec![Some(PeriodFilter::Day(day))]);
+}
+
+#[test]
+fn aggregate_table_preserves_leading_digit_in_large_tool_total() {
+    let mut daily_stats = BTreeMap::new();
+    for day in 1..=20 {
+        let date = format!("2025-01-{day:02}");
+        let mut stats = make_daily_stats(&date, 1, 0, 1);
+        stats.stats.tool_calls = if day == 20 { 14_920 } else { 10_000 };
+        daily_stats.insert(date, stats);
+    }
+
+    let stats = AnalyzerStatsView {
+        daily_stats,
+        session_aggregates: Vec::new(),
+        num_conversations: 20,
+        analyzer_name: Arc::from("Test"),
+    };
+    let format_options = crate::utils::NumberFormatOptions {
+        use_comma: false,
+        use_human: true,
+        locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
+        decimal_places: 2,
+    };
+    let backend = TestBackend::new(160, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut table_state = TableState::default();
+
+    terminal
+        .draw(|frame| {
+            draw_aggregate_stats_table(
+                frame,
+                Rect::new(0, 0, 160, 24),
+                &stats,
+                &format_options,
+                &mut table_state,
+                AggregateViewMode::Daily,
+                "",
+                false,
+                false,
+                Color::Cyan,
+                &HashSet::new(),
+                false,
+            );
+        })
+        .unwrap();
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(
+        rendered.contains("204.92k"),
+        "rendered table clipped the tool total: {rendered}"
+    );
 }
 
 #[test]
