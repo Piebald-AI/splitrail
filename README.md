@@ -39,7 +39,7 @@ Splitrail is a **fast, cross-platform, real-time token usage tracker and cost mo
 - [OpenCode](https://github.com/sst/opencode)
 - [Pi Agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)
 
-Run one command to instantly review all of your CLI coding agent usage.  Upload your usage data to your private account on the [Splitrail Cloud](https://splitrail.dev) for safe-keeping and cross-machine usage aggregation.  From the team behind [<img src="https://github.com/Piebald-AI/piebald/raw/main/assets/logo.svg" width="15"> **Piebald.**](https://piebald.ai/)
+Run one command to instantly review all of your CLI coding agent usage.  Upload your usage data to your private account on the [Splitrail Cloud](https://splitrail.dev) for safe-keeping and cross-machine usage aggregation.  From the team behind [<img src="https://github.com/Piebald-AI/piebald-issues/raw/main/assets/logo.svg" width="15"> **Piebald.**](https://piebald.ai/)
 
 
 > [!note]
