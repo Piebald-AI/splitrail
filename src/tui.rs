@@ -417,6 +417,13 @@ pub(crate) fn build_display_stats(
 /// by `format_number_fit` which falls back to human-readable format.
 const TOKEN_COL_WIDTH: u16 = 12;
 
+/// Column width for conversation and tool-call counts.
+///
+/// Human-readable totals can require seven characters (for example, "204.92k").
+/// Keeping both count columns at this width prevents right-aligned totals from
+/// being clipped on the left.
+const COUNT_COL_WIDTH: u16 = 7;
+
 pub fn run_tui(
     stats_receiver: watch::Receiver<MultiAnalyzerStatsView>,
     format_options: &NumberFormatOptions,
@@ -1876,11 +1883,12 @@ fn draw_aggregate_stats_table(
     if show("reason") {
         sep_cells.push(dim(token_sep.clone()));
     }
+    let count_sep = "─".repeat(COUNT_COL_WIDTH as usize);
     if show("convs") {
-        sep_cells.push(dim("──────".into()));
+        sep_cells.push(dim(count_sep.clone()));
     }
     if show("tools") {
-        sep_cells.push(dim("──────".into()));
+        sep_cells.push(dim(count_sep));
     }
     if show("apps") {
         sep_cells.push(dim("─".repeat(all_apps_text.len().max(16))));
@@ -2017,10 +2025,10 @@ fn draw_aggregate_stats_table(
         widths.push(Constraint::Length(TOKEN_COL_WIDTH));
     }
     if show("convs") {
-        widths.push(Constraint::Length(6));
+        widths.push(Constraint::Length(COUNT_COL_WIDTH));
     }
     if show("tools") {
-        widths.push(Constraint::Length(6));
+        widths.push(Constraint::Length(COUNT_COL_WIDTH));
     }
     if show("apps") {
         widths.push(Constraint::Min(16));
@@ -2390,7 +2398,7 @@ fn draw_session_stats_table(
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
-                    "──────",
+                    "─".repeat(COUNT_COL_WIDTH as usize),
                     Style::default().add_modifier(Modifier::DIM),
                 )),
                 Line::from(Span::styled(
@@ -2473,7 +2481,7 @@ fn draw_session_stats_table(
             Constraint::Length(TOKEN_COL_WIDTH), // Input
             Constraint::Length(TOKEN_COL_WIDTH), // Output
             Constraint::Length(TOKEN_COL_WIDTH), // Reason Tks
-            Constraint::Length(6),               // Tools
+            Constraint::Length(COUNT_COL_WIDTH), // Tools
             Constraint::Min(10),                 // Models
         ],
     )
