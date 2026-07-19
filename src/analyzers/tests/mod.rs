@@ -10,3 +10,4 @@ mod kilo_code;
 mod opencode;
 mod qwen_code;
 mod roo_code;
+mod zoo_code;

@@ -214,6 +214,7 @@ pub enum Application {
     CodexCli,
     Cline,
     RooCode,
+    ZooCode,
     KiloCode,
     KiloCli,
     Copilot,

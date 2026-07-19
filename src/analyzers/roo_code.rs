@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 
 const ROO_CODE_EXTENSION_ID: &str = "rooveterinaryinc.roo-cline";
 
+pub(crate) fn parse_roo_format_task_directory(
+    task_dir: &Path,
+    application: Application,
+) -> Result<Vec<ConversationMessage>> {
+    parse_roo_code_task_directory(task_dir, application)
+}
+
 pub struct RooCodeAnalyzer;
 
 impl RooCodeAnalyzer {
@@ -125,7 +132,10 @@ fn extract_model_from_text(text: &str) -> Option<String> {
 }
 
 // Parse a single Roo Code task directory
-fn parse_roo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMessage>> {
+fn parse_roo_code_task_directory(
+    task_dir: &Path,
+    application: Application,
+) -> Result<Vec<ConversationMessage>> {
     let project_hash = extract_and_hash_project_id_roo_code(task_dir);
 
     // Get the conversation hash from the task directory name (UUID)
@@ -204,7 +214,7 @@ fn parse_roo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMess
                         };
 
                         entries.push(ConversationMessage {
-                            application: Application::RooCode,
+                            application: application.clone(),
                             date,
                             project_hash: project_hash.clone(),
                             conversation_hash: conversation_hash.clone(),
@@ -254,7 +264,7 @@ fn parse_roo_code_task_directory(task_dir: &Path) -> Result<Vec<ConversationMess
                     }
 
                     entries.push(ConversationMessage {
-                        application: Application::RooCode,
+                        application: application.clone(),
                         date,
                         project_hash: project_hash.clone(),
                         conversation_hash: conversation_hash.clone(),
@@ -334,7 +344,7 @@ impl Analyzer for RooCodeAnalyzer {
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
-        parse_roo_code_task_directory(&source.path)
+        parse_roo_code_task_directory(&source.path, Application::RooCode)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {

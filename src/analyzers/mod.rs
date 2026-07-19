@@ -13,6 +13,7 @@ pub mod pi_agent;
 pub mod piebald;
 pub mod qwen_code;
 pub mod roo_code;
+pub mod zoo_code;
 
 pub use antigravity::AntigravityCliAnalyzer;
 pub use claude_code::ClaudeCodeAnalyzer;
@@ -28,6 +29,7 @@ pub use pi_agent::PiAgentAnalyzer;
 pub use piebald::PiebaldAnalyzer;
 pub use qwen_code::QwenCodeAnalyzer;
 pub use roo_code::RooCodeAnalyzer;
+pub use zoo_code::ZooCodeAnalyzer;
 
 #[cfg(test)]
 pub mod tests;

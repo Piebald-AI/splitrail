@@ -7,7 +7,7 @@ use analyzer::AnalyzerRegistry;
 use analyzers::{
     AntigravityCliAnalyzer, ClaudeCodeAnalyzer, ClineAnalyzer, CodexCliAnalyzer, CopilotAnalyzer,
     CopilotCliAnalyzer, GeminiCliAnalyzer, KiloCliAnalyzer, KiloCodeAnalyzer, OpenCodeAnalyzer,
-    PiAgentAnalyzer, PiebaldAnalyzer, QwenCodeAnalyzer, RooCodeAnalyzer,
+    PiAgentAnalyzer, PiebaldAnalyzer, QwenCodeAnalyzer, RooCodeAnalyzer, ZooCodeAnalyzer,
 };
 
 mod analyzer;
@@ -199,6 +199,7 @@ pub fn create_analyzer_registry() -> AnalyzerRegistry {
     registry.register(ClaudeCodeAnalyzer::new());
     registry.register(ClineAnalyzer::new());
     registry.register(RooCodeAnalyzer::new());
+    registry.register(ZooCodeAnalyzer::new());
     registry.register(KiloCodeAnalyzer::new());
     registry.register(KiloCliAnalyzer::new());
     registry.register(GeminiCliAnalyzer::new());
