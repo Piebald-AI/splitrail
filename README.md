@@ -33,7 +33,7 @@ Splitrail is a **fast, cross-platform, real-time token usage tracker and cost mo
 - [Gemini CLI](https://github.com/google-gemini/gemini-cli) (and [Qwen Code](https://github.com/qwenlm/qwen-code))
 - [Claude Code](https://github.com/anthropics/claude-code)
 - [Codex CLI](https://github.com/openai/codex)
-- [Cline](https://github.com/cline/cline) / [Roo Code](https://github.com/RooCodeInc/Roo-Code) / [Kilo Code](https://github.com/Kilo-Org/kilocode) (VS Code extension + CLI)
+- [Cline](https://github.com/cline/cline) / [Roo Code](https://github.com/RooCodeInc/Roo-Code) / [Zoo Code](https://github.com/Zoo-Code-Org/Zoo-Code/) / [Kilo Code](https://github.com/Kilo-Org/kilocode) (VS Code extension + CLI)
 - [GitHub Copilot](https://github.com/features/copilot) (VS Code)
 - [GitHub Copilot CLI](https://github.com/features/copilot)
 - [OpenCode](https://github.com/sst/opencode)
