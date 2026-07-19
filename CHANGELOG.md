@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-07-19
+- docs: mention Zoo Code as the Roo Code community successor (#203) - @taltas
+- Add Zoo Code usage tracking (#205) - @mike1858
+- Preserve Claude Code usage across session rewrites (#204) - @mike1858
+- Fix clipped tool-call totals in TUI tables (#201) - @mike1858
+- Fix broken image link (#202) - @bl-ue
+- Remove the GPT-5.6 cache write warning (#199) - @mike1858
+
 ## [3.5.9] - 2026-06-10
 - Fix GPT-5.6 priority pricing and cache accounting (#197) - @mike1858
 - Bill OpenAI reasoning tokens as output (#195) - @mike1858
