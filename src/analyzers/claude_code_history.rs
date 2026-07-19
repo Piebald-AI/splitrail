@@ -132,7 +132,7 @@ where
             )
             .context("Failed to record discovered Claude Code session")?;
     }
-    if prune_missing {
+    if prune_missing && !conversation_hashes.is_empty() {
         transaction
             .execute(
                 "DELETE FROM messages
@@ -376,6 +376,30 @@ mod tests {
         let stored = simd_json::from_slice::<ConversationMessage>(&mut payload).unwrap();
         assert_eq!(stored.stats.input_tokens, 25);
         assert_eq!(stored.session_name, None);
+    }
+
+    #[test]
+    fn empty_discovery_does_not_prune_retained_sessions() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join(HISTORY_FILE_NAME);
+        let conversation = "session".to_string();
+        let mut initial = vec![message("retained", &conversation, "local-retained", 10)];
+        merge_at(
+            &path,
+            &mut initial,
+            std::slice::from_ref(&conversation),
+            false,
+        )
+        .unwrap();
+
+        let mut empty: Vec<ConversationMessage> = Vec::new();
+        merge_at(&path, &mut empty, &[], true).unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
