@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -32,6 +33,27 @@ impl ClaudeCodeAnalyzer {
 
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+    }
+
+    fn parse_live_source(source: &DataSource) -> Result<Vec<ConversationMessage>> {
+        let project_hash = extract_and_hash_project_id(&source.path);
+        let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
+        let file = File::open(&source.path)?;
+        let (mut messages, summaries, _uuids, fallback) =
+            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
+        let name = summaries
+            .into_iter()
+            .next()
+            .map(|(_, name)| name)
+            .or(fallback);
+        if let Some(name) = name {
+            for message in &mut messages {
+                if message.session_name.is_none() {
+                    message.session_name = Some(name.clone());
+                }
+            }
+        }
+        Ok(messages)
     }
 }
 
@@ -73,22 +95,36 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
-        let project_hash = extract_and_hash_project_id(&source.path);
         let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
-        let file = File::open(&source.path)?;
-        let (mut messages, summaries, _uuids, fallback) =
-            parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
-        // Apply the within-file session name (summary, else first-message fallback)
-        // so the live TUI session view shows real titles, not just the upload path.
-        let name = summaries.into_iter().next().map(|(_, n)| n).or(fallback);
-        if let Some(name) = name {
-            for m in &mut messages {
-                if m.session_name.is_none() {
-                    m.session_name = Some(name.clone());
+        let messages = Self::parse_live_source(source)?;
+        Ok(deduplicate_messages(
+            super::claude_code_history::merge_session(messages, &conversation_hash),
+        ))
+    }
+
+    fn parse_sources_parallel_with_paths(
+        &self,
+        sources: &[DataSource],
+    ) -> Vec<(PathBuf, Vec<ConversationMessage>)> {
+        let grouped = sources
+            .par_iter()
+            .map(|source| match Self::parse_live_source(source) {
+                Ok(messages) => (source.path.clone(), messages),
+                Err(error) => {
+                    eprintln!(
+                        "Failed to parse {} source {:?}: {}",
+                        self.display_name(),
+                        source.path,
+                        error
+                    );
+                    (source.path.clone(), Vec::new())
                 }
-            }
-        }
-        Ok(messages)
+            })
+            .collect();
+        super::claude_code_history::merge_grouped(grouped)
+            .into_iter()
+            .map(|(path, messages)| (path, deduplicate_messages(messages)))
+            .collect()
     }
 
     // Claude Code has complex cross-file deduplication, so we override get_stats_with_sources
@@ -96,133 +132,12 @@ impl Analyzer for ClaudeCodeAnalyzer {
         &self,
         sources: Vec<DataSource>,
     ) -> Result<crate::types::AgenticCodingToolStats> {
-        // Type for deduplication entry: (insertion_order, message, seen_fingerprints)
-        type TokenFingerprint = (u64, u64, u64, u64, u64);
-        type DedupEntry = (usize, ConversationMessage, HashSet<TokenFingerprint>);
-
-        // Deduplication map and session tracking
-        let mut dedup_map: HashMap<String, DedupEntry> = HashMap::with_capacity(sources.len() * 50);
-        let mut insertion_counter: usize = 0;
-        let mut no_hash_counter: usize = 0;
-
-        // Session name mappings
-        let mut session_names: HashMap<String, String> = HashMap::new();
-        let mut conversation_summaries: HashMap<String, String> = HashMap::new();
-        let mut conversation_fallbacks: HashMap<String, String> = HashMap::new();
-        let mut conversation_uuids: HashMap<String, Vec<String>> = HashMap::new();
-
-        // Parse all files sequentially, deduplicating as we go
-        for source in sources {
-            let project_hash = extract_and_hash_project_id(&source.path);
-            let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
-
-            let file = match File::open(&source.path) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Failed to open Claude Code file {:?}: {}", source.path, e);
-                    continue;
-                }
-            };
-
-            let (msgs, summaries, uuids, fallback) =
-                match parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        eprintln!("Failed to parse Claude Code file {:?}: {}", source.path, e);
-                        continue;
-                    }
-                };
-
-            // Store summaries
-            for (uuid, name) in summaries {
-                session_names.insert(uuid, name);
-            }
-
-            // Store UUIDs for this conversation
-            conversation_uuids.insert(conversation_hash.clone(), uuids);
-
-            // Store fallback
-            if let Some(fb) = fallback {
-                conversation_fallbacks.insert(conversation_hash.clone(), fb);
-            }
-
-            // Deduplicate messages as we insert
-            for msg in msgs {
-                if let Some(local_hash) = &msg.local_hash {
-                    let order = insertion_counter;
-                    insertion_counter += 1;
-                    let fp = (
-                        msg.stats.input_tokens,
-                        msg.stats.output_tokens,
-                        msg.stats.cache_creation_tokens,
-                        msg.stats.cache_read_tokens,
-                        msg.stats.cached_tokens,
-                    );
-
-                    dedup_map
-                        .entry(local_hash.clone())
-                        .and_modify(|(_, existing, seen_fps)| {
-                            merge_message_into(existing, &msg, seen_fps, fp);
-                        })
-                        .or_insert_with(|| {
-                            let mut fps = HashSet::new();
-                            fps.insert(fp);
-                            (order, msg, fps)
-                        });
-                } else {
-                    // No local hash, always keep with unique key
-                    let order = insertion_counter;
-                    insertion_counter += 1;
-                    let unique_key = format!("__no_hash_{}", no_hash_counter);
-                    no_hash_counter += 1;
-                    let fp = (
-                        msg.stats.input_tokens,
-                        msg.stats.output_tokens,
-                        msg.stats.cache_creation_tokens,
-                        msg.stats.cache_read_tokens,
-                        msg.stats.cached_tokens,
-                    );
-                    let mut fps = HashSet::new();
-                    fps.insert(fp);
-                    dedup_map.insert(unique_key, (order, msg, fps));
-                }
-            }
-        }
-
-        // Link session names to conversations (after all parsing complete)
-        for (conversation_hash, uuids) in &conversation_uuids {
-            let mut found_summary = false;
-            for uuid in uuids {
-                if let Some(name) = session_names.get(uuid) {
-                    conversation_summaries.insert(conversation_hash.clone(), name.clone());
-                    found_summary = true;
-                    break;
-                }
-            }
-
-            if !found_summary && let Some(fb) = conversation_fallbacks.get(conversation_hash) {
-                conversation_summaries.insert(conversation_hash.clone(), fb.clone());
-            }
-        }
-
-        // Apply session names to messages and collect results
-        let mut result: Vec<_> = dedup_map
-            .into_iter()
-            .map(|(_, (order, mut msg, _))| {
-                // Apply session name if available
-                if msg.session_name.is_none()
-                    && let Some(name) = conversation_summaries.get(&msg.conversation_hash)
-                {
-                    msg.session_name = Some(name.clone());
-                }
-                (order, msg)
-            })
-            .collect();
-
-        // Sort by insertion order for deterministic output
-        result.sort_by_key(|(order, _)| *order);
-
-        let messages: Vec<ConversationMessage> = result.into_iter().map(|(_, msg)| msg).collect();
+        let messages: Vec<ConversationMessage> = deduplicate_messages(
+            self.parse_sources_parallel_with_paths(&sources)
+                .into_iter()
+                .flat_map(|(_, messages)| messages)
+                .collect(),
+        );
 
         // Aggregate stats
         let mut daily_stats = crate::utils::aggregate_by_date(&messages);
@@ -238,6 +153,12 @@ impl Analyzer for ClaudeCodeAnalyzer {
             messages,
             analyzer_name: self.display_name().to_string(),
         })
+    }
+
+    fn remove_source_state(&self, path: &Path) -> Result<()> {
+        super::claude_code_history::remove_session(&crate::utils::hash_text(
+            &path.to_string_lossy(),
+        ))
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
@@ -280,6 +201,45 @@ impl Analyzer for ClaudeCodeAnalyzer {
 }
 
 // Claude Code specific implementation functions
+
+type DedupEntry = (usize, ConversationMessage, HashSet<TokenFingerprint>);
+
+pub(crate) fn deduplicate_messages(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    let mut dedup_map: HashMap<String, DedupEntry> = HashMap::with_capacity(messages.len());
+    let mut no_hash_messages = Vec::new();
+
+    for (order, message) in messages.into_iter().enumerate() {
+        let Some(local_hash) = message.local_hash.clone() else {
+            no_hash_messages.push((order, message));
+            continue;
+        };
+        let fingerprint = (
+            message.stats.input_tokens,
+            message.stats.output_tokens,
+            message.stats.cache_creation_tokens,
+            message.stats.cache_read_tokens,
+            message.stats.cached_tokens,
+        );
+        dedup_map
+            .entry(local_hash)
+            .and_modify(|(_, existing, seen_fingerprints)| {
+                merge_message_into(existing, &message, seen_fingerprints, fingerprint);
+            })
+            .or_insert_with(|| {
+                let mut seen_fingerprints = HashSet::new();
+                seen_fingerprints.insert(fingerprint);
+                (order, message, seen_fingerprints)
+            });
+    }
+
+    let mut result: Vec<_> = dedup_map
+        .into_values()
+        .map(|(order, message, _)| (order, message))
+        .chain(no_hash_messages)
+        .collect();
+    result.sort_by_key(|(order, _)| *order);
+    result.into_iter().map(|(_, message)| message).collect()
+}
 
 // Helper function to extract project ID from Claude Code file path and hash it
 pub fn extract_and_hash_project_id(file_path: &Path) -> String {
