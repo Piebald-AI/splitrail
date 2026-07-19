@@ -1,5 +1,6 @@
 pub mod antigravity;
 pub mod claude_code;
+mod claude_code_history;
 pub mod cline;
 pub mod codex_cli;
 pub mod copilot;

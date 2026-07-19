@@ -1,6 +1,6 @@
 use crate::analyzers::claude_code::{
-    TokenFingerprint, calculate_cost_from_tokens, extract_and_hash_project_id, merge_message_into,
-    parse_jsonl_file,
+    TokenFingerprint, calculate_cost_from_tokens, deduplicate_messages,
+    extract_and_hash_project_id, merge_message_into, parse_jsonl_file,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use chrono::{TimeZone, Utc};
@@ -75,6 +75,39 @@ static DUPLICATE_MESSAGES_DATA: LazyLock<String> = LazyLock::new(|| {
     r#"{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"D:\\splitrail","sessionId":"dup-session","version":"1.0.51","message":{"id":"msg_duplicate","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"First message"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":20,"output_tokens":5,"service_tier":"standard"}},"requestId":"req_dup_test","type":"assistant","uuid":"dup-uuid-1","timestamp":"2025-08-02T16:00:00.000Z"}
 {"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"D:\\splitrail","sessionId":"dup-session","version":"1.0.51","message":{"id":"msg_duplicate","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"Second message (duplicate)"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":15,"cache_creation_input_tokens":150,"cache_read_input_tokens":30,"output_tokens":10,"service_tier":"standard"}},"requestId":"req_dup_test","type":"assistant","uuid":"dup-uuid-2","timestamp":"2025-08-02T16:00:01.000Z"}"#.to_string()
 });
+
+#[test]
+fn test_deduplicate_messages_merges_same_local_hash_across_uuids() {
+    let mut first = ConversationMessage {
+        application: Application::ClaudeCode,
+        date: Utc.with_ymd_and_hms(2025, 8, 2, 16, 0, 0).unwrap(),
+        project_hash: "project".to_string(),
+        conversation_hash: "conversation".to_string(),
+        local_hash: Some("shared-local-hash".to_string()),
+        global_hash: "uuid-a".to_string(),
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        stats: Stats {
+            input_tokens: 10,
+            ..Stats::default()
+        },
+        role: MessageRole::Assistant,
+        uuid: Some("uuid-a".to_string()),
+        session_name: None,
+    };
+    let mut second = first.clone();
+    second.global_hash = "uuid-b".to_string();
+    second.uuid = Some("uuid-b".to_string());
+    second.stats.input_tokens = 20;
+
+    let deduplicated = deduplicate_messages(vec![first.clone(), second]);
+    assert_eq!(deduplicated.len(), 1);
+    assert_eq!(deduplicated[0].stats.input_tokens, 30);
+
+    first.stats.input_tokens = 10;
+    let duplicate_fingerprint = deduplicate_messages(vec![first.clone(), first]);
+    assert_eq!(duplicate_fingerprint.len(), 1);
+    assert_eq!(duplicate_fingerprint[0].stats.input_tokens, 10);
+}
 
 #[test]
 fn test_parse_jsonl_file_basic() {

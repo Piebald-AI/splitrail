@@ -239,6 +239,11 @@ pub trait Analyzer: Send + Sync {
     /// - `MultiSession`: 1 file = many sessions (~100+ bytes/file) - e.g., Piebald
     fn contribution_strategy(&self) -> ContributionStrategy;
 
+    /// Remove analyzer-owned persistent state for a source that was deleted.
+    fn remove_source_state(&self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+
     /// Get stats with pre-discovered sources (avoids double discovery).
     /// Default implementation parses sources in parallel via `parse_sources_parallel()`.
     /// Override for analyzers with complex cross-file logic (e.g., claude_code).
@@ -576,18 +581,9 @@ impl AnalyzerRegistry {
         let source = DataSource {
             path: changed_path.to_path_buf(),
         };
-        let new_messages = match analyzer.parse_source(&source) {
-            Ok(msgs) => crate::utils::deduplicate_by_global_hash(msgs),
-            Err(e) => {
-                eprintln!(
-                    "Failed to parse {} source {:?}: {}",
-                    analyzer.display_name(),
-                    source.path,
-                    e
-                );
-                Vec::new()
-            }
-        };
+        let new_messages = analyzer
+            .parse_source(&source)
+            .map(crate::utils::deduplicate_by_global_hash)?;
 
         // Get or create the cached view for this analyzer
         let shared_view = self
@@ -661,6 +657,17 @@ impl AnalyzerRegistry {
     /// Returns true if the file was found and removed.
     /// Also marks the file as dirty for upload if it was in the cache.
     pub fn remove_file_from_cache(&self, analyzer_name: &str, path: &std::path::Path) -> bool {
+        if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name)
+            && let Err(error) = analyzer.remove_source_state(path)
+        {
+            eprintln!(
+                "Failed to remove {} state for {:?}: {}",
+                analyzer.display_name(),
+                path,
+                error
+            );
+        }
+
         let path_hash = PathHash::new(path);
 
         // Try to remove from any cache and update view accordingly
