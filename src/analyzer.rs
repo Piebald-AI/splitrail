@@ -775,6 +775,7 @@ impl AnalyzerRegistry {
     pub fn load_messages_for_upload(
         &self,
         last_upload_timestamp: i64,
+        full_reload_messages: Option<(String, Vec<ConversationMessage>)>,
     ) -> Result<Vec<ConversationMessage>> {
         if self.dirty_files_for_upload.is_empty() {
             return Ok(Vec::new());
@@ -784,6 +785,10 @@ impl AnalyzerRegistry {
         // cross-source ownership must load their complete canonical message set.
         let mut all_messages = Vec::with_capacity(4);
         let mut fully_loaded_analyzers = HashSet::new();
+        if let Some((analyzer_name, messages)) = full_reload_messages {
+            fully_loaded_analyzers.insert(analyzer_name);
+            all_messages.extend(messages);
+        }
         for entry in self.dirty_files_for_upload.iter() {
             let (path, analyzer_name) = entry.pair();
             if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name) {
@@ -1230,7 +1235,7 @@ mod tests {
         let registry = AnalyzerRegistry::new();
 
         // No analyzers, no dirty files - should return empty
-        let messages = registry.load_messages_for_upload(0).expect("load");
+        let messages = registry.load_messages_for_upload(0, None).expect("load");
         assert!(messages.is_empty());
     }
 

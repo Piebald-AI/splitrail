@@ -192,7 +192,7 @@ impl RealtimeStatsManager {
                     self.reload_analyzer_stats(&analyzer_name).await;
                 } else if self.registry.remove_file_from_cache(&analyzer_name, &path) {
                     // Remove file from cache and get updated view.
-                    self.apply_view_update().await;
+                    self.apply_view_update(None).await;
                 } else {
                     // Fallback to full reload.
                     self.reload_analyzer_stats(&analyzer_name).await;
@@ -212,10 +212,13 @@ impl RealtimeStatsManager {
             // Full parse of all files for this analyzer (sync, no threadpool for incremental)
             match analyzer.get_stats() {
                 Ok(new_stats) => {
+                    let full_reload_messages = analyzer
+                        .requires_full_reload_for_source_change()
+                        .then(|| (analyzer_name.to_string(), new_stats.messages.clone()));
                     // Update the cache with the new view
                     self.registry
                         .update_cached_view(analyzer_name, new_stats.into_view());
-                    self.apply_view_update().await;
+                    self.apply_view_update(full_reload_messages).await;
                 }
                 Err(e) => {
                     eprintln!("Error reloading {analyzer_name} stats: {e}");
@@ -229,7 +232,7 @@ impl RealtimeStatsManager {
         // True incremental update - subtract old, add new (sync, no threadpool for single file)
         match self.registry.reload_file_incremental(analyzer_name, path) {
             Ok(()) => {
-                self.apply_view_update().await;
+                self.apply_view_update(None).await;
             }
             Err(e) => {
                 eprintln!("Error in incremental reload for {analyzer_name}: {e}");
@@ -241,7 +244,10 @@ impl RealtimeStatsManager {
 
     /// Broadcast the current cache state to listeners.
     /// The view is already updated in place via RwLock; we just rebuild and broadcast.
-    async fn apply_view_update(&mut self) {
+    async fn apply_view_update(
+        &mut self,
+        full_reload_messages: Option<(String, Vec<crate::types::ConversationMessage>)>,
+    ) {
         // Build fresh MultiAnalyzerStatsView from cache - just clones Arc pointers
         let stats = MultiAnalyzerStatsView {
             analyzer_stats: self.registry.get_all_cached_views(),
@@ -251,10 +257,14 @@ impl RealtimeStatsManager {
         let _ = self.update_tx.send(stats);
 
         // Trigger auto-upload if enabled and debounce time has passed
-        self.trigger_auto_upload_if_enabled().await;
+        self.trigger_auto_upload_if_enabled(full_reload_messages)
+            .await;
     }
 
-    async fn trigger_auto_upload_if_enabled(&mut self) {
+    async fn trigger_auto_upload_if_enabled(
+        &mut self,
+        full_reload_messages: Option<(String, Vec<crate::types::ConversationMessage>)>,
+    ) {
         // Check if auto-upload is enabled
         match Config::load() {
             Ok(Some(cfg)) if cfg.upload.auto_upload && cfg.is_configured() => {}
@@ -295,7 +305,10 @@ impl RealtimeStatsManager {
 
         // For incremental upload, load only changed/new messages
         // This avoids loading all historical data into memory
-        let messages = match self.registry.load_messages_for_upload(last_date_uploaded) {
+        let messages = match self
+            .registry
+            .load_messages_for_upload(last_date_uploaded, full_reload_messages)
+        {
             Ok(msgs) => msgs,
             Err(_) => {
                 *self.upload_in_progress.lock() = false;

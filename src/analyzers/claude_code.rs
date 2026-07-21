@@ -30,6 +30,8 @@ pub struct ClaudeCodeAnalyzer {
 }
 
 impl ClaudeCodeAnalyzer {
+    pub const DISPLAY_NAME: &str = "Claude Code";
+
     pub fn new() -> Self {
         Self {
             discovery_was_complete: AtomicBool::new(true),
@@ -102,7 +104,7 @@ impl ClaudeCodeAnalyzer {
 #[async_trait]
 impl Analyzer for ClaudeCodeAnalyzer {
     fn display_name(&self) -> &'static str {
-        "Claude Code"
+        Self::DISPLAY_NAME
     }
 
     fn get_data_glob_patterns(&self) -> Vec<String> {
@@ -209,7 +211,19 @@ impl Analyzer for ClaudeCodeAnalyzer {
     fn is_available(&self) -> bool {
         Self::data_dir()
             .filter(|directory| directory.is_dir())
-            .is_some_and(|projects_dir| !self.discover_sources_in(&projects_dir).is_empty())
+            .is_some_and(|projects_dir| {
+                WalkDir::new(&projects_dir)
+                    .min_depth(2)
+                    .into_iter()
+                    .filter_entry(|entry| {
+                        is_claude_transcript_tree_path(&projects_dir, entry.path())
+                    })
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        entry.file_type().is_file()
+                            && is_claude_transcript_path(&projects_dir, entry.path())
+                    })
+            })
     }
 
     fn contribution_strategy(&self) -> ContributionStrategy {

@@ -524,7 +524,10 @@ pub async fn perform_background_upload(
         let mut all_messages = Vec::new();
         let backfill_claude = !upload_state.claude_subagent_backfill_completed;
         for analyzer_stats in stats.analyzer_stats {
-            if backfill_claude && analyzer_stats.analyzer_name == "Claude Code" {
+            if backfill_claude
+                && analyzer_stats.analyzer_name
+                    == crate::analyzers::claude_code::ClaudeCodeAnalyzer::DISPLAY_NAME
+            {
                 all_messages.extend(analyzer_stats.messages);
             } else {
                 all_messages.extend(
