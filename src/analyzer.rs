@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use walkdir::WalkDir;
@@ -242,6 +242,12 @@ pub trait Analyzer: Send + Sync {
     /// Remove analyzer-owned persistent state for a source that was deleted.
     fn remove_source_state(&self, _path: &Path) -> Result<()> {
         Ok(())
+    }
+
+    /// Whether a source change can alter contributions owned by other source paths.
+    /// Analyzers with cross-source deduplication require an analyzer-wide cache rebuild.
+    fn requires_full_reload_for_source_change(&self) -> bool {
+        false
     }
 
     /// Get stats with pre-discovered sources (avoids double discovery).
@@ -653,10 +659,12 @@ impl AnalyzerRegistry {
         Ok(())
     }
 
-    /// Remove a file from the cache and update the view (for file deletion events).
-    /// Returns true if the file was found and removed.
-    /// Also marks the file as dirty for upload if it was in the cache.
-    pub fn remove_file_from_cache(&self, analyzer_name: &str, path: &std::path::Path) -> bool {
+    pub fn requires_full_reload_for_source_change(&self, analyzer_name: &str) -> bool {
+        self.get_analyzer_by_display_name(analyzer_name)
+            .is_some_and(Analyzer::requires_full_reload_for_source_change)
+    }
+
+    pub fn remove_source_state(&self, analyzer_name: &str, path: &std::path::Path) {
         if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name)
             && let Err(error) = analyzer.remove_source_state(path)
         {
@@ -667,6 +675,13 @@ impl AnalyzerRegistry {
                 error
             );
         }
+    }
+
+    /// Remove a file from the cache and update the view (for file deletion events).
+    /// Returns true if the file was found and removed.
+    /// Also marks the file as dirty for upload if it was in the cache.
+    pub fn remove_file_from_cache(&self, analyzer_name: &str, path: &std::path::Path) -> bool {
+        self.remove_source_state(analyzer_name, path);
 
         let path_hash = PathHash::new(path);
 
@@ -765,14 +780,24 @@ impl AnalyzerRegistry {
             return Ok(Vec::new());
         }
 
-        // Parse dirty files sequentially (typically only 1-2 files)
+        // Parse dirty files sequentially (typically only 1-2 files). Analyzers with
+        // cross-source ownership must load their complete canonical message set.
         let mut all_messages = Vec::with_capacity(4);
+        let mut fully_loaded_analyzers = HashSet::new();
         for entry in self.dirty_files_for_upload.iter() {
             let (path, analyzer_name) = entry.pair();
             if let Some(analyzer) = self.get_analyzer_by_display_name(analyzer_name) {
-                let source = DataSource { path: path.clone() };
-                if let Ok(msgs) = analyzer.parse_source(&source) {
-                    all_messages.extend(msgs);
+                if analyzer.requires_full_reload_for_source_change() {
+                    if fully_loaded_analyzers.insert(analyzer_name.clone())
+                        && let Ok(stats) = analyzer.get_stats()
+                    {
+                        all_messages.extend(stats.messages);
+                    }
+                } else {
+                    let source = DataSource { path: path.clone() };
+                    if let Ok(msgs) = analyzer.parse_source(&source) {
+                        all_messages.extend(msgs);
+                    }
                 }
             }
         }

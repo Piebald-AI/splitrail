@@ -167,21 +167,34 @@ impl RealtimeStatsManager {
     pub async fn handle_watcher_event(&mut self, event: WatcherEvent) -> Result<()> {
         match event {
             WatcherEvent::FileChanged(analyzer_name, path) => {
-                // True incremental update - O(1), only reparses the changed file
-                if self.registry.has_cached_contributions(&analyzer_name) {
+                if self
+                    .registry
+                    .requires_full_reload_for_source_change(&analyzer_name)
+                {
+                    self.registry.mark_file_dirty(&analyzer_name, &path);
+                    self.reload_analyzer_stats(&analyzer_name).await;
+                } else if self.registry.has_cached_contributions(&analyzer_name) {
+                    // True incremental update - O(1), only reparses the changed file.
                     self.reload_single_file_incremental(&analyzer_name, &path)
                         .await;
                 } else {
-                    // Fallback to full reload if cache not populated (shouldn't happen normally)
+                    // Fallback to full reload if cache not populated (shouldn't happen normally).
                     self.reload_analyzer_stats(&analyzer_name).await;
                 }
             }
             WatcherEvent::FileDeleted(analyzer_name, path) => {
-                // Remove file from cache and get updated view
-                if self.registry.remove_file_from_cache(&analyzer_name, &path) {
+                if self
+                    .registry
+                    .requires_full_reload_for_source_change(&analyzer_name)
+                {
+                    self.registry.remove_source_state(&analyzer_name, &path);
+                    self.registry.mark_file_dirty(&analyzer_name, &path);
+                    self.reload_analyzer_stats(&analyzer_name).await;
+                } else if self.registry.remove_file_from_cache(&analyzer_name, &path) {
+                    // Remove file from cache and get updated view.
                     self.apply_view_update().await;
                 } else {
-                    // Fallback to full reload
+                    // Fallback to full reload.
                     self.reload_analyzer_stats(&analyzer_name).await;
                 }
             }

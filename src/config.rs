@@ -42,6 +42,9 @@ pub struct UploadState {
     /// Timestamp (milliseconds since Unix epoch) of the last successfully uploaded message.
     /// Used to filter out already-uploaded messages on the next run.
     pub last_date_uploaded: i64,
+    /// Whether Claude transcripts were uploaded after subagent discovery was introduced.
+    #[serde(default)]
+    pub claude_subagent_backfill_completed: bool,
 }
 
 fn default_currency_symbol() -> String {
@@ -312,7 +315,10 @@ impl UploadState {
         Ok(legacy
             .upload
             .last_date_uploaded
-            .map(|last_date_uploaded| Self { last_date_uploaded }))
+            .map(|last_date_uploaded| Self {
+                last_date_uploaded,
+                ..Self::default()
+            }))
     }
 }
 

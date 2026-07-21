@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
@@ -24,18 +25,59 @@ type ParseResult = (
     Option<String>,
 );
 
-pub struct ClaudeCodeAnalyzer;
+pub struct ClaudeCodeAnalyzer {
+    discovery_was_complete: AtomicBool,
+}
 
 impl ClaudeCodeAnalyzer {
     pub fn new() -> Self {
-        Self
+        Self {
+            discovery_was_complete: AtomicBool::new(true),
+        }
     }
 
     fn data_dir() -> Option<PathBuf> {
         dirs::home_dir().map(|h| h.join(".claude").join("projects"))
     }
 
-    fn parse_live_source(source: &DataSource) -> Result<Vec<ConversationMessage>> {
+    pub(crate) fn discover_sources_in(&self, projects_dir: &Path) -> Vec<DataSource> {
+        let mut sources = Vec::new();
+        let mut complete = true;
+        for entry in WalkDir::new(projects_dir)
+            .min_depth(2)
+            .into_iter()
+            .filter_entry(|entry| is_claude_transcript_tree_path(projects_dir, entry.path()))
+        {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    complete = false;
+                    crate::utils::warn_once(format!(
+                        "Skipping unreadable Claude Code transcript path: {error}"
+                    ));
+                    continue;
+                }
+            };
+            if entry.file_type().is_file() && is_claude_transcript_path(projects_dir, entry.path())
+            {
+                sources.push(DataSource {
+                    path: entry.into_path(),
+                });
+            }
+        }
+        self.discovery_was_complete
+            .store(complete, Ordering::Release);
+        sources.sort_by(|left, right| {
+            left.path
+                .components()
+                .count()
+                .cmp(&right.path.components().count())
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        sources
+    }
+
+    pub(crate) fn parse_live_source(source: &DataSource) -> Result<Vec<ConversationMessage>> {
         let project_hash = extract_and_hash_project_id(&source.path);
         let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
         let file = File::open(&source.path)?;
@@ -69,29 +111,19 @@ impl Analyzer for ClaudeCodeAnalyzer {
         if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
             patterns.push(format!("{home_str}/.claude/projects/*/*.jsonl"));
+            patterns.push(format!(
+                "{home_str}/.claude/projects/*/*/subagents/**/*.jsonl"
+            ));
         }
 
         patterns
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::data_dir()
-            .filter(|d| d.is_dir())
-            .into_iter()
-            .flat_map(|projects_dir| {
-                WalkDir::new(projects_dir)
-                    .min_depth(2)
-                    .max_depth(2)
-                    .into_iter()
-            })
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
-            .map(|e| DataSource {
-                path: e.into_path(),
-            })
-            .collect();
-
-        Ok(sources)
+        Ok(Self::data_dir()
+            .filter(|directory| directory.is_dir())
+            .map(|projects_dir| self.discover_sources_in(&projects_dir))
+            .unwrap_or_default())
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
@@ -121,10 +153,10 @@ impl Analyzer for ClaudeCodeAnalyzer {
                 }
             })
             .collect();
-        super::claude_code_history::merge_grouped(grouped)
-            .into_iter()
-            .map(|(path, messages)| (path, deduplicate_messages(messages)))
-            .collect()
+        deduplicate_grouped_messages(super::claude_code_history::merge_grouped(
+            grouped,
+            self.discovery_was_complete.load(Ordering::Acquire),
+        ))
     }
 
     // Claude Code has complex cross-file deduplication, so we override get_stats_with_sources
@@ -169,40 +201,76 @@ impl Analyzer for ClaudeCodeAnalyzer {
     }
 
     fn is_valid_data_path(&self, path: &Path) -> bool {
-        // Must be a .jsonl file at depth 2 from projects dir
-        if !path.is_file() || path.extension().is_none_or(|ext| ext != "jsonl") {
-            return false;
-        }
-        if let Some(data_dir) = Self::data_dir()
-            && let Ok(relative) = path.strip_prefix(&data_dir)
-        {
-            return relative.components().count() == 2;
-        }
-        false
+        path.is_file()
+            && Self::data_dir()
+                .is_some_and(|projects_dir| is_claude_transcript_path(&projects_dir, path))
     }
 
     fn is_available(&self) -> bool {
         Self::data_dir()
-            .filter(|d| d.is_dir())
-            .into_iter()
-            .flat_map(|projects_dir| {
-                WalkDir::new(projects_dir)
-                    .min_depth(2)
-                    .max_depth(2)
-                    .into_iter()
-            })
-            .filter_map(|e| e.ok())
-            .any(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .filter(|directory| directory.is_dir())
+            .is_some_and(|projects_dir| !self.discover_sources_in(&projects_dir).is_empty())
     }
 
     fn contribution_strategy(&self) -> ContributionStrategy {
         ContributionStrategy::SingleSession
+    }
+
+    fn requires_full_reload_for_source_change(&self) -> bool {
+        true
     }
 }
 
 // Claude Code specific implementation functions
 
 type DedupEntry = (usize, ConversationMessage, HashSet<TokenFingerprint>);
+
+pub(crate) fn deduplicate_grouped_messages(
+    grouped: Vec<(PathBuf, Vec<ConversationMessage>)>,
+) -> Vec<(PathBuf, Vec<ConversationMessage>)> {
+    let mut result: Vec<_> = grouped
+        .iter()
+        .map(|(path, _)| (path.clone(), Vec::new()))
+        .collect();
+    let mut deduplicated: HashMap<String, (usize, usize, HashSet<TokenFingerprint>)> =
+        HashMap::new();
+
+    for (source_index, (_, messages)) in grouped.into_iter().enumerate() {
+        for message in messages {
+            let Some(local_hash) = message.local_hash.clone() else {
+                result[source_index].1.push(message);
+                continue;
+            };
+            let fingerprint = (
+                message.stats.input_tokens,
+                message.stats.output_tokens,
+                message.stats.cache_creation_tokens,
+                message.stats.cache_read_tokens,
+                message.stats.cached_tokens,
+            );
+
+            if let Some((owner_source, owner_message, seen_fingerprints)) =
+                deduplicated.get_mut(&local_hash)
+            {
+                merge_message_into(
+                    &mut result[*owner_source].1[*owner_message],
+                    &message,
+                    seen_fingerprints,
+                    fingerprint,
+                );
+            } else {
+                let owner_message = result[source_index].1.len();
+                result[source_index].1.push(message);
+                deduplicated.insert(
+                    local_hash,
+                    (source_index, owner_message, HashSet::from([fingerprint])),
+                );
+            }
+        }
+    }
+
+    result
+}
 
 pub(crate) fn deduplicate_messages(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
     let mut dedup_map: HashMap<String, DedupEntry> = HashMap::with_capacity(messages.len());
@@ -241,18 +309,40 @@ pub(crate) fn deduplicate_messages(messages: Vec<ConversationMessage>) -> Vec<Co
     result.into_iter().map(|(_, message)| message).collect()
 }
 
+fn is_claude_transcript_tree_path(projects_dir: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(projects_dir) else {
+        return false;
+    };
+    let components: Vec<_> = relative.components().collect();
+
+    matches!(components.as_slice(), [] | [_] | [_, _])
+        || matches!(components.as_slice(), [_, _, subagents, ..] if subagents.as_os_str() == "subagents")
+}
+
+pub(crate) fn is_claude_transcript_path(projects_dir: &Path, path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "jsonl")
+        && is_claude_transcript_tree_path(projects_dir, path)
+        && path
+            .strip_prefix(projects_dir)
+            .is_ok_and(|relative| relative.components().count() >= 2)
+}
+
 // Helper function to extract project ID from Claude Code file path and hash it
 pub fn extract_and_hash_project_id(file_path: &Path) -> String {
-    // Claude Code path format: ~/.claude/projects/{PROJECT_ID}/{conversation_uuid}.jsonl
+    // Claude Code path formats:
+    // ~/.claude/projects/{PROJECT_ID}/{conversation_uuid}.jsonl
+    // ~/.claude/projects/{PROJECT_ID}/{conversation_uuid}/subagents/**/agent-{AGENT_ID}.jsonl
+    let components: Vec<_> = file_path.components().collect();
+    let project_id = components.windows(3).find_map(|components| {
+        (components[0].as_os_str() == ".claude" && components[1].as_os_str() == "projects")
+            .then(|| components[2].as_os_str().to_str())
+            .flatten()
+    });
 
-    if let Some(parent) = file_path.parent()
-        && let Some(project_id) = parent.file_name().and_then(|name| name.to_str())
-    {
-        return hash_text(project_id);
-    }
-
-    // Fallback: hash the full file path if we can't extract project ID
-    hash_text(&file_path.to_string_lossy())
+    project_id
+        .map(hash_text)
+        .unwrap_or_else(|| hash_text(&file_path.to_string_lossy()))
 }
 
 // CLAUDE CODE JSONL FILES SCHEMA
