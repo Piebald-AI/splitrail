@@ -1,11 +1,14 @@
+use crate::analyzer::{Analyzer, DataSource};
 use crate::analyzers::claude_code::{
-    TokenFingerprint, calculate_cost_from_tokens, deduplicate_messages,
-    extract_and_hash_project_id, merge_message_into, parse_jsonl_file,
+    ClaudeCodeAnalyzer, TokenFingerprint, calculate_cost_from_tokens, deduplicate_grouped_messages,
+    deduplicate_messages, extract_and_hash_project_id, is_claude_transcript_path,
+    merge_message_into, parse_jsonl_file,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use chrono::{TimeZone, Utc};
 use simd_json::json;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{BufReader, Cursor};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -184,18 +187,157 @@ fn test_extract_and_hash_project_id() {
     let path1 = Path::new("/home/user/.claude/projects/proj123/conversation.jsonl");
     let path2 = Path::new("/home/user/.claude/projects/proj123/other.jsonl");
     let path3 = Path::new("/home/user/.claude/projects/proj456/conversation.jsonl");
+    let subagent = Path::new(
+        "/home/user/.claude/projects/proj123/conversation/subagents/nested/agent-1.jsonl",
+    );
+    let nested_projects = Path::new(
+        "/home/user/.claude/projects/proj123/conversation/subagents/cache/projects/agent-2.jsonl",
+    );
 
     let hash1 = extract_and_hash_project_id(path1);
     let hash2 = extract_and_hash_project_id(path2);
     let hash3 = extract_and_hash_project_id(path3);
+    let subagent_hash = extract_and_hash_project_id(subagent);
+    let nested_projects_hash = extract_and_hash_project_id(nested_projects);
 
-    // Same project should have same hash
+    // Main and subagent transcripts under the same project should share a project hash.
     assert_eq!(hash1, hash2);
-    // Different projects should have different hashes
+    assert_eq!(hash1, subagent_hash);
+    assert_eq!(hash1, nested_projects_hash);
+    // Different projects should have different hashes.
     assert_ne!(hash1, hash3);
-    // Hashes should not be empty
+    // Hashes should not be empty.
     assert!(!hash1.is_empty());
     assert!(!hash3.is_empty());
+}
+
+#[test]
+fn test_claude_transcript_path_classification() {
+    let projects = Path::new("/home/user/.claude/projects");
+
+    assert!(is_claude_transcript_path(
+        projects,
+        &projects.join("project/session.jsonl")
+    ));
+    assert!(is_claude_transcript_path(
+        projects,
+        &projects.join("project/session/subagents/agent-1.jsonl")
+    ));
+    assert!(is_claude_transcript_path(
+        projects,
+        &projects.join("project/session/subagents/nested/agent-2.jsonl")
+    ));
+
+    assert!(!is_claude_transcript_path(
+        projects,
+        &projects.join("project/session/subagents/agent-1.meta.json")
+    ));
+    assert!(!is_claude_transcript_path(
+        projects,
+        &projects.join("project/session/other/agent-1.jsonl")
+    ));
+    assert!(!is_claude_transcript_path(
+        projects,
+        &projects.join("project/session.jsonl/extra.jsonl")
+    ));
+}
+
+#[test]
+fn test_claude_discovery_includes_subagent_transcripts() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let projects = temp_dir.path().join("projects");
+    let project = projects.join("project");
+    let nested_subagents = project.join("session/subagents/nested");
+    let unrelated = project.join("session/other");
+    fs::create_dir_all(&nested_subagents).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+
+    let main = project.join("session.jsonl");
+    let subagent = nested_subagents.join("agent-1.jsonl");
+    let metadata = nested_subagents.join("agent-1.meta.json");
+    let unrelated_jsonl = unrelated.join("agent-2.jsonl");
+    for path in [&main, &subagent, &metadata, &unrelated_jsonl] {
+        fs::write(path, "").unwrap();
+    }
+
+    let paths: Vec<_> = ClaudeCodeAnalyzer::new()
+        .discover_sources_in(&projects)
+        .into_iter()
+        .map(|source| source.path)
+        .collect();
+
+    // Main transcripts own duplicate accounting records before nested subagent sources.
+    assert_eq!(paths, vec![main, subagent]);
+}
+
+#[test]
+fn test_claude_glob_patterns_include_subagent_transcripts() {
+    let analyzer = ClaudeCodeAnalyzer::new();
+    let patterns = analyzer.get_data_glob_patterns();
+
+    assert!(analyzer.requires_full_reload_for_source_change());
+
+    assert!(
+        patterns
+            .iter()
+            .any(|pattern| pattern.ends_with("*/*.jsonl"))
+    );
+    assert!(
+        patterns
+            .iter()
+            .any(|pattern| pattern.ends_with("*/*/subagents/**/*.jsonl"))
+    );
+}
+
+#[test]
+fn test_main_and_subagent_transcripts_add_unique_usage_without_duplicate_inflation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let project = temp_dir.path().join(".claude/projects/project");
+    let main = project.join("session.jsonl");
+    let subagent = project.join("session/subagents/agent-1.jsonl");
+    fs::create_dir_all(subagent.parent().unwrap()).unwrap();
+
+    let duplicate = r#"{"parentUuid":null,"isSidechain":false,"sessionId":"session","message":{"id":"msg-shared","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20}},"requestId":"req-shared","type":"assistant","uuid":"main-uuid","timestamp":"2025-08-02T15:00:00.000Z"}"#;
+    let duplicate_from_subagent = r#"{"parentUuid":null,"isSidechain":true,"sessionId":"session","agentId":"agent-1","message":{"id":"msg-shared","role":"assistant","model":"claude-sonnet-4-20250514","content":[],"usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20}},"requestId":"req-shared","type":"assistant","uuid":"subagent-duplicate-uuid","timestamp":"2025-08-02T15:00:00.000Z"}"#;
+    let unique_subagent = r#"{"parentUuid":null,"isSidechain":true,"sessionId":"session","agentId":"agent-1","message":{"id":"msg-unique","role":"assistant","model":"claude-haiku-4-5-20251001","content":[],"usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":7}},"requestId":"req-unique","type":"assistant","uuid":"subagent-unique-uuid","timestamp":"2025-08-02T15:01:00.000Z"}"#;
+    fs::write(&main, duplicate).unwrap();
+    fs::write(
+        &subagent,
+        format!("{duplicate_from_subagent}\n{unique_subagent}"),
+    )
+    .unwrap();
+
+    let grouped = deduplicate_grouped_messages(
+        [&main, &subagent]
+            .into_iter()
+            .map(|path| {
+                (
+                    path.to_path_buf(),
+                    ClaudeCodeAnalyzer::parse_live_source(&DataSource {
+                        path: path.to_path_buf(),
+                    })
+                    .unwrap(),
+                )
+            })
+            .collect(),
+    );
+    let messages: Vec<_> = grouped.iter().flat_map(|(_, messages)| messages).collect();
+
+    assert_eq!(grouped[0].1.len(), 1);
+    assert_eq!(grouped[1].1.len(), 1);
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.stats.output_tokens)
+            .sum::<u64>(),
+        27
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| { message.project_hash == extract_and_hash_project_id(&main) })
+    );
 }
 
 #[test]

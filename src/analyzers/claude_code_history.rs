@@ -51,6 +51,7 @@ pub(crate) fn remove_session(conversation_hash: &str) -> Result<()> {
 
 pub(crate) fn merge_grouped(
     grouped: Vec<(PathBuf, Vec<ConversationMessage>)>,
+    prune_missing: bool,
 ) -> Vec<(PathBuf, Vec<ConversationMessage>)> {
     let path = match history_path() {
         Ok(path) => path,
@@ -65,7 +66,7 @@ pub(crate) fn merge_grouped(
         .collect();
 
     let mut grouped = grouped;
-    if let Err(error) = merge_at(&path, &mut grouped, &conversation_hashes, true) {
+    if let Err(error) = merge_at(&path, &mut grouped, &conversation_hashes, prune_missing) {
         warn_history_error("update", Some(&path), &error);
     }
     grouped

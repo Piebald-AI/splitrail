@@ -248,11 +248,9 @@ fn save_chunk_progress(
     // uses >=) doesn't re-include this exact message.
     if let Some(last_msg) = sorted_messages.get(messages_processed - 1) {
         let checkpoint = last_msg.date.timestamp_millis() + 1;
-        if let Err(e) = (UploadState {
-            last_date_uploaded: checkpoint,
-        })
-        .save()
-        {
+        let mut state = UploadState::load().unwrap_or_default();
+        state.last_date_uploaded = state.last_date_uploaded.max(checkpoint);
+        if let Err(e) = state.save() {
             if upload_debug {
                 upload_debug_log(format!(
                     "[splitrail upload] warning: failed to save chunk progress: {e:#}"
@@ -515,29 +513,50 @@ pub async fn perform_background_upload(
             return None;
         }
 
-        let last_date_uploaded = match UploadState::load() {
-            Ok(state) => state.last_date_uploaded,
+        let upload_state = match UploadState::load() {
+            Ok(state) => state,
             Err(e) => {
                 eprintln!("Failed to load upload state: {e:#}");
                 return None;
             }
         };
 
-        let all_messages: Vec<_> = stats
-            .analyzer_stats
-            .into_iter()
-            .flat_map(|s| s.messages)
-            .collect();
+        let mut all_messages = Vec::new();
+        let backfill_claude = !upload_state.claude_subagent_backfill_completed;
+        for analyzer_stats in stats.analyzer_stats {
+            if backfill_claude
+                && analyzer_stats.analyzer_name
+                    == crate::analyzers::claude_code::ClaudeCodeAnalyzer::DISPLAY_NAME
+            {
+                all_messages.extend(analyzer_stats.messages);
+            } else {
+                all_messages.extend(
+                    utils::get_messages_later_than(
+                        upload_state.last_date_uploaded,
+                        analyzer_stats.messages,
+                    )
+                    .await
+                    .ok()?,
+                );
+            }
+        }
 
-        utils::get_messages_later_than(last_date_uploaded, all_messages)
-            .await
-            .ok()
+        Some((all_messages, backfill_claude))
     }
     .await;
 
-    if let Some(msgs) = messages {
-        // Delegate to the messages-based upload (no additional delay, no callback)
-        perform_background_upload_messages::<fn()>(msgs, upload_status, None, None).await;
+    if let Some((msgs, backfilled_claude)) = messages {
+        let backfill_completed = move || {
+            if backfilled_claude {
+                let mut state = UploadState::load().unwrap_or_default();
+                state.claude_subagent_backfill_completed = true;
+                if let Err(error) = state.save() {
+                    eprintln!("Failed to save Claude Code upload backfill state: {error:#}");
+                }
+            }
+        };
+        perform_background_upload_messages(msgs, upload_status, None, Some(backfill_completed))
+            .await;
     }
 }
 
