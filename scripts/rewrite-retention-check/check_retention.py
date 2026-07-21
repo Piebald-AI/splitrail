@@ -92,8 +92,12 @@ def main() -> int:
     same = int_view(post) == int_view(base) and all(
         abs(post.get(m, {}).get("cost", 0.0) - base.get(m, {}).get("cost", 0.0)) < 1e-9
         for m in set(base) | set(post))
+    cost_delta = {m: round(base.get(m, {}).get("cost", 0.0) - post.get(m, {}).get("cost", 0.0), 6)
+                  for m in set(base) | set(post)
+                  if abs(base.get(m, {}).get("cost", 0.0) - post.get(m, {}).get("cost", 0.0)) >= 1e-9}
     results.append(("R2 rewrite retention (post == base)", same,
-                    "totals unchanged" if same else f"drifted: {diff(int_view(base), int_view(post))}"))
+                    "totals unchanged" if same
+                    else f"drifted: {diff(int_view(base), int_view(post))} cost_delta: {cost_delta}"))
 
     # R3 — restart stability
     blobs = [(w / f"stab-{i}.json").read_bytes() for i in (1, 2, 3)]

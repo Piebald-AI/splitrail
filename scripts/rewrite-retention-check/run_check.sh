@@ -39,7 +39,12 @@ fi
 echo "work dir          : $WORK"
 
 scan() { # $1=binary $2=outfile
-  HOME="$FAKEHOME" "$1" stats --pretty > "$2" 2> "$2.err" \
+  # HOME plus explicit XDG overrides: on Linux the history store honors
+  # XDG_STATE_HOME/XDG_DATA_HOME, which would otherwise escape the isolation.
+  HOME="$FAKEHOME" \
+  XDG_STATE_HOME="$FAKEHOME/.local/state" \
+  XDG_DATA_HOME="$FAKEHOME/.local/share" \
+    "$1" stats --pretty > "$2" 2> "$2.err" \
     || { echo "scan failed; see $2.err" >&2; exit 1; }
 }
 
