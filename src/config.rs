@@ -1,4 +1,5 @@
 use crate::models::ModelInfo;
+use crate::utils::LogLevel;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -11,6 +12,8 @@ pub struct Config {
     pub server: ServerConfig,
     pub upload: UploadConfig,
     pub formatting: FormattingConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
     #[serde(default)]
     pub tui: TuiConfig,
     #[serde(default)]
@@ -30,6 +33,20 @@ pub struct UploadConfig {
     pub auto_upload: bool,
     pub upload_today_only: bool,
     pub retry_attempts: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LoggingConfig {
+    #[serde(default)]
+    pub level: LogLevel,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: LogLevel::Warn,
+        }
+    }
 }
 
 /// Runtime upload progress state, persisted separately from user configuration.
@@ -150,6 +167,7 @@ impl Default for Config {
                 currency_symbol: default_currency_symbol(),
                 cost_decimal_places: default_cost_decimal_places(),
             },
+            logging: LoggingConfig::default(),
             tui: TuiConfig::default(),
             models: HashMap::new(),
             aliases: HashMap::new(),
@@ -392,6 +410,7 @@ pub fn show_config() -> Result<()> {
             println!("   TUI Accent Color: {}", config.tui.accent_color);
             println!("   TUI Color Costs: {}", config.tui.color_costs);
             println!("   TUI Show Header: {}", config.tui.show_header);
+            println!("   Log Level: {}", config.logging.level);
             if !config.models.is_empty() {
                 println!("   Custom Models: {}", config.models.len());
             }
@@ -494,6 +513,9 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
                 .parse::<bool>()
                 .context("Invalid boolean value. Use 'true' or 'false'")?;
         }
+        "log-level" => {
+            config.logging.level = value.parse().map_err(anyhow::Error::msg)?;
+        }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }
 
@@ -579,6 +601,7 @@ is_estimated = true
         assert_eq!(loaded.formatting.locale, "en");
         assert!(!loaded.tui.reverse_sort_default);
         assert!(!loaded.tui.hide_empty_periods);
+        assert_eq!(loaded.logging.level, LogLevel::Warn);
 
         let saved = fs::read_to_string(config_path).expect("read saved config");
         assert!(
@@ -612,6 +635,7 @@ is_estimated = true
         set_config_value("accent-color", "magenta").expect("set accent-color");
         set_config_value("color-costs", "true").expect("set color-costs");
         set_config_value("show-header", "false").expect("set show-header");
+        set_config_value("log-level", "error").expect("set log-level");
 
         let cfg = Config::load()
             .expect("load config")
@@ -635,6 +659,7 @@ is_estimated = true
         assert_eq!(cfg.tui.accent_color, "magenta");
         assert!(cfg.tui.color_costs);
         assert!(!cfg.tui.show_header);
+        assert_eq!(cfg.logging.level, LogLevel::Error);
 
         let err = set_config_value("unknown-key", "value").unwrap_err();
         let msg = format!("{err}");
@@ -648,6 +673,8 @@ is_estimated = true
             msg.contains("Invalid boolean value"),
             "unexpected error message: {msg}"
         );
+        let err = set_config_value("log-level", "verbose").unwrap_err();
+        assert_eq!(err.to_string(), "Invalid log level. Use 'warn' or 'error'");
     }
 
     #[test]
@@ -708,5 +735,6 @@ hide_empty_periods = true
         let config: Config = toml::from_str(toml_str).expect("parse config");
         assert!(config.tui.reverse_sort_default);
         assert!(config.tui.hide_empty_periods);
+        assert_eq!(config.logging.level, LogLevel::Warn);
     }
 }
