@@ -99,6 +99,9 @@ number_comma = false
 number_human = false
 locale = "en"
 decimal_places = 2
+
+[logging]
+level = "warn"
 ```
 
 ## Development

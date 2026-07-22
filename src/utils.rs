@@ -1,19 +1,60 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::Result;
 use chrono::{DateTime, Datelike, Local, Utc};
 use num_format::{Locale, ToFormattedString};
 use parking_lot::Mutex;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::types::{CompactDate, ConversationMessage, DailyStats, MessageRole, ModelStats};
 
 static WARNED_MESSAGES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static LOG_LEVEL: AtomicU8 = AtomicU8::new(LogLevel::Warn as u8);
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum LogLevel {
+    Error = 0,
+    #[default]
+    Warn = 1,
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Error => formatter.write_str("error"),
+            Self::Warn => formatter.write_str("warn"),
+        }
+    }
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "error" => Ok(Self::Error),
+            "warn" => Ok(Self::Warn),
+            _ => Err("Invalid log level. Use 'warn' or 'error'"),
+        }
+    }
+}
+
+pub fn set_log_level(level: LogLevel) {
+    LOG_LEVEL.store(level as u8, Ordering::Relaxed);
+}
 
 pub fn warn_once(message: impl Into<String>) {
+    if LOG_LEVEL.load(Ordering::Relaxed) < LogLevel::Warn as u8 {
+        return;
+    }
+
     let message = message.into();
     let cache = WARNED_MESSAGES.get_or_init(|| Mutex::new(HashSet::new()));
 
