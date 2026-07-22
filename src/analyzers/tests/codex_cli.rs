@@ -16,6 +16,8 @@ fn write_test_session(path: &std::path::Path) {
         "\n",
         r#"{"timestamp":"2026-07-22T12:35:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Test archived sessions"}]}}"#,
         "\n",
+        r#"{"timestamp":"2026-07-22T12:35:01.500Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Testing hash stability"}]}}"#,
+        "\n",
         r#"{"timestamp":"2026-07-22T12:35:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5,"total_tokens":150}}}}"#,
         "\n"
     );
@@ -67,6 +69,23 @@ fn test_active_and_archived_copies_are_discovered_once() {
 }
 
 #[test]
+fn test_valid_codex_data_paths_must_be_inside_watched_directories() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sessions_dir = temp_dir.path().join(".codex/sessions");
+    let unrelated_dir = temp_dir.path().join("unrelated");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::create_dir_all(&unrelated_dir).unwrap();
+    let session_path = sessions_dir.join("session.jsonl");
+    let unrelated_path = unrelated_dir.join("session.jsonl");
+    std::fs::write(&session_path, "").unwrap();
+    std::fs::write(&unrelated_path, "").unwrap();
+
+    let data_dirs = vec![sessions_dir];
+    assert!(is_valid_data_path_in(&session_path, &data_dirs));
+    assert!(!is_valid_data_path_in(&unrelated_path, &data_dirs));
+}
+
+#[test]
 fn test_message_hashes_remain_stable_after_archiving() {
     let temp_dir = tempfile::tempdir().unwrap();
     let active_dir = temp_dir.path().join(".codex/sessions/2026/07/22");
@@ -82,6 +101,13 @@ fn test_message_hashes_remain_stable_after_archiving() {
     let (archived_messages, _) = parse_codex_cli_jsonl_file(&archived_path).unwrap();
 
     assert_eq!(active_messages.len(), archived_messages.len());
+    assert_eq!(
+        active_messages
+            .iter()
+            .filter(|message| matches!(message.role, crate::types::MessageRole::Assistant))
+            .count(),
+        2
+    );
     for (active, archived) in active_messages.iter().zip(&archived_messages) {
         assert_eq!(active.conversation_hash, archived.conversation_hash);
         assert_eq!(active.global_hash, archived.global_hash);

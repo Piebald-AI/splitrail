@@ -127,6 +127,14 @@ pub(crate) fn discover_data_sources_in(
         .collect()
 }
 
+pub(crate) fn is_valid_data_path_in(path: &Path, data_dirs: &[PathBuf]) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        && data_dirs.iter().any(|data_dir| path.starts_with(data_dir))
+}
+
 #[async_trait]
 impl Analyzer for CodexCliAnalyzer {
     fn display_name(&self) -> &'static str {
@@ -182,7 +190,7 @@ impl Analyzer for CodexCliAnalyzer {
 
     fn is_valid_data_path(&self, path: &Path) -> bool {
         // Must be a .jsonl file under one of the watched Codex data directories.
-        path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl")
+        is_valid_data_path_in(path, &Self::data_dirs())
     }
 
     fn contribution_strategy(&self) -> ContributionStrategy {
