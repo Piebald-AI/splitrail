@@ -490,7 +490,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                     get_fallback_model().to_string(),
                                 );
                                 warn_once(format!(
-                                    "WARNING: some Codex CLI sessions are missing model metadata; using fallback model {} for cost estimation.",
+                                    "WARNING: session {file_path_str} missing model metadata; using fallback model {} for cost estimation.",
                                     fallback.name
                                 ));
                                 session_model = Some(fallback.clone());
@@ -550,7 +550,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                     get_fallback_model().to_string(),
                                 );
                                 warn_once(format!(
-                                    "WARNING: some Codex CLI sessions are missing model metadata; using fallback model {} for cost estimation.",
+                                    "WARNING: session {file_path_str} missing model metadata; using fallback model {} for cost estimation.",
                                     fallback.name
                                 ));
                                 session_model = Some(fallback.clone());
