@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -57,9 +58,73 @@ impl CodexCliAnalyzer {
         Self
     }
 
-    fn data_dir() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".codex").join("sessions"))
+    fn data_dirs() -> Vec<PathBuf> {
+        data_dirs_with_home(dirs::home_dir())
     }
+}
+
+pub(crate) fn data_dirs_with_home(home_dir: Option<PathBuf>) -> Vec<PathBuf> {
+    home_dir
+        .map(|home| {
+            let codex_dir = home.join(".codex");
+            vec![
+                codex_dir.join("sessions"),
+                codex_dir.join("archived_sessions"),
+            ]
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn canonical_session_path(file_path: &Path) -> PathBuf {
+    let Some(archive_dir) = file_path
+        .ancestors()
+        .find(|path| path.file_name() == Some(OsStr::new("archived_sessions")))
+    else {
+        return file_path.to_path_buf();
+    };
+    let Some(codex_dir) = archive_dir.parent() else {
+        return file_path.to_path_buf();
+    };
+    let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) else {
+        return file_path.to_path_buf();
+    };
+    let Some(date) = file_name
+        .strip_prefix("rollout-")
+        .and_then(|rest| rest.get(..10))
+        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+    else {
+        return file_path.to_path_buf();
+    };
+
+    codex_dir
+        .join("sessions")
+        .join(date.format("%Y").to_string())
+        .join(date.format("%m").to_string())
+        .join(date.format("%d").to_string())
+        .join(file_name)
+}
+
+pub(crate) fn discover_data_sources_in(
+    data_dirs: impl IntoIterator<Item = PathBuf>,
+) -> Vec<DataSource> {
+    let mut seen_sessions = HashSet::new();
+    data_dirs
+        .into_iter()
+        .filter(|dir| dir.is_dir())
+        .flat_map(|dir| WalkDir::new(dir).into_iter())
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
+        })
+        .filter(|entry| seen_sessions.insert(canonical_session_path(entry.path())))
+        .map(|entry| DataSource {
+            path: entry.into_path(),
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -74,32 +139,20 @@ impl Analyzer for CodexCliAnalyzer {
         if let Some(home_dir) = dirs::home_dir() {
             let home_str = home_dir.to_string_lossy();
             patterns.push(format!("{home_str}/.codex/sessions/**/*.jsonl"));
+            patterns.push(format!("{home_str}/.codex/archived_sessions/**/*.jsonl"));
         }
 
         patterns
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::data_dir()
-            .filter(|d| d.is_dir())
-            .into_iter()
-            .flat_map(|dir| WalkDir::new(dir).into_iter())
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "jsonl")
-            })
-            .map(|e| DataSource {
-                path: e.into_path(),
-            })
-            .collect();
-
-        Ok(sources)
+        Ok(discover_data_sources_in(Self::data_dirs()))
     }
 
     fn is_available(&self) -> bool {
-        Self::data_dir()
-            .filter(|d| d.is_dir())
+        Self::data_dirs()
             .into_iter()
+            .filter(|d| d.is_dir())
             .flat_map(|dir| WalkDir::new(dir).into_iter())
             .filter_map(|e| e.ok())
             .any(|e| {
@@ -121,14 +174,14 @@ impl Analyzer for CodexCliAnalyzer {
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
-        Self::data_dir()
-            .filter(|d| d.is_dir())
+        Self::data_dirs()
             .into_iter()
+            .filter(|d| d.is_dir())
             .collect()
     }
 
     fn is_valid_data_path(&self, path: &Path) -> bool {
-        // Must be a .jsonl file under sessions directory
+        // Must be a .jsonl file under one of the watched Codex data directories.
         path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl")
     }
 
@@ -248,6 +301,9 @@ pub(crate) fn parse_codex_cli_jsonl_file(
     // Pre-allocate for typical session sizes
     let mut entries = Vec::with_capacity(100);
     let file_path_str = file_path.to_string_lossy().into_owned();
+    let session_path_str = canonical_session_path(file_path)
+        .to_string_lossy()
+        .into_owned();
 
     let mut file = File::open(file_path)?;
 
@@ -401,12 +457,12 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 date: wrapper.timestamp,
                                 global_hash: hash_text(&format!(
                                     "{}_{}_user_{}",
-                                    file_path_str,
+                                    session_path_str,
                                     wrapper.timestamp.to_rfc3339(),
                                     entries.len()
                                 )),
                                 local_hash: None,
-                                conversation_hash: hash_text(&file_path_str),
+                                conversation_hash: hash_text(&session_path_str),
                                 application: Application::CodexCli,
                                 project_hash: "".to_string(),
                                 model: None,
@@ -438,12 +494,12 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 model: Some(model_state.name.clone()),
                                 global_hash: hash_text(&format!(
                                     "{}_{}_assistant_{}",
-                                    file_path_str,
+                                    session_path_str,
                                     wrapper.timestamp.to_rfc3339(),
                                     entries.len()
                                 )),
                                 local_hash: None,
-                                conversation_hash: hash_text(&file_path_str),
+                                conversation_hash: hash_text(&session_path_str),
                                 date: wrapper.timestamp,
                                 project_hash: "".to_string(),
                                 stats: Stats::default(),
@@ -506,12 +562,12 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 model: Some(model_state.name.clone()),
                                 global_hash: hash_text(&format!(
                                     "{}_{}_token_{}",
-                                    file_path_str,
+                                    session_path_str,
                                     wrapper.timestamp.to_rfc3339(),
                                     entries.len()
                                 )),
                                 local_hash: None,
-                                conversation_hash: hash_text(&file_path_str),
+                                conversation_hash: hash_text(&session_path_str),
                                 date: wrapper.timestamp,
                                 project_hash: "".to_string(),
                                 stats,
