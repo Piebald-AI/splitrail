@@ -5,6 +5,115 @@ use crate::analyzer::Analyzer;
 use crate::analyzers::codex_cli::*;
 use crate::models::calculate_total_cost;
 
+const SESSION_FILE_NAME: &str =
+    "rollout-2026-07-22T12-34-56-243232f1-a7ab-44e6-b2c3-045b673746ea.jsonl";
+
+fn write_test_session(path: &std::path::Path) {
+    let content = concat!(
+        r#"{"timestamp":"2026-07-22T12:34:56.000Z","type":"session_meta","payload":{"id":"243232f1-a7ab-44e6-b2c3-045b673746ea","timestamp":"2026-07-22T12:34:56.000Z"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-07-22T12:35:00.000Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-07-22T12:35:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Test archived sessions"}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-07-22T12:35:01.500Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Testing hash stability"}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-07-22T12:35:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5,"total_tokens":150}}}}"#,
+        "\n"
+    );
+    std::fs::write(path, content).unwrap();
+}
+
+#[test]
+fn test_codex_data_dirs_include_active_and_archived_sessions() {
+    let home = std::path::PathBuf::from("/home/test");
+
+    assert_eq!(
+        data_dirs_with_home(Some(home.clone())),
+        vec![
+            home.join(".codex/sessions"),
+            home.join(".codex/archived_sessions")
+        ]
+    );
+}
+
+#[test]
+fn test_archived_session_uses_original_active_path_as_identity() {
+    let home = std::path::PathBuf::from("/home/test");
+    let archived = home
+        .join(".codex/archived_sessions")
+        .join(SESSION_FILE_NAME);
+
+    assert_eq!(
+        canonical_session_path(&archived),
+        home.join(".codex/sessions/2026/07/22")
+            .join(SESSION_FILE_NAME)
+    );
+}
+
+#[test]
+fn test_active_and_archived_copies_are_discovered_once() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let active_dir = temp_dir.path().join(".codex/sessions/2026/07/22");
+    let archived_dir = temp_dir.path().join(".codex/archived_sessions");
+    std::fs::create_dir_all(&active_dir).unwrap();
+    std::fs::create_dir_all(&archived_dir).unwrap();
+    write_test_session(&active_dir.join(SESSION_FILE_NAME));
+    write_test_session(&archived_dir.join(SESSION_FILE_NAME));
+
+    let sources =
+        discover_data_sources_in(vec![temp_dir.path().join(".codex/sessions"), archived_dir]);
+
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].path, active_dir.join(SESSION_FILE_NAME));
+}
+
+#[test]
+fn test_valid_codex_data_paths_must_be_inside_watched_directories() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sessions_dir = temp_dir.path().join(".codex/sessions");
+    let unrelated_dir = temp_dir.path().join("unrelated");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::create_dir_all(&unrelated_dir).unwrap();
+    let session_path = sessions_dir.join("session.jsonl");
+    let unrelated_path = unrelated_dir.join("session.jsonl");
+    std::fs::write(&session_path, "").unwrap();
+    std::fs::write(&unrelated_path, "").unwrap();
+
+    let data_dirs = vec![sessions_dir];
+    assert!(is_valid_data_path_in(&session_path, &data_dirs));
+    assert!(!is_valid_data_path_in(&unrelated_path, &data_dirs));
+}
+
+#[test]
+fn test_message_hashes_remain_stable_after_archiving() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let active_dir = temp_dir.path().join(".codex/sessions/2026/07/22");
+    let archived_dir = temp_dir.path().join(".codex/archived_sessions");
+    std::fs::create_dir_all(&active_dir).unwrap();
+    std::fs::create_dir_all(&archived_dir).unwrap();
+    let active_path = active_dir.join(SESSION_FILE_NAME);
+    let archived_path = archived_dir.join(SESSION_FILE_NAME);
+    write_test_session(&active_path);
+    write_test_session(&archived_path);
+
+    let (active_messages, _) = parse_codex_cli_jsonl_file(&active_path).unwrap();
+    let (archived_messages, _) = parse_codex_cli_jsonl_file(&archived_path).unwrap();
+
+    assert_eq!(active_messages.len(), archived_messages.len());
+    assert_eq!(
+        active_messages
+            .iter()
+            .filter(|message| matches!(message.role, crate::types::MessageRole::Assistant))
+            .count(),
+        2
+    );
+    for (active, archived) in active_messages.iter().zip(&archived_messages) {
+        assert_eq!(active.conversation_hash, archived.conversation_hash);
+        assert_eq!(active.global_hash, archived.global_hash);
+    }
+}
+
 #[test]
 fn test_parse_codex_cli_new_wrapper_format() {
     // Create a temporary file with the new wrapper format
