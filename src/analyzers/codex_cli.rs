@@ -308,7 +308,6 @@ pub(crate) fn parse_codex_cli_jsonl_file(
 ) -> Result<(Vec<ConversationMessage>, Option<String>)> {
     // Pre-allocate for typical session sizes
     let mut entries = Vec::with_capacity(100);
-    let file_path_str = file_path.to_string_lossy().into_owned();
     let session_path_str = canonical_session_path(file_path)
         .to_string_lossy()
         .into_owned();
