@@ -1547,48 +1547,55 @@ fn draw_aggregate_stats_table(
     // TODO: Let's refactor this.
 
     let mut best_cost_cents: u32 = 0;
-    let mut best_cost_i = 0;
+    let mut best_cost_period = None;
     let mut best_cached_tokens: u64 = 0;
-    let mut best_cached_tokens_i = 0;
+    let mut best_cached_tokens_period = None;
     let mut best_input_tokens: u64 = 0;
-    let mut best_input_tokens_i = 0;
+    let mut best_input_tokens_period = None;
     let mut best_output_tokens: u64 = 0;
-    let mut best_output_tokens_i = 0;
+    let mut best_output_tokens_period = None;
     let mut best_reasoning_tokens: u64 = 0;
-    let mut best_reasoning_tokens_i = 0;
+    let mut best_reasoning_tokens_period = None;
     let mut best_conversations = 0;
-    let mut best_conversations_i = 0;
+    let mut best_conversations_period = None;
     let mut best_tool_calls: u32 = 0;
-    let mut best_tool_calls_i = 0;
+    let mut best_tool_calls_period = None;
 
-    for (i, period_stats) in aggregate_stats.values().enumerate() {
-        if period_stats.stats.cost_cents > best_cost_cents {
+    for (period, period_stats) in aggregate_stats {
+        if best_cost_period.is_none() || period_stats.stats.cost_cents > best_cost_cents {
             best_cost_cents = period_stats.stats.cost_cents;
-            best_cost_i = i;
+            best_cost_period = Some(period.as_str());
         }
-        if period_stats.stats.cached_tokens > best_cached_tokens {
+        if best_cached_tokens_period.is_none()
+            || period_stats.stats.cached_tokens > best_cached_tokens
+        {
             best_cached_tokens = period_stats.stats.cached_tokens;
-            best_cached_tokens_i = i;
+            best_cached_tokens_period = Some(period.as_str());
         }
-        if period_stats.stats.input_tokens > best_input_tokens {
+        if best_input_tokens_period.is_none() || period_stats.stats.input_tokens > best_input_tokens
+        {
             best_input_tokens = period_stats.stats.input_tokens;
-            best_input_tokens_i = i;
+            best_input_tokens_period = Some(period.as_str());
         }
-        if period_stats.stats.output_tokens > best_output_tokens {
+        if best_output_tokens_period.is_none()
+            || period_stats.stats.output_tokens > best_output_tokens
+        {
             best_output_tokens = period_stats.stats.output_tokens;
-            best_output_tokens_i = i;
+            best_output_tokens_period = Some(period.as_str());
         }
-        if period_stats.stats.reasoning_tokens > best_reasoning_tokens {
+        if best_reasoning_tokens_period.is_none()
+            || period_stats.stats.reasoning_tokens > best_reasoning_tokens
+        {
             best_reasoning_tokens = period_stats.stats.reasoning_tokens;
-            best_reasoning_tokens_i = i;
+            best_reasoning_tokens_period = Some(period.as_str());
         }
-        if period_stats.conversations > best_conversations {
+        if best_conversations_period.is_none() || period_stats.conversations > best_conversations {
             best_conversations = period_stats.conversations;
-            best_conversations_i = i;
+            best_conversations_period = Some(period.as_str());
         }
-        if period_stats.stats.tool_calls > best_tool_calls {
+        if best_tool_calls_period.is_none() || period_stats.stats.tool_calls > best_tool_calls {
             best_tool_calls = period_stats.stats.tool_calls;
-            best_tool_calls_i = i;
+            best_tool_calls_period = Some(period.as_str());
         }
     }
 
@@ -1660,7 +1667,7 @@ fn draw_aggregate_stats_table(
             Style::default().add_modifier(Modifier::DIM)
         } else if color_costs {
             Style::default().fg(cost_heat(period_stats.stats.cost_cents, best_cost_cents))
-        } else if i == best_cost_i {
+        } else if best_cost_period == Some(period.as_str()) {
             Style::default().fg(Color::Red)
         } else {
             Style::default().fg(Color::Yellow)
@@ -1674,7 +1681,7 @@ fn draw_aggregate_stats_table(
                 format_number_fit(period_stats.stats.cached_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
-        } else if i == best_cached_tokens_i {
+        } else if best_cached_tokens_period == Some(period.as_str()) {
             Line::from(Span::styled(
                 format_number_fit(period_stats.stats.cached_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
@@ -1692,7 +1699,7 @@ fn draw_aggregate_stats_table(
                 format_number_fit(period_stats.stats.input_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
-        } else if i == best_input_tokens_i {
+        } else if best_input_tokens_period == Some(period.as_str()) {
             Line::from(Span::styled(
                 format_number_fit(period_stats.stats.input_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
@@ -1711,7 +1718,7 @@ fn draw_aggregate_stats_table(
                 format_number_fit(period_stats.stats.output_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
-        } else if i == best_output_tokens_i {
+        } else if best_output_tokens_period == Some(period.as_str()) {
             Line::from(Span::styled(
                 format_number_fit(period_stats.stats.output_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
@@ -1730,7 +1737,7 @@ fn draw_aggregate_stats_table(
                 format_number_fit(period_stats.stats.reasoning_tokens, format_options, tw),
                 Style::default().add_modifier(Modifier::DIM),
             ))
-        } else if i == best_reasoning_tokens_i {
+        } else if best_reasoning_tokens_period == Some(period.as_str()) {
             Line::from(Span::styled(
                 format_number_fit(period_stats.stats.reasoning_tokens, format_options, tw),
                 Style::default().fg(Color::Red),
@@ -1749,7 +1756,7 @@ fn draw_aggregate_stats_table(
                 format_number(period_stats.conversations as u64, format_options),
                 Style::default().add_modifier(Modifier::DIM),
             ))
-        } else if i == best_conversations_i {
+        } else if best_conversations_period == Some(period.as_str()) {
             Line::from(Span::styled(
                 format_number(period_stats.conversations as u64, format_options),
                 Style::default().fg(Color::Red),
@@ -1767,7 +1774,7 @@ fn draw_aggregate_stats_table(
                 format_number(period_stats.stats.tool_calls as u64, format_options),
                 Style::default().add_modifier(Modifier::DIM),
             ))
-        } else if i == best_tool_calls_i {
+        } else if best_tool_calls_period == Some(period.as_str()) {
             Line::from(Span::styled(
                 format_number(period_stats.stats.tool_calls as u64, format_options),
                 Style::default().fg(Color::Red),
