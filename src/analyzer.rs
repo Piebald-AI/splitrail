@@ -297,6 +297,26 @@ pub struct AnalyzerRegistry {
     dirty_files_for_upload: Arc<DashMap<PathBuf, String>>,
 }
 
+fn add_new_sessions_to_view(
+    view: &mut AnalyzerStatsView,
+    messages: &[ConversationMessage],
+    analyzer_name: &Arc<str>,
+) -> bool {
+    let introduces_new_session = messages.iter().any(|message| {
+        !view
+            .session_aggregates
+            .iter()
+            .any(|session| session.session_id == message.conversation_hash)
+    });
+    if !introduces_new_session {
+        return false;
+    }
+
+    let contribution = MultiSessionContribution::from_messages(messages, Arc::clone(analyzer_name));
+    view.add_multi_session_contribution(&contribution);
+    true
+}
+
 impl Default for AnalyzerRegistry {
     fn default() -> Self {
         Self::new()
@@ -621,7 +641,11 @@ impl AnalyzerRegistry {
                 if let Some(old) = old_contribution {
                     view.subtract_single_message_contribution(&old);
                 }
-                view.add_single_message_contribution(&new_contribution);
+                if !add_new_sessions_to_view(&mut view, &new_messages, &analyzer_name_arc)
+                    && !new_messages.is_empty()
+                {
+                    view.add_single_message_contribution(&new_contribution);
+                }
             }
             ContributionStrategy::SingleSession => {
                 let old_contribution = self.contribution_cache.get_single_session(&path_hash);
@@ -635,7 +659,11 @@ impl AnalyzerRegistry {
                 if let Some(old) = old_contribution {
                     view.subtract_single_session_contribution(&old);
                 }
-                view.add_single_session_contribution(&new_contribution);
+                if !add_new_sessions_to_view(&mut view, &new_messages, &analyzer_name_arc)
+                    && !new_messages.is_empty()
+                {
+                    view.add_single_session_contribution(&new_contribution);
+                }
             }
             ContributionStrategy::MultiSession => {
                 let old_contribution = self.contribution_cache.get_multi_session(&path_hash);
@@ -826,7 +854,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     struct TestAnalyzer {
         name: &'static str,
@@ -834,6 +862,51 @@ mod tests {
         stats: Option<AgenticCodingToolStats>,
         sources: Vec<PathBuf>,
         fail_stats: bool,
+    }
+
+    struct IncrementalSessionAnalyzer {
+        sources: Vec<PathBuf>,
+        messages_by_path: HashMap<PathBuf, Vec<ConversationMessage>>,
+        strategy: ContributionStrategy,
+    }
+
+    #[async_trait]
+    impl Analyzer for IncrementalSessionAnalyzer {
+        fn display_name(&self) -> &'static str {
+            "incremental-sessions"
+        }
+
+        fn get_data_glob_patterns(&self) -> Vec<String> {
+            vec!["*.jsonl".to_string()]
+        }
+
+        fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
+            Ok(self
+                .sources
+                .iter()
+                .cloned()
+                .map(|path| DataSource { path })
+                .collect())
+        }
+
+        fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
+            Ok(self
+                .messages_by_path
+                .get(&source.path)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn get_watch_directories(&self) -> Vec<PathBuf> {
+            self.sources
+                .iter()
+                .filter_map(|path| path.parent().map(Path::to_path_buf))
+                .collect()
+        }
+
+        fn contribution_strategy(&self) -> ContributionStrategy {
+            self.strategy
+        }
     }
 
     #[async_trait]
@@ -1196,6 +1269,66 @@ mod tests {
             after_removal, expected_strings,
             "Order changed after removal"
         );
+    }
+
+    #[test]
+    fn incremental_reload_adds_new_session_to_live_view() {
+        use std::fs;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        for strategy in [
+            ContributionStrategy::SingleMessage,
+            ContributionStrategy::SingleSession,
+        ] {
+            let strategy_dir = temp_dir.path().join(format!("{strategy:?}"));
+            fs::create_dir(&strategy_dir).expect("create strategy directory");
+            let initial_path = strategy_dir.join("initial.jsonl");
+            let new_path = strategy_dir.join("new.jsonl");
+            fs::write(&initial_path, "{}").expect("write initial source");
+            fs::write(&new_path, "{}").expect("write new source");
+
+            let mut initial_message = sample_stats("incremental-sessions").messages.remove(0);
+            initial_message.conversation_hash = "initial-session".into();
+            initial_message.global_hash = "initial-message".into();
+
+            let mut new_message = initial_message.clone();
+            new_message.conversation_hash = "new-session".into();
+            new_message.global_hash = "new-message".into();
+            new_message.session_name = Some("New session".into());
+            new_message.stats.input_tokens = 42;
+
+            let mut registry = AnalyzerRegistry::new();
+            registry.register(IncrementalSessionAnalyzer {
+                sources: vec![initial_path.clone()],
+                messages_by_path: HashMap::from([
+                    (initial_path, vec![initial_message]),
+                    (new_path.clone(), vec![new_message]),
+                ]),
+                strategy,
+            });
+
+            registry
+                .load_all_stats_views_parallel()
+                .expect("initial load");
+            registry
+                .reload_file_incremental("incremental-sessions", &new_path)
+                .expect("incremental reload");
+
+            let view = registry
+                .get_cached_view("incremental-sessions")
+                .expect("cached view");
+            let view = view.read();
+
+            assert_eq!(view.num_conversations, 2, "strategy: {strategy:?}");
+            assert_eq!(view.session_aggregates.len(), 2, "strategy: {strategy:?}");
+            let new_session = view
+                .session_aggregates
+                .iter()
+                .find(|session| session.session_id == "new-session")
+                .expect("new session should be visible");
+            assert_eq!(new_session.session_name.as_deref(), Some("New session"));
+            assert_eq!(new_session.stats.input_tokens, 42);
+        }
     }
 
     // =========================================================================
