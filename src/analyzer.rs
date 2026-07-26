@@ -9,10 +9,11 @@ use walkdir::WalkDir;
 
 use crate::contribution_cache::{
     ContributionCache, ContributionStrategy, MultiSessionContribution, PathHash,
-    RemovedContribution, SingleMessageContribution, SingleSessionContribution,
+    RemovedContribution, SessionHash, SingleMessageContribution, SingleSessionContribution,
 };
 use crate::types::{
-    AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, SharedAnalyzerView,
+    AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, DailyStats, ModelCounts,
+    SharedAnalyzerView, TuiStats,
 };
 
 /// VSCode GUI forks that might have extensions installed
@@ -301,20 +302,55 @@ fn add_new_sessions_to_view(
     view: &mut AnalyzerStatsView,
     messages: &[ConversationMessage],
     analyzer_name: &Arc<str>,
-) -> bool {
-    let introduces_new_session = messages.iter().any(|message| {
-        !view
+) {
+    let contribution = MultiSessionContribution::from_messages(messages, Arc::clone(analyzer_name));
+    for mut session in contribution.session_aggregates {
+        if view
             .session_aggregates
             .iter()
-            .any(|session| session.session_id == message.conversation_hash)
-    });
-    if !introduces_new_session {
-        return false;
-    }
+            .any(|existing| existing.session_id == session.session_id)
+        {
+            continue;
+        }
 
-    let contribution = MultiSessionContribution::from_messages(messages, Arc::clone(analyzer_name));
-    view.add_multi_session_contribution(&contribution);
-    true
+        session.stats = TuiStats::default();
+        session.models = ModelCounts::new();
+        let date = session.date;
+        view.session_aggregates.push(session);
+        view.num_conversations += 1;
+
+        let day_stats = view
+            .daily_stats
+            .entry(date.to_string())
+            .or_insert_with(|| DailyStats {
+                date,
+                ..Default::default()
+            });
+        day_stats.conversations += 1;
+    }
+    view.session_aggregates.sort_by_key(|s| s.first_timestamp);
+}
+
+fn remove_session_from_view(view: &mut AnalyzerStatsView, session_hash: SessionHash) {
+    let Some(position) = view.session_aggregates.iter().position(|session| {
+        SingleMessageContribution::hash_session_id(&session.session_id) == session_hash
+    }) else {
+        return;
+    };
+
+    let session = view.session_aggregates.remove(position);
+    view.num_conversations = view.num_conversations.saturating_sub(1);
+
+    let date = session.date.to_string();
+    if let Some(day_stats) = view.daily_stats.get_mut(&date) {
+        day_stats.conversations = day_stats.conversations.saturating_sub(1);
+        if day_stats.user_messages == 0
+            && day_stats.ai_messages == 0
+            && day_stats.conversations == 0
+        {
+            view.daily_stats.remove(&date);
+        }
+    }
 }
 
 impl Default for AnalyzerRegistry {
@@ -640,10 +676,15 @@ impl AnalyzerRegistry {
                 let mut view = shared_view.write();
                 if let Some(old) = old_contribution {
                     view.subtract_single_message_contribution(&old);
+                    if !self
+                        .contribution_cache
+                        .contains_single_message_session(old.session_hash)
+                    {
+                        remove_session_from_view(&mut view, old.session_hash);
+                    }
                 }
-                if !add_new_sessions_to_view(&mut view, &new_messages, &analyzer_name_arc)
-                    && !new_messages.is_empty()
-                {
+                if !new_messages.is_empty() {
+                    add_new_sessions_to_view(&mut view, &new_messages, &analyzer_name_arc);
                     view.add_single_message_contribution(&new_contribution);
                 }
             }
@@ -658,10 +699,15 @@ impl AnalyzerRegistry {
                 let mut view = shared_view.write();
                 if let Some(old) = old_contribution {
                     view.subtract_single_session_contribution(&old);
+                    if !self
+                        .contribution_cache
+                        .contains_single_session(old.session_hash)
+                    {
+                        remove_session_from_view(&mut view, old.session_hash);
+                    }
                 }
-                if !add_new_sessions_to_view(&mut view, &new_messages, &analyzer_name_arc)
-                    && !new_messages.is_empty()
-                {
+                if !new_messages.is_empty() {
+                    add_new_sessions_to_view(&mut view, &new_messages, &analyzer_name_arc);
                     view.add_single_session_contribution(&new_contribution);
                 }
             }
@@ -720,9 +766,21 @@ impl AnalyzerRegistry {
                 match removed {
                     RemovedContribution::SingleMessage(old) => {
                         view.subtract_single_message_contribution(&old);
+                        if !self
+                            .contribution_cache
+                            .contains_single_message_session(old.session_hash)
+                        {
+                            remove_session_from_view(&mut view, old.session_hash);
+                        }
                     }
                     RemovedContribution::SingleSession(old) => {
                         view.subtract_single_session_contribution(&old);
+                        if !self
+                            .contribution_cache
+                            .contains_single_session(old.session_hash)
+                        {
+                            remove_session_from_view(&mut view, old.session_hash);
+                        }
                     }
                     RemovedContribution::MultiSession(old) => {
                         view.subtract_multi_session_contribution(&old);
@@ -1328,6 +1386,25 @@ mod tests {
                 .expect("new session should be visible");
             assert_eq!(new_session.session_name.as_deref(), Some("New session"));
             assert_eq!(new_session.stats.input_tokens, 42);
+            drop(view);
+
+            assert!(
+                registry.remove_file_from_cache("incremental-sessions", &new_path),
+                "strategy: {strategy:?}"
+            );
+
+            let view = registry
+                .get_cached_view("incremental-sessions")
+                .expect("cached view");
+            let view = view.read();
+            assert_eq!(view.num_conversations, 1, "strategy: {strategy:?}");
+            assert_eq!(view.session_aggregates.len(), 1, "strategy: {strategy:?}");
+            assert!(
+                view.session_aggregates
+                    .iter()
+                    .all(|session| session.session_id != "new-session"),
+                "strategy: {strategy:?}"
+            );
         }
     }
 
