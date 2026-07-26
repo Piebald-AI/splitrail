@@ -249,6 +249,70 @@ fn aggregate_table_preserves_leading_digit_in_large_tool_total() {
 }
 
 #[test]
+fn aggregate_table_highlights_best_value_when_sort_is_reversed() {
+    let daily_stats = BTreeMap::from([
+        (
+            "2025-01-01".to_string(),
+            make_daily_stats("2025-01-01", 111, 0, 1),
+        ),
+        (
+            "2025-01-02".to_string(),
+            make_daily_stats("2025-01-02", 999, 0, 2),
+        ),
+    ]);
+    let stats = AnalyzerStatsView {
+        daily_stats,
+        session_aggregates: Vec::new(),
+        num_conversations: 3,
+        analyzer_name: Arc::from("Test"),
+    };
+    let format_options = crate::utils::NumberFormatOptions {
+        use_comma: false,
+        use_human: false,
+        locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
+        decimal_places: 2,
+    };
+    let width = 120;
+    let backend = TestBackend::new(width, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut table_state = TableState::default();
+    table_state.select(Some(1));
+
+    terminal
+        .draw(|frame| {
+            draw_aggregate_stats_table(
+                frame,
+                Rect::new(0, 0, width, 8),
+                &stats,
+                &format_options,
+                &mut table_state,
+                AggregateViewMode::Daily,
+                "",
+                false,
+                true,
+                Color::Cyan,
+                &HashSet::new(),
+                false,
+            );
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let best_cell = buffer
+        .content
+        .chunks(width as usize)
+        .find_map(|row| {
+            let rendered = row.iter().map(|cell| cell.symbol()).collect::<String>();
+            rendered.find("999").and_then(|column| row.get(column))
+        })
+        .expect("best input token value should be rendered");
+
+    assert_eq!(best_cell.fg, Color::Red);
+}
+
+#[test]
 fn test_build_display_stats_prepends_all_tools_view() {
     let multi = MultiAnalyzerStats {
         analyzer_stats: vec![
