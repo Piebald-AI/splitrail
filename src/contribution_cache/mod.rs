@@ -127,6 +127,13 @@ impl ContributionCache {
         self.single_message.get(key).map(|r| *r)
     }
 
+    /// Check whether another single-message contribution belongs to a session.
+    pub fn contains_single_message_session(&self, session_hash: SessionHash) -> bool {
+        self.single_message
+            .iter()
+            .any(|entry| entry.value().session_hash == session_hash)
+    }
+
     // --- Single Session operations ---
 
     /// Insert a single-session contribution.
@@ -139,6 +146,13 @@ impl ContributionCache {
     #[inline]
     pub fn get_single_session(&self, key: &PathHash) -> Option<SingleSessionContribution> {
         self.single_session.get(key).map(|r| r.clone())
+    }
+
+    /// Check whether another single-session contribution belongs to a session.
+    pub fn contains_single_session(&self, session_hash: SessionHash) -> bool {
+        self.single_session
+            .iter()
+            .any(|entry| entry.value().session_hash == session_hash)
     }
 
     // --- Multi Session operations ---
