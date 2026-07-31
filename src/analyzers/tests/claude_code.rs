@@ -80,7 +80,7 @@ static DUPLICATE_MESSAGES_DATA: LazyLock<String> = LazyLock::new(|| {
 });
 
 #[test]
-fn test_deduplicate_messages_merges_same_local_hash_across_uuids() {
+fn test_deduplicate_messages_resolves_same_local_hash_across_uuids() {
     let mut first = ConversationMessage {
         application: Application::ClaudeCode,
         date: Utc.with_ymd_and_hms(2025, 8, 2, 16, 0, 0).unwrap(),
@@ -102,14 +102,59 @@ fn test_deduplicate_messages_merges_same_local_hash_across_uuids() {
     second.uuid = Some("uuid-b".to_string());
     second.stats.input_tokens = 20;
 
+    // Output is tied at zero here, so the four-field total decides and the second
+    // record is kept whole: 20, not 10 + 20.
     let deduplicated = deduplicate_messages(vec![first.clone(), second]);
     assert_eq!(deduplicated.len(), 1);
-    assert_eq!(deduplicated[0].stats.input_tokens, 30);
+    assert_eq!(deduplicated[0].stats.input_tokens, 20);
 
     first.stats.input_tokens = 10;
     let duplicate_fingerprint = deduplicate_messages(vec![first.clone(), first]);
     assert_eq!(duplicate_fingerprint.len(), 1);
     assert_eq!(duplicate_fingerprint[0].stats.input_tokens, 10);
+}
+
+#[test]
+fn test_streaming_snapshots_do_not_inflate_identical_fields() {
+    // The shape a streaming assistant message actually takes on disk: several
+    // records under one `(requestId, message.id)` key where only `output_tokens`
+    // grows, while the input and cache fields are identical on every record of
+    // the group. Two distinct fingerprints per group is the whole of it.
+    let partial = ConversationMessage {
+        application: Application::ClaudeCode,
+        date: Utc.with_ymd_and_hms(2025, 8, 2, 16, 0, 0).unwrap(),
+        project_hash: "project".to_string(),
+        conversation_hash: "conversation".to_string(),
+        local_hash: Some("streaming-local-hash".to_string()),
+        global_hash: "uuid-partial".to_string(),
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        stats: Stats {
+            input_tokens: 2,
+            output_tokens: 4,
+            cache_creation_tokens: 53_554,
+            cache_read_tokens: 0,
+            cached_tokens: 53_554,
+            ..Stats::default()
+        },
+        role: MessageRole::Assistant,
+        uuid: Some("uuid-partial".to_string()),
+        session_name: None,
+    };
+    let mut finished = partial.clone();
+    finished.global_hash = "uuid-finished".to_string();
+    finished.uuid = Some("uuid-finished".to_string());
+    finished.stats.output_tokens = 248;
+
+    let deduplicated = deduplicate_messages(vec![partial, finished]);
+
+    // The finished record, whole. Input is not 2 + 2 and cache creation is not
+    // 53,554 counted twice.
+    assert_eq!(deduplicated.len(), 1);
+    assert_eq!(deduplicated[0].stats.input_tokens, 2);
+    assert_eq!(deduplicated[0].stats.output_tokens, 248);
+    assert_eq!(deduplicated[0].stats.cache_creation_tokens, 53_554);
+    assert_eq!(deduplicated[0].stats.cache_read_tokens, 0);
+    assert_eq!(deduplicated[0].stats.cached_tokens, 53_554);
 }
 
 #[test]
@@ -357,11 +402,12 @@ fn test_deduplicate_messages_by_local_hash() {
 
     let deduplicated = deduplicate_messages_by_local_hash(messages);
 
-    // Deduplication now aggregates messages with the same local_hash
+    // Deduplication resolves messages with the same local_hash to one record
     assert_eq!(deduplicated.len(), 1);
 
-    // Should sum the tokens from both entries: 10 + 15 = 25
-    assert_eq!(deduplicated[0].stats.input_tokens, 25);
+    // The second record has the higher output, so it is kept whole: 15, not
+    // 10 + 15
+    assert_eq!(deduplicated[0].stats.input_tokens, 15);
 
     // Test with manually created messages that should be deduplicated
     let mut test_messages = Vec::new();
@@ -405,16 +451,14 @@ fn test_deduplicate_messages_by_local_hash() {
     test_messages.push(duplicate_msg.clone());
 
     let deduplicated_test = deduplicate_messages_by_local_hash(test_messages);
-    // Aggregation logic merges messages with the same local_hash
+    // Selection resolves messages with the same local_hash to one record
     assert_eq!(deduplicated_test.len(), 1);
-    // Should keep the first message's metadata but aggregate the tokens
+    // Should keep the first message's metadata and the winning record's tokens
     assert_eq!(deduplicated_test[0].global_hash, "global1");
-    // Should sum the tokens from both entries: 10 + 15 = 25
-    assert_eq!(deduplicated_test[0].stats.input_tokens, 25);
-    // Should sum output tokens: 5 + 8 = 13
-    assert_eq!(deduplicated_test[0].stats.output_tokens, 13);
-    // Should sum cache tokens: 3 + 5 = 8
-    assert_eq!(deduplicated_test[0].stats.cached_tokens, 8);
+    // The duplicate has the higher output, so its record is kept whole
+    assert_eq!(deduplicated_test[0].stats.input_tokens, 15);
+    assert_eq!(deduplicated_test[0].stats.output_tokens, 8);
+    assert_eq!(deduplicated_test[0].stats.cached_tokens, 5);
     // Should preserve session name
     assert_eq!(
         deduplicated_test[0].session_name,
