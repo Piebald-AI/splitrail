@@ -2,7 +2,8 @@ use crate::analyzer::{Analyzer, DataSource};
 use crate::analyzers::claude_code::{
     ClaudeCodeAnalyzer, TokenFingerprint, calculate_cost_from_tokens, claude_projects_dir,
     deduplicate_grouped_messages, deduplicate_messages, extract_and_hash_project_id,
-    is_claude_transcript_path, merge_message_into, parse_jsonl_file,
+    extract_and_hash_project_id_in, is_claude_transcript_path, merge_message_into,
+    parse_jsonl_file,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use chrono::{TimeZone, Utc};
@@ -254,6 +255,21 @@ fn test_extract_and_hash_project_id() {
     // Hashes should not be empty.
     assert!(!hash1.is_empty());
     assert!(!hash3.is_empty());
+}
+
+#[test]
+fn test_extract_project_hash_from_custom_projects_dir() {
+    let projects = Path::new("/custom/config-root/projects");
+    let first = projects.join("project-a/session-1.jsonl");
+    let second = projects.join("project-a/session-2/subagents/agent-1.jsonl");
+    let other = projects.join("project-b/session-3.jsonl");
+
+    let first_hash = extract_and_hash_project_id_in(projects, &first);
+    assert_eq!(
+        first_hash,
+        extract_and_hash_project_id_in(projects, &second)
+    );
+    assert_ne!(first_hash, extract_and_hash_project_id_in(projects, &other));
 }
 
 #[test]

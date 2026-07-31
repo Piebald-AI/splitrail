@@ -94,7 +94,9 @@ impl ClaudeCodeAnalyzer {
     }
 
     pub(crate) fn parse_live_source(source: &DataSource) -> Result<Vec<ConversationMessage>> {
-        let project_hash = extract_and_hash_project_id(&source.path);
+        let project_hash = Self::data_dir()
+            .map(|projects_dir| extract_and_hash_project_id_in(&projects_dir, &source.path))
+            .unwrap_or_else(|| extract_and_hash_project_id(&source.path));
         let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
         let file = File::open(&source.path)?;
         let (mut messages, summaries, _uuids, fallback) =
@@ -369,6 +371,16 @@ pub fn extract_and_hash_project_id(file_path: &Path) -> String {
     project_id
         .map(hash_text)
         .unwrap_or_else(|| hash_text(&file_path.to_string_lossy()))
+}
+
+pub(crate) fn extract_and_hash_project_id_in(projects_dir: &Path, file_path: &Path) -> String {
+    file_path
+        .strip_prefix(projects_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|project_id| project_id.as_os_str().to_str())
+        .map(hash_text)
+        .unwrap_or_else(|| extract_and_hash_project_id(file_path))
 }
 
 // CLAUDE CODE JSONL FILES SCHEMA
