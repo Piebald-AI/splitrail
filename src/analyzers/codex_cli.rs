@@ -298,6 +298,7 @@ fn is_probably_tool_json_text(text: &str) -> bool {
 fn is_noise_title_candidate(text: &str) -> bool {
     let trimmed = text.trim_start();
     is_probably_tool_json_text(trimmed)
+        || trimmed.starts_with("<recommended_plugins>")
         || trimmed.starts_with("<environment_context>")
         || trimmed.starts_with("# AGENTS.md instructions for")
 }
