@@ -871,6 +871,7 @@ fn model_filter_recalculates_stats_and_sessions() {
         date.to_string(),
         DailyStats {
             date,
+            user_messages: 4,
             ai_messages: 3,
             conversations: 2,
             models: BTreeMap::from([("claude-sonnet-4".to_string(), 2), ("gpt-5".to_string(), 1)]),
@@ -917,6 +918,7 @@ fn model_filter_recalculates_stats_and_sessions() {
     let day = filtered.daily_stats.get("2025-01-01").unwrap();
 
     assert_eq!(day.ai_messages, 2);
+    assert_eq!(day.user_messages, 4);
     assert_eq!(day.conversations, 1);
     assert_eq!(day.stats.input_tokens, 100);
     assert_eq!(day.stats.output_tokens, 20);
@@ -926,6 +928,22 @@ fn model_filter_recalculates_stats_and_sessions() {
     assert!(day.models.contains_key("claude-sonnet-4"));
     assert_eq!(filtered.num_conversations, 1);
     assert_eq!(filtered.session_aggregates[0].session_id, "claude-session");
+
+    let mut incomplete_view = view.clone();
+    incomplete_view
+        .daily_stats
+        .get_mut("2025-01-01")
+        .unwrap()
+        .model_stats
+        .remove("claude-sonnet-4");
+    let incomplete_filtered = filter_analyzer_view_by_model(&incomplete_view, "sonnet");
+    let incomplete_day = &incomplete_filtered.daily_stats["2025-01-01"];
+    assert_eq!(incomplete_day.user_messages, 4);
+    assert_eq!(incomplete_day.ai_messages, 2);
+    assert_eq!(incomplete_day.stats.input_tokens, 100);
+    assert_eq!(incomplete_day.stats.output_tokens, 20);
+    assert_eq!(incomplete_day.stats.cost_cents, 125);
+    assert_eq!(incomplete_day.stats.tool_calls, 3);
     assert_eq!(
         format_model_usage_shares(
             &view.daily_stats["2025-01-01"].models,

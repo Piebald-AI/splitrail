@@ -243,6 +243,17 @@ fn model_name_matches(model: &str, filter: &str) -> bool {
     model.to_lowercase().contains(filter)
 }
 
+fn tui_stats_from_model_stats(stats: &ModelStats) -> TuiStats {
+    TuiStats {
+        input_tokens: stats.input_tokens,
+        output_tokens: stats.output_tokens,
+        reasoning_tokens: stats.reasoning_tokens,
+        cached_tokens: stats.cached_tokens,
+        cost_cents: (stats.cost * 100.0).round() as u32,
+        tool_calls: stats.tool_calls,
+    }
+}
+
 fn filter_analyzer_view_by_model(
     view: &AnalyzerStatsView,
     model_filter: &str,
@@ -268,6 +279,7 @@ fn filter_analyzer_view_by_model(
     for (date, day_stats) in &view.daily_stats {
         let mut filtered_day = DailyStats {
             date: day_stats.date,
+            user_messages: day_stats.user_messages,
             apps: day_stats.apps.clone(),
             ..Default::default()
         };
@@ -277,29 +289,54 @@ fn filter_analyzer_view_by_model(
                 filtered_day.models.insert(model.clone(), *count);
             }
         }
+        filtered_day.ai_messages = filtered_day.models.values().copied().sum();
 
         for (model, model_stats) in &day_stats.model_stats {
             if !model_name_matches(model, &filter) {
                 continue;
             }
 
-            filtered_day.ai_messages = filtered_day
-                .ai_messages
-                .saturating_add(model_stats.message_count);
-            filtered_day.stats += TuiStats {
-                input_tokens: model_stats.input_tokens,
-                output_tokens: model_stats.output_tokens,
-                reasoning_tokens: model_stats.reasoning_tokens,
-                cached_tokens: model_stats.cached_tokens,
-                cost_cents: (model_stats.cost * 100.0).round() as u32,
-                tool_calls: model_stats.tool_calls,
-            };
+            if !day_stats.models.contains_key(model) {
+                filtered_day.ai_messages = filtered_day
+                    .ai_messages
+                    .saturating_add(model_stats.message_count);
+            }
+            filtered_day.stats += tui_stats_from_model_stats(model_stats);
             filtered_day
                 .model_stats
                 .insert(model.clone(), model_stats.clone());
         }
 
         if !filtered_day.models.is_empty() || !filtered_day.model_stats.is_empty() {
+            let model_message_count: u32 = day_stats.models.values().copied().sum();
+            let has_unmodeled_messages = model_message_count != day_stats.ai_messages;
+            let all_models_match = day_stats
+                .models
+                .keys()
+                .chain(day_stats.model_stats.keys())
+                .all(|model| model_name_matches(model, &filter));
+            let missing_models: Vec<_> = day_stats
+                .models
+                .keys()
+                .filter(|model| !day_stats.model_stats.contains_key(*model))
+                .collect();
+
+            if !has_unmodeled_messages && all_models_match {
+                filtered_day.ai_messages = day_stats.ai_messages;
+                filtered_day.stats = day_stats.stats;
+            } else if !has_unmodeled_messages
+                && !missing_models.is_empty()
+                && missing_models
+                    .iter()
+                    .all(|model| model_name_matches(model, &filter))
+            {
+                let mut unaccounted_stats = day_stats.stats;
+                for model_stats in day_stats.model_stats.values() {
+                    unaccounted_stats -= tui_stats_from_model_stats(model_stats);
+                }
+                filtered_day.stats += unaccounted_stats;
+            }
+
             daily_stats.insert(date.clone(), filtered_day);
         }
     }
@@ -1519,10 +1556,15 @@ fn draw_ui(
             } else if ui_state.quit_pending {
                 "Quit splitrail?  Press q again to confirm  •  any other key to cancel".to_string()
             } else if !ui_state.model_filter.is_empty() {
-                format!(
+                let filter_help = format!(
                     "Model filter: {}  •  f to edit  •  {}",
                     ui_state.model_filter, base_help_text
-                )
+                );
+                if has_estimated_models {
+                    format!("{filter_help} • * = estimated pricing")
+                } else {
+                    filter_help
+                }
             } else if has_estimated_models {
                 format!("{} • * = estimated pricing", base_help_text)
             } else {
