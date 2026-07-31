@@ -191,6 +191,14 @@ impl ModelCounts {
 /// Pre-computed session aggregate for TUI display.
 /// Contains aggregated stats per conversation session.
 /// Note: Not serialized - view-only type for TUI. Uses `Arc<str>` for memory efficiency.
+#[derive(Debug, Clone, Default)]
+pub struct SessionPeriodAggregate {
+    pub stats: TuiStats,
+    pub models: ModelCounts,
+    pub message_count: u32,
+    pub ai_message_count: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionAggregate {
     pub session_id: String,
@@ -203,6 +211,8 @@ pub struct SessionAggregate {
     pub models: ModelCounts,
     pub session_name: Option<String>,
     pub date: CompactDate,
+    /// Per-day activity used when drilling into a day, week, month, or year.
+    pub daily: BTreeMap<CompactDate, SessionPeriodAggregate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -887,6 +897,7 @@ mod tests {
                 models: ModelCounts::from_single(intern_model(model), count),
                 session_name: None,
                 date: CompactDate::default(),
+                daily: BTreeMap::new(),
             }],
             ..Default::default()
         }

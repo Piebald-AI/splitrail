@@ -5,8 +5,8 @@ mod tests;
 use crate::config::TuiConfig;
 use crate::models::is_model_estimated;
 use crate::types::{
-    AnalyzerStatsView, CompactDate, DailyStats, MultiAnalyzerStatsView, SharedAnalyzerView,
-    resolve_model,
+    AnalyzerStatsView, CompactDate, DailyStats, ModelCounts, MultiAnalyzerStatsView,
+    SharedAnalyzerView, TuiStats, resolve_model,
 };
 use crate::utils::{
     NumberFormatOptions, format_date_for_display, format_number, format_number_fit,
@@ -233,10 +233,64 @@ fn filtered_session_count(view: &AnalyzerStatsView, period_filter: Option<Period
         .map(|filter| {
             view.session_aggregates
                 .iter()
-                .filter(|session| filter.matches_compact_date(session.date))
+                .filter(|session| {
+                    if session.daily.is_empty() {
+                        filter.matches_compact_date(session.date)
+                    } else {
+                        session
+                            .daily
+                            .keys()
+                            .any(|date| filter.matches_compact_date(*date))
+                    }
+                })
                 .count()
         })
         .unwrap_or_else(|| view.session_aggregates.len())
+}
+
+fn sessions_for_period(
+    sessions: &[SessionAggregate],
+    period_filter: Option<PeriodFilter>,
+) -> Vec<SessionAggregate> {
+    let Some(filter) = period_filter else {
+        return sessions.to_vec();
+    };
+
+    sessions
+        .iter()
+        .filter_map(|session| {
+            if session.daily.is_empty() {
+                return filter
+                    .matches_compact_date(session.date)
+                    .then(|| session.clone());
+            }
+
+            let mut filtered = SessionAggregate {
+                session_id: session.session_id.clone(),
+                first_timestamp: session.first_timestamp,
+                analyzer_name: Arc::clone(&session.analyzer_name),
+                stats: TuiStats::default(),
+                models: ModelCounts::new(),
+                session_name: session.session_name.clone(),
+                date: session.date,
+                daily: BTreeMap::new(),
+            };
+
+            let mut has_activity = false;
+            for (date, activity) in &session.daily {
+                if !filter.matches_compact_date(*date) {
+                    continue;
+                }
+                has_activity = true;
+                filtered.stats += activity.stats;
+                for &(model, count) in activity.models.iter() {
+                    filtered.models.increment(model, count);
+                }
+            }
+
+            has_activity.then_some(filtered)
+        })
+        .collect()
 }
 
 fn clamp_table_selection(table_state: &mut TableState, total_rows: usize) {
@@ -2081,14 +2135,8 @@ fn draw_session_stats_table(
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
 
-    let filtered_sessions: Vec<&SessionAggregate> = {
-        let mut sessions: Vec<_> = match period_filter {
-            Some(filter) => sessions
-                .iter()
-                .filter(|session| filter.matches_compact_date(session.date))
-                .collect(),
-            None => sessions.iter().collect(),
-        };
+    let filtered_sessions: Vec<SessionAggregate> = {
+        let mut sessions = sessions_for_period(sessions, period_filter);
         if sort_reversed {
             sessions.reverse();
         }

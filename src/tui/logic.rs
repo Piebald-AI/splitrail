@@ -417,19 +417,28 @@ pub fn aggregate_sessions_from_messages(
                 models: ModelCounts::new(),
                 session_name: None,
                 date: CompactDate::from_local(&msg.date),
+                daily: BTreeMap::new(),
             });
+
+        let activity_date = CompactDate::from_local(&msg.date);
+        let daily = entry.daily.entry(activity_date).or_default();
+        daily.message_count = daily.message_count.saturating_add(1);
 
         if msg.date < entry.first_timestamp {
             entry.first_timestamp = msg.date;
-            entry.date = CompactDate::from_local(&msg.date);
+            entry.date = activity_date;
         }
 
         // Only aggregate stats for assistant messages and track models when known.
         if msg.role == MessageRole::Assistant {
+            daily.ai_message_count = daily.ai_message_count.saturating_add(1);
             accumulate_tui_stats(&mut entry.stats, &msg.stats);
+            accumulate_tui_stats(&mut daily.stats, &msg.stats);
 
             if let Some(model) = &msg.model {
-                entry.models.increment(intern_model(model), 1);
+                let model = intern_model(model);
+                entry.models.increment(model, 1);
+                daily.models.increment(model, 1);
             }
         }
 
