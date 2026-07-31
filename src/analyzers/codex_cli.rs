@@ -22,9 +22,19 @@ const DEFAULT_FALLBACK_MODEL: &str = "gpt-5";
 
 static FALLBACK_MODEL: OnceLock<String> = OnceLock::new();
 
-pub(crate) fn get_fallback_model_with_home(home_dir: Option<PathBuf>) -> String {
-    home_dir
-        .map(|h| h.join(".codex").join("config.toml"))
+fn codex_home_with_roots(codex_home: Option<&OsStr>, home_dir: Option<&Path>) -> Option<PathBuf> {
+    codex_home
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir.map(|home| home.join(".codex")))
+}
+
+pub(crate) fn get_fallback_model_with_roots(
+    codex_home: Option<&OsStr>,
+    home_dir: Option<&Path>,
+) -> String {
+    codex_home_with_roots(codex_home, home_dir)
+        .map(|codex_home| codex_home.join("config.toml"))
         .filter(|p| p.is_file())
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|content| {
@@ -46,7 +56,9 @@ fn get_fallback_model() -> &'static str {
         if cfg!(test) {
             DEFAULT_FALLBACK_MODEL.to_string()
         } else {
-            get_fallback_model_with_home(dirs::home_dir())
+            let codex_home = std::env::var_os("CODEX_HOME");
+            let home_dir = dirs::home_dir();
+            get_fallback_model_with_roots(codex_home.as_deref(), home_dir.as_deref())
         }
     })
 }
@@ -59,17 +71,21 @@ impl CodexCliAnalyzer {
     }
 
     fn data_dirs() -> Vec<PathBuf> {
-        data_dirs_with_home(dirs::home_dir())
+        let codex_home = std::env::var_os("CODEX_HOME");
+        let home_dir = dirs::home_dir();
+        data_dirs_with_roots(codex_home.as_deref(), home_dir.as_deref())
     }
 }
 
-pub(crate) fn data_dirs_with_home(home_dir: Option<PathBuf>) -> Vec<PathBuf> {
-    home_dir
-        .map(|home| {
-            let codex_dir = home.join(".codex");
+pub(crate) fn data_dirs_with_roots(
+    codex_home: Option<&OsStr>,
+    home_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    codex_home_with_roots(codex_home, home_dir)
+        .map(|codex_home| {
             vec![
-                codex_dir.join("sessions"),
-                codex_dir.join("archived_sessions"),
+                codex_home.join("sessions"),
+                codex_home.join("archived_sessions"),
             ]
         })
         .unwrap_or_default()
@@ -142,15 +158,10 @@ impl Analyzer for CodexCliAnalyzer {
     }
 
     fn get_data_glob_patterns(&self) -> Vec<String> {
-        let mut patterns = Vec::new();
-
-        if let Some(home_dir) = dirs::home_dir() {
-            let home_str = home_dir.to_string_lossy();
-            patterns.push(format!("{home_str}/.codex/sessions/**/*.jsonl"));
-            patterns.push(format!("{home_str}/.codex/archived_sessions/**/*.jsonl"));
-        }
-
-        patterns
+        Self::data_dirs()
+            .into_iter()
+            .map(|data_dir| format!("{}/**/*.jsonl", data_dir.to_string_lossy()))
+            .collect()
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {

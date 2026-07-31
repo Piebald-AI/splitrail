@@ -5,6 +5,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use simd_json::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,17 @@ type ParseResult = (
     Option<String>,
 );
 
+pub(crate) fn claude_projects_dir(
+    config_dir: Option<&OsStr>,
+    home_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    config_dir
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir.map(|home| home.join(".claude")))
+        .map(|config_dir| config_dir.join("projects"))
+}
+
 pub struct ClaudeCodeAnalyzer {
     discovery_was_complete: AtomicBool,
 }
@@ -39,7 +51,9 @@ impl ClaudeCodeAnalyzer {
     }
 
     fn data_dir() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+        let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let home_dir = dirs::home_dir();
+        claude_projects_dir(config_dir.as_deref(), home_dir.as_deref())
     }
 
     pub(crate) fn discover_sources_in(&self, projects_dir: &Path) -> Vec<DataSource> {
@@ -80,7 +94,9 @@ impl ClaudeCodeAnalyzer {
     }
 
     pub(crate) fn parse_live_source(source: &DataSource) -> Result<Vec<ConversationMessage>> {
-        let project_hash = extract_and_hash_project_id(&source.path);
+        let project_hash = Self::data_dir()
+            .map(|projects_dir| extract_and_hash_project_id_in(&projects_dir, &source.path))
+            .unwrap_or_else(|| extract_and_hash_project_id(&source.path));
         let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
         let file = File::open(&source.path)?;
         let (mut messages, summaries, _uuids, fallback) =
@@ -110,12 +126,10 @@ impl Analyzer for ClaudeCodeAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         let mut patterns = Vec::new();
 
-        if let Some(home_dir) = dirs::home_dir() {
-            let home_str = home_dir.to_string_lossy();
-            patterns.push(format!("{home_str}/.claude/projects/*/*.jsonl"));
-            patterns.push(format!(
-                "{home_str}/.claude/projects/*/*/subagents/**/*.jsonl"
-            ));
+        if let Some(projects_dir) = Self::data_dir() {
+            let projects_str = projects_dir.to_string_lossy();
+            patterns.push(format!("{projects_str}/*/*.jsonl"));
+            patterns.push(format!("{projects_str}/*/*/subagents/**/*.jsonl"));
         }
 
         patterns
@@ -357,6 +371,16 @@ pub fn extract_and_hash_project_id(file_path: &Path) -> String {
     project_id
         .map(hash_text)
         .unwrap_or_else(|| hash_text(&file_path.to_string_lossy()))
+}
+
+pub(crate) fn extract_and_hash_project_id_in(projects_dir: &Path, file_path: &Path) -> String {
+    file_path
+        .strip_prefix(projects_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|project_id| project_id.as_os_str().to_str())
+        .map(hash_text)
+        .unwrap_or_else(|| extract_and_hash_project_id(file_path))
 }
 
 // CLAUDE CODE JSONL FILES SCHEMA
