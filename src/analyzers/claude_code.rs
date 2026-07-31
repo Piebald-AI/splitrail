@@ -821,50 +821,70 @@ pub fn merge_message_into(
         dst.session_name = src.session_name.clone();
     }
 
-    if seen_fps.contains(&src_fp) {
-        // Redundant duplicate: merge non-token stats with max()
-        dst.stats.tool_calls = dst.stats.tool_calls.max(src.stats.tool_calls);
-        dst.stats.files_read = dst.stats.files_read.max(src.stats.files_read);
-        dst.stats.files_edited = dst.stats.files_edited.max(src.stats.files_edited);
-        dst.stats.files_added = dst.stats.files_added.max(src.stats.files_added);
-        dst.stats.terminal_commands = dst.stats.terminal_commands.max(src.stats.terminal_commands);
-        dst.stats.file_searches = dst.stats.file_searches.max(src.stats.file_searches);
-        dst.stats.file_content_searches = dst
-            .stats
-            .file_content_searches
-            .max(src.stats.file_content_searches);
-        dst.stats.todo_writes = dst.stats.todo_writes.max(src.stats.todo_writes);
-        dst.stats.todo_reads = dst.stats.todo_reads.max(src.stats.todo_reads);
-        dst.stats.todos_created = dst.stats.todos_created.max(src.stats.todos_created);
-        dst.stats.todos_completed = dst.stats.todos_completed.max(src.stats.todos_completed);
-        dst.stats.todos_in_progress = dst.stats.todos_in_progress.max(src.stats.todos_in_progress);
-    } else {
-        // New fingerprint: aggregate all stats with sum()
-        seen_fps.insert(src_fp);
+    // Tool and todo counters are per-message totals restated on every record of
+    // the group rather than per-record increments, so the largest value seen is
+    // the count for the message.
+    dst.stats.tool_calls = dst.stats.tool_calls.max(src.stats.tool_calls);
+    dst.stats.files_read = dst.stats.files_read.max(src.stats.files_read);
+    dst.stats.files_edited = dst.stats.files_edited.max(src.stats.files_edited);
+    dst.stats.files_added = dst.stats.files_added.max(src.stats.files_added);
+    dst.stats.terminal_commands = dst.stats.terminal_commands.max(src.stats.terminal_commands);
+    dst.stats.file_searches = dst.stats.file_searches.max(src.stats.file_searches);
+    dst.stats.file_content_searches = dst
+        .stats
+        .file_content_searches
+        .max(src.stats.file_content_searches);
+    dst.stats.todo_writes = dst.stats.todo_writes.max(src.stats.todo_writes);
+    dst.stats.todo_reads = dst.stats.todo_reads.max(src.stats.todo_reads);
+    dst.stats.todos_created = dst.stats.todos_created.max(src.stats.todos_created);
+    dst.stats.todos_completed = dst.stats.todos_completed.max(src.stats.todos_completed);
+    dst.stats.todos_in_progress = dst.stats.todos_in_progress.max(src.stats.todos_in_progress);
 
-        dst.stats.input_tokens += src.stats.input_tokens;
-        dst.stats.output_tokens += src.stats.output_tokens;
-        dst.stats.cache_creation_tokens += src.stats.cache_creation_tokens;
-        dst.stats.cache_read_tokens += src.stats.cache_read_tokens;
-        dst.stats.cached_tokens += src.stats.cached_tokens;
+    // Records sharing a key are one message written several times while it
+    // streamed, not separate work. The streaming protocol delivers usage as
+    // cumulative snapshots of a single billed request: `message_delta` carries
+    // running totals for the message and the final event is the bill. Only
+    // `output_tokens` grows between snapshots; the input and cache fields are
+    // identical on every record of the group, so adding them would count the
+    // same tokens once per snapshot.
+    //
+    // That is the assumption to revisit first if these numbers ever look wrong.
+    // It holds because no writer path emits two separately billable chunks under
+    // one key. If one ever does, those chunks need distinguishing from a
+    // streaming snapshot rather than being summed blindly.
+    //
+    // Keep the more complete record whole instead of combining fields. A
+    // per-field maximum would assemble a record that was never written, and
+    // `cost` is derived from those fields, so the resulting cost would
+    // correspond to no observation.
+    if seen_fps.insert(src_fp) && replaces_existing(&dst.stats, &src.stats) {
+        dst.stats.input_tokens = src.stats.input_tokens;
+        dst.stats.output_tokens = src.stats.output_tokens;
+        dst.stats.cache_creation_tokens = src.stats.cache_creation_tokens;
+        dst.stats.cache_read_tokens = src.stats.cache_read_tokens;
+        dst.stats.cached_tokens = src.stats.cached_tokens;
 
-        dst.stats.tool_calls += src.stats.tool_calls;
-        dst.stats.files_read += src.stats.files_read;
-        dst.stats.files_edited += src.stats.files_edited;
-        dst.stats.files_added += src.stats.files_added;
-        dst.stats.terminal_commands += src.stats.terminal_commands;
-        dst.stats.file_searches += src.stats.file_searches;
-        dst.stats.file_content_searches += src.stats.file_content_searches;
-        dst.stats.todo_writes += src.stats.todo_writes;
-        dst.stats.todo_reads += src.stats.todo_reads;
-        dst.stats.todos_created += src.stats.todos_created;
-        dst.stats.todos_completed += src.stats.todos_completed;
-        dst.stats.todos_in_progress += src.stats.todos_in_progress;
-
-        // Preserve each message's timestamp-aware price: `dst.stats.cost` was
-        // already priced at `dst.date`, and `src.stats.cost` was already
-        // priced at `src.date`, so just accumulate rather than recomputing
-        // the whole total at `dst.date` (which would reprice `src`'s tokens).
-        dst.stats.cost += src.stats.cost;
+        // Each record was already priced at its own timestamp, so take the
+        // winner's cost rather than repricing its tokens at `dst.date`.
+        dst.stats.cost = src.stats.cost;
     }
+}
+
+/// Whether `candidate` is the more complete record of a streaming group.
+///
+/// Higher `output_tokens` wins, since that is the only field that grows between
+/// snapshots of one message. A tie falls back to the four-field total so the
+/// choice stays deterministic instead of depending on traversal order, which is
+/// not defined across files. `cached_tokens` is left out of that total because it
+/// is derived from the two cache fields and would count them twice.
+fn replaces_existing(current: &Stats, candidate: &Stats) -> bool {
+    if candidate.output_tokens != current.output_tokens {
+        return candidate.output_tokens > current.output_tokens;
+    }
+
+    token_total(candidate) > token_total(current)
+}
+
+fn token_total(stats: &Stats) -> u64 {
+    stats.input_tokens + stats.output_tokens + stats.cache_creation_tokens + stats.cache_read_tokens
 }
