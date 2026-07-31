@@ -5,7 +5,7 @@ mod tests;
 use crate::config::TuiConfig;
 use crate::models::is_model_estimated;
 use crate::types::{
-    AnalyzerStatsView, CompactDate, DailyStats, ModelCounts, MultiAnalyzerStatsView,
+    AnalyzerStatsView, CompactDate, DailyStats, ModelCounts, ModelStats, MultiAnalyzerStatsView,
     SharedAnalyzerView, TuiStats, resolve_model,
 };
 use crate::utils::{
@@ -293,6 +293,162 @@ fn sessions_for_period(
         .collect()
 }
 
+fn model_name_matches(model: &str, filter: &str) -> bool {
+    model.to_lowercase().contains(filter)
+}
+
+fn tui_stats_from_model_stats(stats: &ModelStats) -> TuiStats {
+    TuiStats {
+        input_tokens: stats.input_tokens,
+        output_tokens: stats.output_tokens,
+        reasoning_tokens: stats.reasoning_tokens,
+        cached_tokens: stats.cached_tokens,
+        cost_cents: (stats.cost * 100.0).round() as u32,
+        tool_calls: stats.tool_calls,
+    }
+}
+
+fn filter_analyzer_view_by_model(
+    view: &AnalyzerStatsView,
+    model_filter: &str,
+) -> AnalyzerStatsView {
+    let filter = model_filter.trim().to_lowercase();
+    if filter.is_empty() {
+        return view.clone();
+    }
+
+    let session_aggregates: Vec<_> = view
+        .session_aggregates
+        .iter()
+        .filter(|session| {
+            session
+                .models
+                .iter()
+                .any(|(model, _)| model_name_matches(resolve_model(*model), &filter))
+        })
+        .cloned()
+        .map(|mut session| {
+            session.daily.retain(|_, activity| {
+                activity
+                    .models
+                    .iter()
+                    .any(|(model, _)| model_name_matches(resolve_model(*model), &filter))
+            });
+            session
+        })
+        .collect();
+
+    let mut daily_stats = BTreeMap::new();
+    for (date, day_stats) in &view.daily_stats {
+        let mut filtered_day = DailyStats {
+            date: day_stats.date,
+            user_messages: day_stats.user_messages,
+            apps: day_stats.apps.clone(),
+            ..Default::default()
+        };
+
+        for (model, count) in &day_stats.models {
+            if model_name_matches(model, &filter) {
+                filtered_day.models.insert(model.clone(), *count);
+            }
+        }
+        filtered_day.ai_messages = filtered_day.models.values().copied().sum();
+
+        for (model, model_stats) in &day_stats.model_stats {
+            if !model_name_matches(model, &filter) {
+                continue;
+            }
+
+            if !day_stats.models.contains_key(model) {
+                filtered_day.ai_messages = filtered_day
+                    .ai_messages
+                    .saturating_add(model_stats.message_count);
+            }
+            filtered_day.stats += tui_stats_from_model_stats(model_stats);
+            filtered_day
+                .model_stats
+                .insert(model.clone(), model_stats.clone());
+        }
+
+        if !filtered_day.models.is_empty() || !filtered_day.model_stats.is_empty() {
+            let model_message_count: u32 = day_stats.models.values().copied().sum();
+            let has_unmodeled_messages = model_message_count != day_stats.ai_messages;
+            let all_models_match = day_stats
+                .models
+                .keys()
+                .chain(day_stats.model_stats.keys())
+                .all(|model| model_name_matches(model, &filter));
+            let missing_models: Vec<_> = day_stats
+                .models
+                .keys()
+                .filter(|model| !day_stats.model_stats.contains_key(*model))
+                .collect();
+
+            if !has_unmodeled_messages && all_models_match {
+                filtered_day.ai_messages = day_stats.ai_messages;
+                filtered_day.stats = day_stats.stats;
+            } else if !has_unmodeled_messages
+                && !missing_models.is_empty()
+                && missing_models
+                    .iter()
+                    .all(|model| model_name_matches(model, &filter))
+            {
+                let mut unaccounted_stats = day_stats.stats;
+                for model_stats in day_stats.model_stats.values() {
+                    unaccounted_stats -= tui_stats_from_model_stats(model_stats);
+                }
+                filtered_day.stats += unaccounted_stats;
+            }
+
+            daily_stats.insert(date.clone(), filtered_day);
+        }
+    }
+
+    for session in &session_aggregates {
+        let dates: Vec<_> = if session.daily.is_empty() {
+            vec![session.date]
+        } else {
+            session.daily.keys().copied().collect()
+        };
+        for date in dates {
+            let date_str = date.to_string();
+            let original_day = view.daily_stats.get(&date_str);
+            let day_stats = daily_stats.entry(date_str).or_insert_with(|| DailyStats {
+                date,
+                apps: original_day
+                    .map(|stats| stats.apps.clone())
+                    .unwrap_or_default(),
+                ..Default::default()
+            });
+            day_stats.conversations = day_stats.conversations.saturating_add(1);
+        }
+    }
+
+    AnalyzerStatsView {
+        daily_stats,
+        num_conversations: session_aggregates.len() as u64,
+        session_aggregates,
+        analyzer_name: Arc::clone(&view.analyzer_name),
+    }
+}
+
+fn filter_stats_by_model(
+    stats: &[SharedAnalyzerView],
+    model_filter: &str,
+) -> Vec<SharedAnalyzerView> {
+    if model_filter.trim().is_empty() {
+        return stats.to_vec();
+    }
+
+    stats
+        .iter()
+        .map(|stats| {
+            let filtered = filter_analyzer_view_by_model(&stats.read(), model_filter);
+            Arc::new(parking_lot::RwLock::new(filtered))
+        })
+        .collect()
+}
+
 fn clamp_table_selection(table_state: &mut TableState, total_rows: usize) {
     if total_rows == 0 {
         table_state.select(None);
@@ -397,6 +553,8 @@ struct UiState<'a> {
     session_period_filters: &'a mut [Option<PeriodFilter>],
     date_jump_active: bool,
     date_jump_buffer: &'a str,
+    model_filter_active: bool,
+    model_filter: &'a str,
     sort_reversed: bool,
     hide_empty_periods: bool,
     show_totals: bool,
@@ -551,6 +709,9 @@ async fn run_app(
     let mut session_period_filters: Vec<Option<PeriodFilter>> = Vec::new();
     let mut date_jump_active = false;
     let mut date_jump_buffer = String::new();
+    let mut model_filter_active = false;
+    let mut model_filter = String::new();
+    let mut model_filter_before_edit = String::new();
     let mut sort_reversed = tui_config.reverse_sort_default;
     let mut hide_empty_periods = tui_config.hide_empty_periods;
     let mut show_totals = true;
@@ -590,12 +751,13 @@ async fn run_app(
 
     // Filter analyzer stats to only include those with data - calculate once and update when stats change
     // SharedAnalyzerView = Arc<RwLock<AnalyzerStatsView>> - clone is cheap (just Arc pointer)
-    let mut filtered_stats: Vec<SharedAnalyzerView> = current_stats
+    let mut available_stats: Vec<SharedAnalyzerView> = current_stats
         .analyzer_stats
         .iter()
         .filter(|stats| has_data_shared(stats))
         .cloned()
         .collect();
+    let mut filtered_stats = filter_stats_by_model(&available_stats, &model_filter);
     let mut display_stats = build_display_stats(&filtered_stats);
 
     // Open on the configured default tab (matched by tool name; empty or
@@ -626,12 +788,13 @@ async fn run_app(
         if stats_receiver.has_changed()? {
             current_stats = stats_receiver.borrow_and_update().clone();
             // Recalculate filtered stats only when stats change
-            filtered_stats = current_stats
+            available_stats = current_stats
                 .analyzer_stats
                 .iter()
                 .filter(|stats| has_data_shared(stats))
                 .cloned()
                 .collect();
+            filtered_stats = filter_stats_by_model(&available_stats, &model_filter);
             display_stats = build_display_stats(&filtered_stats);
             update_table_states(&mut table_states, &current_stats, selected_tab);
             update_window_offsets(&mut session_window_offsets, &table_states.len());
@@ -686,6 +849,8 @@ async fn run_app(
                     session_period_filters: &mut session_period_filters,
                     date_jump_active,
                     date_jump_buffer: &date_jump_buffer,
+                    model_filter_active,
+                    model_filter: &model_filter,
                     sort_reversed,
                     hide_empty_periods,
                     show_totals,
@@ -726,7 +891,7 @@ async fn run_app(
 
             // Handle quitting. Esc is intentionally *not* a quit key; it acts as
             // a context-aware "go back"/cancel below.
-            if matches!(key.code, KeyCode::Char('q')) {
+            if !model_filter_active && matches!(key.code, KeyCode::Char('q')) {
                 if tui_config.confirm_quit && !quit_pending {
                     quit_pending = true;
                     needs_redraw = true;
@@ -741,7 +906,7 @@ async fn run_app(
             }
 
             // Handle update notification dismissal
-            if matches!(key.code, KeyCode::Char('u')) {
+            if !model_filter_active && matches!(key.code, KeyCode::Char('u')) {
                 let mut status = update_status.lock();
                 if matches!(
                     *status,
@@ -750,6 +915,47 @@ async fn run_app(
                     *status = crate::version_check::UpdateStatus::Dismissed;
                     needs_redraw = true;
                 }
+            }
+
+            if model_filter_active {
+                let mut filter_changed = false;
+                match key.code {
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        model_filter.clear();
+                        filter_changed = true;
+                    }
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        model_filter.push(c);
+                        filter_changed = true;
+                    }
+                    KeyCode::Backspace => {
+                        model_filter.pop();
+                        filter_changed = true;
+                    }
+                    KeyCode::Enter => {
+                        model_filter = model_filter.trim().to_string();
+                        model_filter_active = false;
+                        filter_changed = true;
+                    }
+                    KeyCode::Esc => {
+                        model_filter.clone_from(&model_filter_before_edit);
+                        model_filter_active = false;
+                        filter_changed = true;
+                    }
+                    _ => {}
+                }
+
+                if filter_changed {
+                    filtered_stats = filter_stats_by_model(&available_stats, &model_filter);
+                    display_stats = build_display_stats(&filtered_stats);
+                    session_window_offsets.fill(0);
+                }
+                needs_redraw = true;
+                continue;
             }
 
             // Only handle navigation keys if we have data (`display_stats` is non-empty).
@@ -1066,6 +1272,11 @@ async fn run_app(
                         date_jump_buffer.clear();
                         needs_redraw = true;
                     }
+                }
+                KeyCode::Char('f') => {
+                    model_filter_before_edit.clone_from(&model_filter);
+                    model_filter_active = true;
+                    needs_redraw = true;
                 }
                 KeyCode::Char('m') => {
                     *aggregate_view_mode = aggregate_view_mode.next();
@@ -1399,16 +1610,31 @@ fn draw_ui(
                     };
 
                     format!(
-                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q to quit"
+                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q to quit"
                     )
                 }
                 StatsViewMode::Session => {
-                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • r to reverse sort • e to toggle empty periods • s to toggle summary • m to cycle day/week/month/year • Esc or Ctrl+T for aggregate view • q to quit".to_string()
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • m to cycle day/week/month/year • Esc or Ctrl+T for aggregate view • q to quit".to_string()
                 }
             };
 
-            let help_text = if ui_state.quit_pending {
+            let help_text = if ui_state.model_filter_active {
+                format!(
+                    "Model filter: {}_  •  Enter to apply  •  Esc to cancel  •  Ctrl+U to clear",
+                    ui_state.model_filter
+                )
+            } else if ui_state.quit_pending {
                 "Quit splitrail?  Press q again to confirm  •  any other key to cancel".to_string()
+            } else if !ui_state.model_filter.is_empty() {
+                let filter_help = format!(
+                    "Model filter: {}  •  f to edit  •  {}",
+                    ui_state.model_filter, base_help_text
+                );
+                if has_estimated_models {
+                    format!("{filter_help} • * = estimated pricing")
+                } else {
+                    filter_help
+                }
             } else if has_estimated_models {
                 format!("{} • * = estimated pricing", base_help_text)
             } else {
@@ -1523,6 +1749,66 @@ fn cost_heat(cents: u32, max: u32) -> Color {
     let g = (200.0 - t * (200.0 - 80.0)) as u8;
     let b = (110.0 - t * (110.0 - 70.0)) as u8;
     Color::Rgb(r, g, b)
+}
+
+fn format_model_usage_shares(
+    models: &BTreeMap<String, u32>,
+    model_stats: &BTreeMap<String, ModelStats>,
+) -> String {
+    let mut usage: BTreeMap<&str, u64> = models
+        .keys()
+        .map(|model| (model.as_str(), 0))
+        .chain(model_stats.keys().map(|model| (model.as_str(), 0)))
+        .collect();
+
+    for (model, stats) in model_stats {
+        usage.insert(
+            model,
+            stats
+                .input_tokens
+                .saturating_add(stats.output_tokens)
+                .saturating_add(stats.cached_tokens),
+        );
+    }
+
+    let total_tokens = usage.values().copied().sum::<u64>();
+    let has_complete_token_stats = models.keys().all(|model| model_stats.contains_key(model));
+    if total_tokens == 0 || !has_complete_token_stats {
+        for (model, model_usage) in &mut usage {
+            *model_usage = models
+                .get(*model)
+                .copied()
+                .or_else(|| model_stats.get(*model).map(|stats| stats.message_count))
+                .map(u64::from)
+                .unwrap_or(0);
+        }
+    }
+    let total_usage = usage.values().copied().sum::<u64>();
+
+    let mut shares: Vec<_> = usage.into_iter().collect();
+    shares.sort_by(|(left_model, left_usage), (right_model, right_usage)| {
+        right_usage
+            .cmp(left_usage)
+            .then_with(|| left_model.cmp(right_model))
+    });
+
+    shares
+        .into_iter()
+        .map(|(model, model_usage)| {
+            let display_model = if is_model_estimated(model) {
+                format!("{model}*")
+            } else {
+                model.to_string()
+            };
+            let percentage = if total_usage == 0 {
+                0.0
+            } else {
+                model_usage as f64 / total_usage as f64 * 100.0
+            };
+            format!("{display_model} {percentage:.1}%")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1661,6 +1947,9 @@ fn draw_aggregate_stats_table(
     let mut total_reasoning: u64 = 0;
     let mut total_tool_calls: u64 = 0;
     let mut total_conversations: u64 = 0;
+    let mut total_models = BTreeMap::new();
+    let mut total_model_stats = BTreeMap::new();
+    let mut all_apps = std::collections::BTreeSet::new();
 
     for (i, period) in visible_periods.iter().enumerate() {
         let period_stats = aggregate_stats
@@ -1679,23 +1968,21 @@ fn draw_aggregate_stats_table(
         total_tool_calls += period_stats.stats.tool_calls as u64;
         total_conversations += period_stats.conversations as u64;
 
-        let mut models_vec: Vec<String> = period_stats
-            .models
-            .keys()
-            .map(|model| {
-                if is_model_estimated(model) {
-                    format!("{}*", model)
-                } else {
-                    model.clone()
-                }
-            })
-            .collect();
-        models_vec.sort();
-        let models = models_vec.join(", ");
+        for (model, count) in &period_stats.models {
+            *total_models.entry(model.clone()).or_insert(0) += count;
+        }
+        for (model, stats) in &period_stats.model_stats {
+            total_model_stats
+                .entry(model.clone())
+                .or_insert_with(|| ModelStats::new(model.clone()))
+                .add_model_stats(stats);
+        }
+        let models = format_model_usage_shares(&period_stats.models, &period_stats.model_stats);
 
         let mut apps_vec: Vec<String> = period_stats.apps.keys().cloned().collect();
         apps_vec.sort();
         let apps = apps_vec.join(", ");
+        all_apps.extend(period_stats.apps.keys().cloned());
 
         // Check if this is an empty row
         let is_empty_row = is_empty_period(period_stats);
@@ -1889,35 +2176,13 @@ fn draw_aggregate_stats_table(
         rows.push(Row::new(row_cells));
     }
 
-    // Collect all unique models (and apps) for the totals row
-    let mut all_models = HashSet::new();
-    let mut has_estimated_models = false;
-    let mut all_apps = std::collections::BTreeSet::new();
-    for period_stats in aggregate_stats.values() {
-        for model in period_stats.models.keys() {
-            all_models.insert(model);
-            if is_model_estimated(model) {
-                has_estimated_models = true;
-            }
-        }
-        for app in period_stats.apps.keys() {
-            all_apps.insert(app.clone());
-        }
-    }
+    // Summarize models and apps from the same visible periods as the numeric totals.
+    let has_estimated_models = total_models
+        .keys()
+        .chain(total_model_stats.keys())
+        .any(|model| is_model_estimated(model));
     let all_apps_text = all_apps.into_iter().collect::<Vec<_>>().join(", ");
-
-    let mut all_models_vec: Vec<String> = all_models
-        .iter()
-        .map(|model| {
-            if is_model_estimated(model) {
-                format!("{}*", model)
-            } else {
-                model.to_string()
-            }
-        })
-        .collect();
-    all_models_vec.sort();
-    let all_models_text = all_models_vec.join(", ");
+    let all_models_text = format_model_usage_shares(&total_models, &total_model_stats);
 
     // Add separator row before totals
     let token_sep = "─".repeat(TOKEN_COL_WIDTH as usize);

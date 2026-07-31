@@ -6,14 +6,16 @@ use crate::tui::logic::{
 };
 use crate::tui::{
     AggregateViewMode, PeriodFilter, build_display_stats, cost_heat,
-    create_upload_progress_callback, draw_aggregate_stats_table, filtered_session_count,
-    format_month_for_display, format_week_for_display, format_year_for_display, parse_accent,
-    sessions_for_period, show_upload_error, show_upload_success, update_period_filters,
-    update_table_states, update_window_offsets,
+    create_upload_progress_callback, draw_aggregate_stats_table, filter_analyzer_view_by_model,
+    filtered_session_count, format_model_usage_shares, format_month_for_display,
+    format_week_for_display, format_year_for_display, parse_accent, sessions_for_period,
+    show_upload_error, show_upload_success, update_period_filters, update_table_states,
+    update_window_offsets,
 };
 use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, Application, CompactDate, ConversationMessage,
-    DailyStats, MessageRole, MultiAnalyzerStats, Stats, TuiStats,
+    DailyStats, MessageRole, ModelCounts, ModelStats, MultiAnalyzerStats, SessionAggregate, Stats,
+    TuiStats, intern_model,
 };
 use chrono::{TimeZone, Utc};
 use ratatui::Terminal;
@@ -886,6 +888,168 @@ fn test_date_filter_exclusions() {
     assert!(!date_matches_buffer("2025-01-15", "2"));
     assert!(!date_matches_buffer("2025-01-15", "2025-02"));
     assert!(!date_matches_buffer("2025-12-31", "2024"));
+}
+
+#[test]
+fn model_filter_recalculates_stats_and_sessions() {
+    let date = CompactDate::from_str("2025-01-01").unwrap();
+    let claude_stats = ModelStats {
+        model: "claude-sonnet-4".to_string(),
+        message_count: 2,
+        input_tokens: 100,
+        output_tokens: 20,
+        reasoning_tokens: 5,
+        cached_tokens: 50,
+        cost: 1.25,
+        tool_calls: 3,
+        ..Default::default()
+    };
+    let gpt_stats = ModelStats {
+        model: "gpt-5".to_string(),
+        message_count: 1,
+        input_tokens: 900,
+        output_tokens: 80,
+        cost: 4.0,
+        tool_calls: 7,
+        ..Default::default()
+    };
+    let daily_stats = BTreeMap::from([(
+        date.to_string(),
+        DailyStats {
+            date,
+            user_messages: 4,
+            ai_messages: 3,
+            conversations: 2,
+            models: BTreeMap::from([("claude-sonnet-4".to_string(), 2), ("gpt-5".to_string(), 1)]),
+            stats: TuiStats {
+                input_tokens: 1_000,
+                output_tokens: 100,
+                reasoning_tokens: 5,
+                cached_tokens: 50,
+                cost_cents: 525,
+                tool_calls: 10,
+            },
+            model_stats: BTreeMap::from([
+                ("claude-sonnet-4".to_string(), claude_stats),
+                ("gpt-5".to_string(), gpt_stats),
+            ]),
+            ..Default::default()
+        },
+    )]);
+
+    let make_session = |id: &str, model: &str| SessionAggregate {
+        session_id: id.to_string(),
+        first_timestamp: Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
+        analyzer_name: Arc::from("Test"),
+        stats: TuiStats::default(),
+        models: {
+            let mut models = ModelCounts::new();
+            models.increment(intern_model(model), 1);
+            models
+        },
+        session_name: None,
+        date,
+        daily: BTreeMap::new(),
+    };
+    let view = AnalyzerStatsView {
+        daily_stats,
+        session_aggregates: vec![
+            make_session("claude-session", "claude-sonnet-4"),
+            make_session("gpt-session", "gpt-5"),
+        ],
+        num_conversations: 2,
+        analyzer_name: Arc::from("Test"),
+    };
+
+    let filtered = filter_analyzer_view_by_model(&view, "SONNET");
+    let day = filtered.daily_stats.get("2025-01-01").unwrap();
+
+    assert_eq!(day.ai_messages, 2);
+    assert_eq!(day.user_messages, 4);
+    assert_eq!(day.conversations, 1);
+    assert_eq!(day.stats.input_tokens, 100);
+    assert_eq!(day.stats.output_tokens, 20);
+    assert_eq!(day.stats.cost_cents, 125);
+    assert_eq!(day.stats.tool_calls, 3);
+    assert_eq!(day.models.len(), 1);
+    assert!(day.models.contains_key("claude-sonnet-4"));
+    assert_eq!(filtered.num_conversations, 1);
+    assert_eq!(filtered.session_aggregates[0].session_id, "claude-session");
+
+    let mut incomplete_view = view.clone();
+    incomplete_view
+        .daily_stats
+        .get_mut("2025-01-01")
+        .unwrap()
+        .model_stats
+        .remove("claude-sonnet-4");
+    let incomplete_filtered = filter_analyzer_view_by_model(&incomplete_view, "sonnet");
+    let incomplete_day = &incomplete_filtered.daily_stats["2025-01-01"];
+    assert_eq!(incomplete_day.user_messages, 4);
+    assert_eq!(incomplete_day.ai_messages, 2);
+    assert_eq!(incomplete_day.stats.input_tokens, 100);
+    assert_eq!(incomplete_day.stats.output_tokens, 20);
+    assert_eq!(incomplete_day.stats.cost_cents, 125);
+    assert_eq!(incomplete_day.stats.tool_calls, 3);
+    assert_eq!(
+        format_model_usage_shares(
+            &view.daily_stats["2025-01-01"].models,
+            &view.daily_stats["2025-01-01"].model_stats
+        ),
+        "gpt-5 85.2%, claude-sonnet-4 14.8%"
+    );
+    assert_eq!(
+        format_model_usage_shares(
+            &BTreeMap::from([("model-a".to_string(), 2), ("model-b".to_string(), 1)]),
+            &BTreeMap::new()
+        ),
+        "model-a 66.7%, model-b 33.3%"
+    );
+
+    let format_options = crate::utils::NumberFormatOptions {
+        use_comma: false,
+        use_human: false,
+        locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
+        decimal_places: 2,
+    };
+    let backend = TestBackend::new(160, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut table_state = TableState::default();
+    terminal
+        .draw(|frame| {
+            draw_aggregate_stats_table(
+                frame,
+                Rect::new(0, 0, 160, 8),
+                &filtered,
+                &format_options,
+                &mut table_state,
+                AggregateViewMode::Daily,
+                "",
+                false,
+                false,
+                Color::Cyan,
+                &HashSet::new(),
+                false,
+            );
+        })
+        .unwrap();
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("claude-sonnet-4 100.0%"));
+    assert!(!rendered.contains("gpt-5"));
+    assert!(rendered.contains("$1.25"));
+
+    let unmatched = filter_analyzer_view_by_model(&view, "gemini");
+    assert!(unmatched.daily_stats.is_empty());
+    assert!(unmatched.session_aggregates.is_empty());
+    assert_eq!(unmatched.num_conversations, 0);
 }
 
 #[test]
