@@ -55,6 +55,7 @@ fn test_contribution_cache_single_session_insert_get() {
         models: crate::types::ModelCounts::new(),
         session_hash: SessionHash::from_str("session1"),
         ai_message_count: 5,
+        daily: Default::default(),
     };
 
     cache.insert_single_session(path_hash, contrib);
@@ -106,6 +107,7 @@ fn test_contribution_cache_remove_any() {
             models: crate::types::ModelCounts::new(),
             session_hash: SessionHash::from_str("s2"),
             ai_message_count: 0,
+            daily: Default::default(),
         },
     );
     cache.insert_multi_session(

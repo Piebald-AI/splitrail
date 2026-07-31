@@ -1,8 +1,11 @@
 //! Single-session contribution type for 1-file-1-session analyzers.
 
+use std::collections::BTreeMap;
+
 use super::SessionHash;
 use crate::types::{
-    CompactDate, ConversationMessage, MessageRole, ModelCounts, TuiStats, intern_model,
+    CompactDate, ConversationMessage, MessageRole, ModelCounts, SessionPeriodAggregate, TuiStats,
+    intern_model,
 };
 
 // ============================================================================
@@ -24,6 +27,8 @@ pub struct SingleSessionContribution {
     pub session_hash: SessionHash,
     /// Number of AI messages (for daily_stats.ai_messages)
     pub ai_message_count: u32,
+    /// Per-day session activity for period drill-down and incremental updates.
+    pub daily: BTreeMap<CompactDate, SessionPeriodAggregate>,
 }
 
 impl SingleSessionContribution {
@@ -34,19 +39,30 @@ impl SingleSessionContribution {
         let mut ai_message_count = 0u32;
         let mut first_date = CompactDate::default();
         let mut session_hash = SessionHash::default();
+        let mut daily = BTreeMap::new();
 
         for (i, msg) in messages.iter().enumerate() {
+            let date = CompactDate::from_local(&msg.date);
             if i == 0 {
-                first_date = CompactDate::from_local(&msg.date);
+                first_date = date;
                 session_hash = SessionHash::from_str(&msg.conversation_hash);
             }
 
+            let day = daily
+                .entry(date)
+                .or_insert_with(SessionPeriodAggregate::default);
+            day.message_count = day.message_count.saturating_add(1);
             if msg.role == MessageRole::Assistant {
                 ai_message_count += 1;
-                stats += TuiStats::from(&msg.stats);
+                day.ai_message_count = day.ai_message_count.saturating_add(1);
+                let message_stats = TuiStats::from(&msg.stats);
+                stats += message_stats;
+                day.stats += message_stats;
 
                 if let Some(model) = &msg.model {
-                    models.increment(intern_model(model), 1);
+                    let model = intern_model(model);
+                    models.increment(model, 1);
+                    day.models.increment(model, 1);
                 }
             }
         }
@@ -57,6 +73,7 @@ impl SingleSessionContribution {
             models,
             session_hash,
             ai_message_count,
+            daily,
         }
     }
 }

@@ -382,7 +382,21 @@ fn test_date_boundary_handling() {
 
     view.add_single_session_contribution(&contrib);
 
-    // Daily stats use the first message's date for SingleSession
-    assert!(view.daily_stats.contains_key("2025-01-15"));
-    // Second message's date is not separately tracked in SingleSession strategy
+    assert_eq!(view.daily_stats["2025-01-15"].stats.input_tokens, 500);
+    assert_eq!(view.daily_stats["2025-01-16"].stats.input_tokens, 800);
+    assert_eq!(view.daily_stats["2025-01-15"].conversations, 0);
+    assert_eq!(view.daily_stats["2025-01-16"].conversations, 1);
+    let session = &view.session_aggregates[0];
+    assert_eq!(
+        session.daily[&crate::types::CompactDate::from_str("2025-01-15").unwrap()]
+            .stats
+            .input_tokens,
+        500
+    );
+    assert_eq!(
+        session.daily[&crate::types::CompactDate::from_str("2025-01-16").unwrap()]
+            .stats
+            .input_tokens,
+        800
+    );
 }

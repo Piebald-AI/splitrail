@@ -315,6 +315,10 @@ fn add_new_sessions_to_view(
 
         session.stats = TuiStats::default();
         session.models = ModelCounts::new();
+        for activity in session.daily.values_mut() {
+            activity.stats = TuiStats::default();
+            activity.models = ModelCounts::new();
+        }
         let date = session.date;
         view.session_aggregates.push(session);
         view.num_conversations += 1;
