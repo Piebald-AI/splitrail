@@ -1,8 +1,8 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::analyzers::claude_code::{
-    ClaudeCodeAnalyzer, TokenFingerprint, calculate_cost_from_tokens, deduplicate_grouped_messages,
-    deduplicate_messages, extract_and_hash_project_id, is_claude_transcript_path,
-    merge_message_into, parse_jsonl_file,
+    ClaudeCodeAnalyzer, TokenFingerprint, calculate_cost_from_tokens, claude_projects_dir,
+    deduplicate_grouped_messages, deduplicate_messages, extract_and_hash_project_id,
+    is_claude_transcript_path, merge_message_into, parse_jsonl_file,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use chrono::{TimeZone, Utc};
@@ -10,7 +10,7 @@ use simd_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufReader, Cursor};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 /// Test helper: Sequential deduplication using merge_message_into
@@ -285,6 +285,22 @@ fn test_claude_transcript_path_classification() {
         projects,
         &projects.join("project/session.jsonl/extra.jsonl")
     ));
+}
+
+#[test]
+fn test_claude_projects_dir_respects_config_override() {
+    let home = Path::new("/home/user");
+    let custom = Path::new("/custom/claude");
+
+    assert_eq!(
+        claude_projects_dir(Some(custom.as_os_str()), Some(home)),
+        Some(PathBuf::from("/custom/claude/projects"))
+    );
+    assert_eq!(
+        claude_projects_dir(Some(Path::new("").as_os_str()), Some(home)),
+        Some(PathBuf::from("/home/user/.claude/projects"))
+    );
+    assert_eq!(claude_projects_dir(None, None), None);
 }
 
 #[test]
