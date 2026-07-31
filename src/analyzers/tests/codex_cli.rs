@@ -106,8 +106,18 @@ fn test_valid_codex_data_paths_must_be_inside_watched_directories() {
 #[test]
 fn test_message_hashes_remain_stable_after_archiving() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let active_dir = temp_dir.path().join(".codex/sessions/2026/07/22");
-    let archived_dir = temp_dir.path().join(".codex/archived_sessions");
+    // Built one component at a time: a single join with embedded forward slashes
+    // keeps them in the string on Windows, while canonical_session_path rebuilds
+    // the archived path with native separators. conversation_hash hashes the
+    // string form, so the two sides would hash different strings.
+    let active_dir = temp_dir
+        .path()
+        .join(".codex")
+        .join("sessions")
+        .join("2026")
+        .join("07")
+        .join("22");
+    let archived_dir = temp_dir.path().join(".codex").join("archived_sessions");
     std::fs::create_dir_all(&active_dir).unwrap();
     std::fs::create_dir_all(&archived_dir).unwrap();
     let active_path = active_dir.join(SESSION_FILE_NAME);
