@@ -265,9 +265,16 @@ fn sessions_for_period(
                     .then(|| session.clone());
             }
 
-            let mut filtered = session.clone();
-            filtered.stats = TuiStats::default();
-            filtered.models = ModelCounts::new();
+            let mut filtered = SessionAggregate {
+                session_id: session.session_id.clone(),
+                first_timestamp: session.first_timestamp,
+                analyzer_name: Arc::clone(&session.analyzer_name),
+                stats: TuiStats::default(),
+                models: ModelCounts::new(),
+                session_name: session.session_name.clone(),
+                date: session.date,
+                daily: BTreeMap::new(),
+            };
 
             let mut has_activity = false;
             for (date, activity) in &session.daily {

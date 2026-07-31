@@ -318,6 +318,8 @@ fn add_new_sessions_to_view(
         for activity in session.daily.values_mut() {
             activity.stats = TuiStats::default();
             activity.models = ModelCounts::new();
+            activity.message_count = 0;
+            activity.ai_message_count = 0;
         }
         let date = session.date;
         view.session_aggregates.push(session);
@@ -1390,6 +1392,13 @@ mod tests {
                 .expect("new session should be visible");
             assert_eq!(new_session.session_name.as_deref(), Some("New session"));
             assert_eq!(new_session.stats.input_tokens, 42);
+            let activity = new_session
+                .daily
+                .values()
+                .next()
+                .expect("new session daily activity");
+            assert_eq!(activity.message_count, 1, "strategy: {strategy:?}");
+            assert_eq!(activity.ai_message_count, 1, "strategy: {strategy:?}");
             drop(view);
 
             assert!(

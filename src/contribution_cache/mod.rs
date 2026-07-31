@@ -13,12 +13,49 @@ pub use multi_session::MultiSessionContribution;
 pub use single_message::SingleMessageContribution;
 pub use single_session::SingleSessionContribution;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use dashmap::DashMap;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::types::{AnalyzerStatsView, CompactDate, DailyStats};
+use crate::types::{AnalyzerStatsView, CompactDate, DailyStats, SessionPeriodAggregate};
+
+fn merge_daily_add(
+    dst: &mut BTreeMap<CompactDate, SessionPeriodAggregate>,
+    src: &BTreeMap<CompactDate, SessionPeriodAggregate>,
+) {
+    for (date, activity) in src {
+        let daily = dst.entry(*date).or_default();
+        daily.message_count = daily.message_count.saturating_add(activity.message_count);
+        daily.ai_message_count = daily
+            .ai_message_count
+            .saturating_add(activity.ai_message_count);
+        daily.stats += activity.stats;
+        for &(model, count) in activity.models.iter() {
+            daily.models.increment(model, count);
+        }
+    }
+}
+
+fn merge_daily_subtract(
+    dst: &mut BTreeMap<CompactDate, SessionPeriodAggregate>,
+    src: &BTreeMap<CompactDate, SessionPeriodAggregate>,
+) {
+    for (date, activity) in src {
+        if let Some(daily) = dst.get_mut(date) {
+            daily.message_count = daily.message_count.saturating_sub(activity.message_count);
+            daily.ai_message_count = daily
+                .ai_message_count
+                .saturating_sub(activity.ai_message_count);
+            daily.stats -= activity.stats;
+            for &(model, count) in activity.models.iter() {
+                daily.models.decrement(model, count);
+            }
+        }
+    }
+    dst.retain(|_, activity| activity.message_count > 0);
+}
 
 // ============================================================================
 // PathHash - Cache key type
@@ -304,17 +341,7 @@ impl AnalyzerStatsView {
             for &(model, count) in contrib.models.iter() {
                 existing.models.increment(model, count);
             }
-            for (date, activity) in &contrib.daily {
-                let daily = existing.daily.entry(*date).or_default();
-                daily.message_count = daily.message_count.saturating_add(activity.message_count);
-                daily.ai_message_count = daily
-                    .ai_message_count
-                    .saturating_add(activity.ai_message_count);
-                daily.stats += activity.stats;
-                for &(model, count) in activity.models.iter() {
-                    daily.models.increment(model, count);
-                }
-            }
+            merge_daily_add(&mut existing.daily, &contrib.daily);
         }
     }
 
@@ -349,22 +376,7 @@ impl AnalyzerStatsView {
             for &(model, count) in contrib.models.iter() {
                 existing.models.decrement(model, count);
             }
-            for (date, activity) in &contrib.daily {
-                if let Some(daily) = existing.daily.get_mut(date) {
-                    daily.message_count =
-                        daily.message_count.saturating_sub(activity.message_count);
-                    daily.ai_message_count = daily
-                        .ai_message_count
-                        .saturating_sub(activity.ai_message_count);
-                    daily.stats -= activity.stats;
-                    for &(model, count) in activity.models.iter() {
-                        daily.models.decrement(model, count);
-                    }
-                }
-            }
-            existing
-                .daily
-                .retain(|_, activity| activity.message_count > 0);
+            merge_daily_subtract(&mut existing.daily, &contrib.daily);
         }
     }
 
@@ -393,18 +405,7 @@ impl AnalyzerStatsView {
                 for &(model, count) in new_session.models.iter() {
                     existing.models.increment(model, count);
                 }
-                for (date, activity) in &new_session.daily {
-                    let daily = existing.daily.entry(*date).or_default();
-                    daily.message_count =
-                        daily.message_count.saturating_add(activity.message_count);
-                    daily.ai_message_count = daily
-                        .ai_message_count
-                        .saturating_add(activity.ai_message_count);
-                    daily.stats += activity.stats;
-                    for &(model, count) in activity.models.iter() {
-                        daily.models.increment(model, count);
-                    }
-                }
+                merge_daily_add(&mut existing.daily, &new_session.daily);
                 if new_session.first_timestamp < existing.first_timestamp {
                     existing.first_timestamp = new_session.first_timestamp;
                     existing.date = new_session.date;
@@ -451,22 +452,7 @@ impl AnalyzerStatsView {
                 for &(model, count) in old_session.models.iter() {
                     existing.models.decrement(model, count);
                 }
-                for (date, activity) in &old_session.daily {
-                    if let Some(daily) = existing.daily.get_mut(date) {
-                        daily.message_count =
-                            daily.message_count.saturating_sub(activity.message_count);
-                        daily.ai_message_count = daily
-                            .ai_message_count
-                            .saturating_sub(activity.ai_message_count);
-                        daily.stats -= activity.stats;
-                        for &(model, count) in activity.models.iter() {
-                            daily.models.decrement(model, count);
-                        }
-                    }
-                }
-                existing
-                    .daily
-                    .retain(|_, activity| activity.message_count > 0);
+                merge_daily_subtract(&mut existing.daily, &old_session.daily);
             }
         }
 
