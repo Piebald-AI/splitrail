@@ -240,6 +240,42 @@ fn test_codex_cli_fallback_session_name_from_first_user_message() {
 }
 
 #[test]
+fn test_codex_cli_session_name_skips_recommended_plugins_context() {
+    let mut temp_file = NamedTempFile::new().unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-07-30T00:00:00.000Z","type":"turn_context","payload":{{"model":"gpt-5.6-sol"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-07-30T00:00:01.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"<recommended_plugins>\nHere is a list of plugins that are available but not installed.\n</recommended_plugins>"}}]}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-07-30T00:00:02.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"分析下这两个网关 issue"}}]}}}}"#
+    )
+    .unwrap();
+
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+
+    assert!(
+        messages
+            .iter()
+            .filter_map(|message| message.session_name.as_deref())
+            .all(|name| !name.starts_with("<recommended_plugins>"))
+    );
+    assert_eq!(
+        messages
+            .last()
+            .and_then(|message| message.session_name.as_deref()),
+        Some("分析下这两个网关 issue")
+    );
+}
+
+#[test]
 fn test_parse_codex_cli_counts_tool_calls() {
     let mut temp_file = NamedTempFile::new().unwrap();
 

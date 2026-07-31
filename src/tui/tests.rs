@@ -1,18 +1,21 @@
 /// Tests for TUI components: table state management, upload progress, date matching, and stats accumulation.
 use crate::tui::logic::{
     accumulate_tui_stats, aggregate_daily_stats_by_month, aggregate_daily_stats_by_week,
-    aggregate_daily_stats_by_year, date_matches_buffer, filtered_aggregate_keys,
+    aggregate_daily_stats_by_year, aggregate_sessions_from_messages, date_matches_buffer,
+    filtered_aggregate_keys,
 };
 use crate::tui::{
     AggregateViewMode, PeriodFilter, build_display_stats, cost_heat,
     create_upload_progress_callback, draw_aggregate_stats_table, filter_analyzer_view_by_model,
-    format_model_usage_shares, format_month_for_display, format_week_for_display,
-    format_year_for_display, parse_accent, show_upload_error, show_upload_success,
-    update_period_filters, update_table_states, update_window_offsets,
+    filtered_session_count, format_model_usage_shares, format_month_for_display,
+    format_week_for_display, format_year_for_display, parse_accent, sessions_for_period,
+    show_upload_error, show_upload_success, update_period_filters, update_table_states,
+    update_window_offsets,
 };
 use crate::types::{
-    AgenticCodingToolStats, AnalyzerStatsView, CompactDate, DailyStats, ModelCounts, ModelStats,
-    MultiAnalyzerStats, SessionAggregate, Stats, TuiStats, intern_model,
+    AgenticCodingToolStats, AnalyzerStatsView, Application, CompactDate, ConversationMessage,
+    DailyStats, MessageRole, ModelCounts, ModelStats, MultiAnalyzerStats, SessionAggregate, Stats,
+    TuiStats, intern_model,
 };
 use chrono::{TimeZone, Utc};
 use ratatui::Terminal;
@@ -22,6 +25,49 @@ use ratatui::style::Color;
 use ratatui::widgets::TableState;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+
+#[test]
+fn session_detail_includes_sessions_active_after_their_start_date() {
+    let make_message = |day, input_tokens| ConversationMessage {
+        application: Application::CodexCli,
+        date: Utc.with_ymd_and_hms(2026, 7, day, 12, 0, 0).unwrap(),
+        project_hash: String::new(),
+        conversation_hash: "continued-session".into(),
+        local_hash: None,
+        global_hash: format!("message-{day}"),
+        model: Some("gpt-5.6-sol".into()),
+        stats: Stats {
+            input_tokens,
+            ..Stats::default()
+        },
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: Some("Continued session".into()),
+    };
+    let sessions = aggregate_sessions_from_messages(
+        &[make_message(30, 10), make_message(31, 20)],
+        Arc::from("Codex CLI"),
+    );
+    let view = AnalyzerStatsView {
+        daily_stats: BTreeMap::new(),
+        session_aggregates: sessions,
+        num_conversations: 1,
+        analyzer_name: Arc::from("Codex CLI"),
+    };
+
+    assert_eq!(
+        filtered_session_count(
+            &view,
+            Some(PeriodFilter::Day(CompactDate::from_parts(2026, 7, 31)))
+        ),
+        1
+    );
+    let filtered = sessions_for_period(
+        &view.session_aggregates,
+        Some(PeriodFilter::Day(CompactDate::from_parts(2026, 7, 31))),
+    );
+    assert_eq!(filtered[0].stats.input_tokens, 20);
+}
 
 // ============================================================================
 // CONFIG-DRIVEN APPEARANCE TESTS
@@ -903,6 +949,7 @@ fn model_filter_recalculates_stats_and_sessions() {
         },
         session_name: None,
         date,
+        daily: BTreeMap::new(),
     };
     let view = AnalyzerStatsView {
         daily_stats,

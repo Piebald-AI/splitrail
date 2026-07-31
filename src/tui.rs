@@ -5,7 +5,7 @@ mod tests;
 use crate::config::TuiConfig;
 use crate::models::is_model_estimated;
 use crate::types::{
-    AnalyzerStatsView, CompactDate, DailyStats, ModelStats, MultiAnalyzerStatsView,
+    AnalyzerStatsView, CompactDate, DailyStats, ModelCounts, ModelStats, MultiAnalyzerStatsView,
     SharedAnalyzerView, TuiStats, resolve_model,
 };
 use crate::utils::{
@@ -233,10 +233,64 @@ fn filtered_session_count(view: &AnalyzerStatsView, period_filter: Option<Period
         .map(|filter| {
             view.session_aggregates
                 .iter()
-                .filter(|session| filter.matches_compact_date(session.date))
+                .filter(|session| {
+                    if session.daily.is_empty() {
+                        filter.matches_compact_date(session.date)
+                    } else {
+                        session
+                            .daily
+                            .keys()
+                            .any(|date| filter.matches_compact_date(*date))
+                    }
+                })
                 .count()
         })
         .unwrap_or_else(|| view.session_aggregates.len())
+}
+
+fn sessions_for_period(
+    sessions: &[SessionAggregate],
+    period_filter: Option<PeriodFilter>,
+) -> Vec<SessionAggregate> {
+    let Some(filter) = period_filter else {
+        return sessions.to_vec();
+    };
+
+    sessions
+        .iter()
+        .filter_map(|session| {
+            if session.daily.is_empty() {
+                return filter
+                    .matches_compact_date(session.date)
+                    .then(|| session.clone());
+            }
+
+            let mut filtered = SessionAggregate {
+                session_id: session.session_id.clone(),
+                first_timestamp: session.first_timestamp,
+                analyzer_name: Arc::clone(&session.analyzer_name),
+                stats: TuiStats::default(),
+                models: ModelCounts::new(),
+                session_name: session.session_name.clone(),
+                date: session.date,
+                daily: BTreeMap::new(),
+            };
+
+            let mut has_activity = false;
+            for (date, activity) in &session.daily {
+                if !filter.matches_compact_date(*date) {
+                    continue;
+                }
+                has_activity = true;
+                filtered.stats += activity.stats;
+                for &(model, count) in activity.models.iter() {
+                    filtered.models.increment(model, count);
+                }
+            }
+
+            has_activity.then_some(filtered)
+        })
+        .collect()
 }
 
 fn model_name_matches(model: &str, filter: &str) -> bool {
@@ -273,6 +327,15 @@ fn filter_analyzer_view_by_model(
                 .any(|(model, _)| model_name_matches(resolve_model(*model), &filter))
         })
         .cloned()
+        .map(|mut session| {
+            session.daily.retain(|_, activity| {
+                activity
+                    .models
+                    .iter()
+                    .any(|(model, _)| model_name_matches(resolve_model(*model), &filter))
+            });
+            session
+        })
         .collect();
 
     let mut daily_stats = BTreeMap::new();
@@ -342,16 +405,23 @@ fn filter_analyzer_view_by_model(
     }
 
     for session in &session_aggregates {
-        let date = session.date.to_string();
-        let original_day = view.daily_stats.get(&date);
-        let day_stats = daily_stats.entry(date).or_insert_with(|| DailyStats {
-            date: session.date,
-            apps: original_day
-                .map(|stats| stats.apps.clone())
-                .unwrap_or_default(),
-            ..Default::default()
-        });
-        day_stats.conversations = day_stats.conversations.saturating_add(1);
+        let dates: Vec<_> = if session.daily.is_empty() {
+            vec![session.date]
+        } else {
+            session.daily.keys().copied().collect()
+        };
+        for date in dates {
+            let date_str = date.to_string();
+            let original_day = view.daily_stats.get(&date_str);
+            let day_stats = daily_stats.entry(date_str).or_insert_with(|| DailyStats {
+                date,
+                apps: original_day
+                    .map(|stats| stats.apps.clone())
+                    .unwrap_or_default(),
+                ..Default::default()
+            });
+            day_stats.conversations = day_stats.conversations.saturating_add(1);
+        }
     }
 
     AnalyzerStatsView {
@@ -2330,14 +2400,8 @@ fn draw_session_stats_table(
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
 
-    let filtered_sessions: Vec<&SessionAggregate> = {
-        let mut sessions: Vec<_> = match period_filter {
-            Some(filter) => sessions
-                .iter()
-                .filter(|session| filter.matches_compact_date(session.date))
-                .collect(),
-            None => sessions.iter().collect(),
-        };
+    let filtered_sessions: Vec<SessionAggregate> = {
+        let mut sessions = sessions_for_period(sessions, period_filter);
         if sort_reversed {
             sessions.reverse();
         }
