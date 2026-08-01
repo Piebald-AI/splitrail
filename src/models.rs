@@ -856,17 +856,42 @@ fn populate_defaults(
     add_model!(
         "gpt-5.6-terra",
         PricingStructure::Flat {
+            input_per_1m: 2.0,
+            output_per_1m: 12.0
+        },
+        CachingSupport::OpenAIWithWrites {
+            cache_write_per_1m: 2.5,
+            cache_read_per_1m: 0.20
+        },
+        false
+    );
+    add_dated_pricing!(
+        "gpt-5.6-terra",
+        NaiveDate::from_ymd_opt(2026, 7, 30).expect("valid date"),
+        PricingStructure::Flat {
             input_per_1m: 2.50,
             output_per_1m: 15.0
         },
         CachingSupport::OpenAIWithWrites {
             cache_write_per_1m: 3.125,
             cache_read_per_1m: 0.25
-        },
-        false
+        }
     );
     add_model!(
         "gpt-5.6-luna",
+        PricingStructure::Flat {
+            input_per_1m: 0.20,
+            output_per_1m: 1.20
+        },
+        CachingSupport::OpenAIWithWrites {
+            cache_write_per_1m: 0.25,
+            cache_read_per_1m: 0.02
+        },
+        false
+    );
+    add_dated_pricing!(
+        "gpt-5.6-luna",
+        NaiveDate::from_ymd_opt(2026, 7, 30).expect("valid date"),
         PricingStructure::Flat {
             input_per_1m: 1.0,
             output_per_1m: 6.0
@@ -874,8 +899,7 @@ fn populate_defaults(
         CachingSupport::OpenAIWithWrites {
             cache_write_per_1m: 1.25,
             cache_read_per_1m: 0.10
-        },
-        false
+        }
     );
 
     add_model!(
@@ -2988,21 +3012,105 @@ mod tests {
             6.75,
         );
 
-        approx_eq(calculate_input_cost("gpt-5.6-terra", 1_000_000), 2.50);
-        approx_eq(calculate_output_cost("gpt-5.6-terra", 1_000_000), 15.0);
-        approx_eq(calculate_cache_cost("gpt-5.6-terra", 0, 1_000_000), 0.25);
+        approx_eq(calculate_input_cost("gpt-5.6-terra", 1_000_000), 2.0);
+        approx_eq(calculate_output_cost("gpt-5.6-terra", 1_000_000), 12.0);
+        approx_eq(calculate_cache_cost("gpt-5.6-terra", 0, 1_000_000), 0.20);
         approx_eq(
             calculate_cache_cost("gpt-5.6-terra", 1_000_000, 1_000_000),
-            3.375,
+            2.70,
         );
 
-        approx_eq(calculate_input_cost("gpt-5.6-luna", 1_000_000), 1.0);
-        approx_eq(calculate_output_cost("gpt-5.6-luna", 1_000_000), 6.0);
-        approx_eq(calculate_cache_cost("gpt-5.6-luna", 0, 1_000_000), 0.10);
+        approx_eq(calculate_input_cost("gpt-5.6-luna", 1_000_000), 0.20);
+        approx_eq(calculate_output_cost("gpt-5.6-luna", 1_000_000), 1.20);
+        approx_eq(calculate_cache_cost("gpt-5.6-luna", 0, 1_000_000), 0.02);
         approx_eq(
             calculate_cache_cost("gpt-5.6-luna", 1_000_000, 1_000_000),
-            1.35,
+            0.27,
         );
+    }
+
+    /// Usage from before the 2026-07-30 cut must keep the price it was actually
+    /// billed at. Without the dated overrides the new rates are applied
+    /// retroactively, and every Luna session recorded before the cut is
+    /// suddenly reported at a fifth of what it cost.
+    #[test]
+    fn gpt_5_6_terra_and_luna_keep_pre_cut_pricing_for_older_usage() {
+        let before_cut = Utc.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap();
+
+        for (model, input, output, cache_read, cache_write_and_read) in [
+            ("gpt-5.6-terra", 2.50, 15.0, 0.25, 3.375),
+            ("gpt-5.6-luna", 1.0, 6.0, 0.10, 1.35),
+        ] {
+            approx_eq(
+                calculate_input_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(before_cut),
+                ),
+                input,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(before_cut),
+                ),
+                output,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    0,
+                    1_000_000,
+                    Some(before_cut),
+                ),
+                cache_read,
+            );
+            // Cache writes are the other half of the historical cost, and the
+            // dated override carries its own `CachingSupport`. Without this the
+            // write rate could silently fall through to the post-cut value.
+            approx_eq(
+                calculate_cache_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    1_000_000,
+                    Some(before_cut),
+                ),
+                cache_write_and_read,
+            );
+        }
+    }
+
+    /// The cut took effect on 2026-07-30, so that day is already billed at the
+    /// new rates: `standard_pricing_for_date` treats `valid_until` as exclusive.
+    #[test]
+    fn gpt_5_6_terra_and_luna_use_new_pricing_from_the_cut_date() {
+        let cut_day = Utc.with_ymd_and_hms(2026, 7, 30, 0, 0, 0).unwrap();
+
+        for (model, input, output) in [("gpt-5.6-terra", 2.0, 12.0), ("gpt-5.6-luna", 0.20, 1.20)] {
+            approx_eq(
+                calculate_input_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(cut_day),
+                ),
+                input,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(cut_day),
+                ),
+                output,
+            );
+        }
     }
 
     #[test]
