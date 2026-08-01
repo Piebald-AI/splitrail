@@ -592,7 +592,9 @@ pub(crate) fn build_display_stats(
                 });
             *entry += day_stats;
             // Record which app contributed this period (for the Apps column).
-            *entry.apps.entry(app_name.clone()).or_insert(0) += 1;
+            if !is_empty_period(day_stats) {
+                *entry.apps.entry(app_name.clone()).or_insert(0) += 1;
+            }
         }
 
         combined_sessions.extend(view.session_aggregates.iter().cloned().map(|mut session| {
