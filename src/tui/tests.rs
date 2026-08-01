@@ -388,6 +388,55 @@ fn test_build_display_stats_prepends_all_tools_view() {
     );
 }
 
+#[test]
+fn test_all_tools_apps_only_include_tools_used_that_day() {
+    let empty_day = |date: &str| DailyStats {
+        date: CompactDate::from_str(date).unwrap(),
+        ..DailyStats::default()
+    };
+
+    let mut tool_a = make_tool_stats("tool-a", true);
+    tool_a
+        .daily_stats
+        .insert("2025-01-02".to_string(), empty_day("2025-01-02"));
+
+    let mut tool_b = make_tool_stats("tool-b", true);
+    let mut tool_b_activity = tool_b.daily_stats.remove("2025-01-01").unwrap();
+    tool_b_activity.date = CompactDate::from_str("2025-01-02").unwrap();
+    tool_b
+        .daily_stats
+        .insert("2025-01-01".to_string(), empty_day("2025-01-01"));
+    tool_b
+        .daily_stats
+        .insert("2025-01-02".to_string(), tool_b_activity);
+
+    let display_stats = build_display_stats(
+        &MultiAnalyzerStats {
+            analyzer_stats: vec![tool_a, tool_b],
+        }
+        .into_view()
+        .analyzer_stats,
+    );
+    let all_tools = display_stats[0].read();
+
+    assert_eq!(
+        all_tools.daily_stats["2025-01-01"]
+            .apps
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["tool-a"]
+    );
+    assert_eq!(
+        all_tools.daily_stats["2025-01-02"]
+            .apps
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["tool-b"]
+    );
+}
+
 // ============================================================================
 // UPLOAD PROGRESS & MESSAGES (tui.rs helpers)
 // ============================================================================
