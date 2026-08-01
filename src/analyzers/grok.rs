@@ -86,6 +86,8 @@ struct GrokSessionUpdate {
 struct GrokSessionSummary {
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    session_summary: Option<String>,
 }
 
 fn is_grok_chat_path(path: &Path) -> bool {
@@ -170,15 +172,26 @@ fn parse_turn_usages(chat_history_path: &Path) -> Vec<GrokUsage> {
         return Vec::new();
     };
     let updates_path = session_dir.join("updates.jsonl");
-    let Ok(content) = std::fs::read_to_string(updates_path) else {
+    let Ok(content) = std::fs::read_to_string(&updates_path) else {
         return Vec::new();
     };
 
     content
         .lines()
-        .filter_map(|line| {
+        .enumerate()
+        .filter_map(|(line_index, line)| {
             let mut bytes = line.as_bytes().to_vec();
-            let record = simd_json::from_slice::<GrokUpdateRecord>(&mut bytes).ok()?;
+            let record = match simd_json::from_slice::<GrokUpdateRecord>(&mut bytes) {
+                Ok(record) => record,
+                Err(error) => {
+                    crate::utils::warn_once(format!(
+                        "WARNING: Failed to parse Grok updates file `{}` line {}: {error}",
+                        updates_path.display(),
+                        line_index + 1
+                    ));
+                    return None;
+                }
+            };
             let update = record.params?.update?;
             if update.session_update.as_deref() != Some("turn_completed") {
                 return None;
@@ -248,10 +261,14 @@ fn apply_turn_usage(
     message_weights: &[u64],
     usages: &[GrokUsage],
 ) {
-    for (group, usage) in assistant_groups.iter().zip(usages) {
-        if group.is_empty() {
-            continue;
-        }
+    for (usage_index, group) in assistant_groups
+        .iter()
+        .filter(|group| !group.is_empty())
+        .enumerate()
+    {
+        let Some(usage) = usages.get(usage_index) else {
+            break;
+        };
 
         let input_tokens = distribute_u64(usage.input_tokens, group, message_weights);
         let output_tokens = distribute_u64(usage.output_tokens, group, message_weights);
@@ -262,8 +279,12 @@ fn apply_turn_usage(
         // Grok's local CLI may report a discounted or subscription cost in
         // costUsdTicks. Splitrail uses the public API standard price table so
         // the value is comparable with the other API-based analyzers.
-        let estimated_costs = group.first().and_then(|index| {
-            messages[*index].model.as_deref().map(|model| {
+        let model_index = group
+            .iter()
+            .copied()
+            .find(|index| messages[*index].model.is_some());
+        let estimated_costs = model_index.and_then(|index| {
+            messages[index].model.as_deref().map(|model| {
                 let context_tokens = usage
                     .input_tokens
                     .saturating_add(usage.cached_read_tokens)
@@ -275,7 +296,7 @@ fn apply_turn_usage(
                     usage.cache_creation_tokens,
                     usage.cached_read_tokens,
                     context_tokens,
-                    Some(messages[*index].date),
+                    Some(messages[index].date),
                 );
                 distribute_f64(total_cost, group, message_weights)
             })
@@ -306,7 +327,13 @@ fn session_metadata(path: &Path) -> (DateTime<Utc>, Option<String>) {
         && let Ok(summary) = simd_json::from_slice::<GrokSessionSummary>(&mut bytes)
     {
         let date = summary.created_at.unwrap_or_else(Utc::now);
-        return (date, None);
+        return (
+            date,
+            summary
+                .session_summary
+                .as_deref()
+                .and_then(truncate_session_name),
+        );
     }
 
     let date = path
@@ -334,7 +361,9 @@ pub fn parse_chat_history_file(path: &Path) -> Result<Vec<ConversationMessage>> 
     let (date, mut session_name) = session_metadata(path);
     let content = std::fs::read_to_string(path)?;
     let mut messages = Vec::new();
-    let mut assistant_groups: Vec<Vec<usize>> = Vec::new();
+    // Keep a leading group so assistant records before the first user record
+    // still receive usage. Empty groups are skipped when usage is applied.
+    let mut assistant_groups: Vec<Vec<usize>> = vec![Vec::new()];
     let mut message_weights = Vec::new();
 
     for (line_index, line) in content.lines().enumerate() {
@@ -345,7 +374,13 @@ pub fn parse_chat_history_file(path: &Path) -> Result<Vec<ConversationMessage>> 
         let mut bytes = line.as_bytes().to_vec();
         let record = match simd_json::from_slice::<GrokChatRecord>(&mut bytes) {
             Ok(record) => record,
-            Err(_) => continue,
+            Err(error) => {
+                crate::utils::warn_once(format!(
+                    "WARNING: Failed to parse Grok chat history `{file_path}` line {}: {error}",
+                    line_index + 1
+                ));
+                continue;
+            }
         };
 
         if record.synthetic_reason.is_some() {
@@ -437,7 +472,7 @@ impl Analyzer for GrokAnalyzer {
         let sources = Self::data_dir()
             .filter(|dir| dir.is_dir())
             .into_iter()
-            .flat_map(|dir| WalkDir::new(dir).into_iter())
+            .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
             .filter_map(|entry| entry.ok())
             .filter(|entry| is_grok_chat_path(entry.path()))
             .map(|entry| DataSource {
@@ -452,7 +487,7 @@ impl Analyzer for GrokAnalyzer {
         Self::data_dir()
             .filter(|dir| dir.is_dir())
             .into_iter()
-            .flat_map(|dir| WalkDir::new(dir).into_iter())
+            .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
             .filter_map(|entry| entry.ok())
             .any(|entry| is_grok_chat_path(entry.path()))
     }
@@ -504,7 +539,7 @@ mod tests {
         std::fs::create_dir_all(&session_dir).expect("session directory should be created");
         std::fs::write(
             session_dir.join("summary.json"),
-            r#"{"created_at":"2026-08-01T12:00:00Z"}"#,
+            r#"{"session_summary":"Grok summary","created_at":"2026-08-01T12:00:00Z"}"#,
         )
         .expect("summary should be written");
         std::fs::write(
@@ -537,9 +572,59 @@ mod tests {
         assert_eq!(messages[1].stats.cache_creation_tokens, 4);
         assert_eq!(messages[1].stats.reasoning_tokens, 5);
         assert!((messages[1].stats.cost - 0.000329).abs() < f64::EPSILON);
+        assert_eq!(messages[0].session_name.as_deref(), Some("Grok summary"));
+    }
+
+    #[test]
+    fn aligns_usage_across_empty_groups_and_late_model_ids() {
+        let dir = tempdir().expect("temporary directory should be created");
+        let project_dir = dir.path().join("project");
+        let session_dir = project_dir.join("session");
+        std::fs::create_dir_all(&session_dir).expect("session directory should be created");
+        std::fs::write(
+            session_dir.join("chat_history.jsonl"),
+            concat!(
+                r#"{"type":"assistant","content":"leading"}"#,
+                "\n",
+                r#"{"type":"user","content":"first"}"#,
+                "\n",
+                r#"{"type":"assistant","content":"unlabeled"}"#,
+                "\n",
+                r#"{"type":"assistant","model_id":"grok-4.5","content":"labeled"}"#,
+                "\n",
+                r#"{"type":"user","content":"empty turn"}"#,
+                "\n",
+                r#"{"type":"user","content":"second"}"#,
+                "\n",
+                r#"{"type":"assistant","model_id":"grok-4.5","content":"final"}"#,
+                "\n",
+            ),
+        )
+        .expect("chat history should be written");
+        std::fs::write(
+            session_dir.join("updates.jsonl"),
+            concat!(
+                r#"{"params":{"update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":100,"outputTokens":10}}}}"#, "\n",
+                r#"{"params":{"update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":200,"outputTokens":20}}}}"#, "\n",
+                r#"{"params":{"update":{"sessionUpdate":"turn_completed","usage":{"inputTokens":300,"outputTokens":30}}}}"#,
+            ),
+        )
+        .expect("updates should be written");
+
+        let messages = parse_chat_history_file(&session_dir.join("chat_history.jsonl"))
+            .expect("chat history should parse");
+        let assistants: Vec<_> = messages
+            .iter()
+            .filter(|message| message.role == MessageRole::Assistant)
+            .collect();
+
+        assert_eq!(assistants.len(), 4);
+        assert_eq!(assistants[0].stats.input_tokens, 100);
         assert_eq!(
-            messages[0].session_name.as_deref(),
-            Some("Implement Grok support")
+            assistants[1].stats.input_tokens + assistants[2].stats.input_tokens,
+            200
         );
+        assert!(assistants[1].stats.cost > 0.0);
+        assert_eq!(assistants[3].stats.input_tokens, 300);
     }
 }

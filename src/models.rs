@@ -1535,6 +1535,7 @@ fn populate_defaults(
     );
 
     // xAI Models
+    // Source: https://docs.x.ai/developers/pricing
     add_model!(
         "grok-4.5",
         PricingStructure::Tiered(TieredPricing {
@@ -2382,6 +2383,8 @@ fn cache_cost_for_caching(
             creation_cost + read_cost
         }
         CachingSupport::Tiered(tiered) => {
+            // Tiered caching models currently publish cached-read rates only;
+            // cache creation tokens are intentionally not charged here.
             calculate_tiered_cache_cost(cache_read_tokens, &tiered.tiers, tiered.bracket_pricing)
         }
     }
@@ -2663,6 +2666,8 @@ fn calculate_context_cost(
 
     let cache_cost = match caching {
         CachingSupport::Tiered(tiered) => {
+            // Tiered caching models currently publish cached-read rates only;
+            // cache creation tokens are intentionally not charged here.
             find_tier(context_tokens, &tiered.tiers, |tier| tier.max_tokens)
                 .map(|tier| (cache_read_tokens as f64 / 1_000_000.0) * tier.cached_input_per_1m)
                 .unwrap_or(0.0)
@@ -3517,6 +3522,14 @@ mod tests {
                 None,
             ),
             6.4,
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.5", 1_000_000, 1_000_000, 999_999, 1_000_000, 2_000_000, None,
+            ),
+            calculate_total_cost_for_context_at(
+                "grok-4.5", 1_000_000, 1_000_000, 0, 1_000_000, 2_000_000, None,
+            ),
         );
     }
 
