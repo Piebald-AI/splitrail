@@ -87,6 +87,8 @@ struct GrokSessionSummary {
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    generated_title: Option<String>,
+    #[serde(default)]
     session_summary: Option<String>,
 }
 
@@ -180,6 +182,10 @@ fn parse_turn_usages(chat_history_path: &Path) -> Vec<GrokUsage> {
         .lines()
         .enumerate()
         .filter_map(|(line_index, line)| {
+            if line.trim().is_empty() {
+                return None;
+            }
+
             let mut bytes = line.as_bytes().to_vec();
             let record = match simd_json::from_slice::<GrokUpdateRecord>(&mut bytes) {
                 Ok(record) => record,
@@ -330,9 +336,15 @@ fn session_metadata(path: &Path) -> (DateTime<Utc>, Option<String>) {
         return (
             date,
             summary
-                .session_summary
+                .generated_title
                 .as_deref()
-                .and_then(truncate_session_name),
+                .and_then(truncate_session_name)
+                .or_else(|| {
+                    summary
+                        .session_summary
+                        .as_deref()
+                        .and_then(truncate_session_name)
+                }),
         );
     }
 
@@ -539,7 +551,7 @@ mod tests {
         std::fs::create_dir_all(&session_dir).expect("session directory should be created");
         std::fs::write(
             session_dir.join("summary.json"),
-            r#"{"session_summary":"Grok summary","created_at":"2026-08-01T12:00:00Z"}"#,
+            r#"{"generated_title":"Grok title","session_summary":"Grok summary","created_at":"2026-08-01T12:00:00Z"}"#,
         )
         .expect("summary should be written");
         std::fs::write(
@@ -572,7 +584,7 @@ mod tests {
         assert_eq!(messages[1].stats.cache_creation_tokens, 4);
         assert_eq!(messages[1].stats.reasoning_tokens, 5);
         assert!((messages[1].stats.cost - 0.000329).abs() < f64::EPSILON);
-        assert_eq!(messages[0].session_name.as_deref(), Some("Grok summary"));
+        assert_eq!(messages[0].session_name.as_deref(), Some("Grok title"));
     }
 
     #[test]
