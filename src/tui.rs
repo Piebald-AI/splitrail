@@ -297,6 +297,16 @@ fn model_name_matches(model: &str, filter: &str) -> bool {
     model.to_lowercase().contains(filter)
 }
 
+fn filter_model_counts(models: &ModelCounts, filter: &str) -> ModelCounts {
+    let mut filtered = ModelCounts::new();
+    for &(model, count) in models.iter() {
+        if model_name_matches(resolve_model(model), filter) {
+            filtered.increment(model, count);
+        }
+    }
+    filtered
+}
+
 fn tui_stats_from_model_stats(stats: &ModelStats) -> TuiStats {
     TuiStats {
         input_tokens: stats.input_tokens,
@@ -328,12 +338,21 @@ fn filter_analyzer_view_by_model(
         })
         .cloned()
         .map(|mut session| {
-            session.daily.retain(|_, activity| {
-                activity
-                    .models
-                    .iter()
-                    .any(|(model, _)| model_name_matches(resolve_model(*model), &filter))
-            });
+            if session.daily.is_empty() {
+                session.models = filter_model_counts(&session.models, &filter);
+            } else {
+                session.daily.retain(|_, activity| {
+                    activity.models = filter_model_counts(&activity.models, &filter);
+                    activity.models.iter().next().is_some()
+                });
+
+                session.models = ModelCounts::new();
+                for activity in session.daily.values() {
+                    for &(model, count) in activity.models.iter() {
+                        session.models.increment(model, count);
+                    }
+                }
+            }
             session
         })
         .collect();
