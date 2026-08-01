@@ -233,6 +233,7 @@ pub enum Application {
     PiAgent,
     Piebald,
     AntigravityCli,
+    Grok,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

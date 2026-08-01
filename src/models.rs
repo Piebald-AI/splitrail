@@ -1535,15 +1535,69 @@ fn populate_defaults(
     );
 
     // xAI Models
+    // Source: https://docs.x.ai/developers/pricing
     add_model!(
-        "grok-code-fast-1",
-        PricingStructure::Flat {
-            input_per_1m: 0.20,
-            output_per_1m: 1.50
-        },
-        CachingSupport::OpenAI {
-            cached_input_per_1m: 0.02
-        },
+        "grok-4.5",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 2.00,
+                    output_per_1m: 6.00,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 4.00,
+                    output_per_1m: 12.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.30,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.60,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+    add_model!(
+        "grok-build-0.1",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 1.00,
+                    output_per_1m: 2.00,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.00,
+                    output_per_1m: 4.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.20,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.40,
+                },
+            ],
+            bracket_pricing: true,
+        }),
         false
     );
 
@@ -2075,6 +2129,11 @@ fn populate_defaults(
 
     // Aurora aliases
     add_alias!("aurora-alpha", "aurora-alpha");
+
+    // xAI aliases
+    add_alias!("grok-code-fast-1", "grok-build-0.1");
+    add_alias!("grok-code-fast", "grok-build-0.1");
+    add_alias!("grok-code-fast-1-0825", "grok-build-0.1");
 }
 
 /// Free-tier model pricing for models accessed via OpenRouter's `:free` suffix
@@ -2324,6 +2383,8 @@ fn cache_cost_for_caching(
             creation_cost + read_cost
         }
         CachingSupport::Tiered(tiered) => {
+            // Tiered caching models currently publish cached-read rates only;
+            // cache creation tokens are intentionally not charged here.
             calculate_tiered_cache_cost(cache_read_tokens, &tiered.tiers, tiered.bracket_pricing)
         }
     }
@@ -2450,6 +2511,39 @@ pub fn calculate_total_cost_for_service_tier_at(
     }
 }
 
+/// Calculate standard cost when a model's tiers are selected by total prompt
+/// context rather than by each token category independently.
+pub fn calculate_total_cost_for_context_at(
+    model_name: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    context_tokens: u64,
+    effective_at: Option<DateTime<Utc>>,
+) -> f64 {
+    match get_model_info(model_name) {
+        Some(model_info) => {
+            let (pricing, caching) = standard_pricing_for_date(&model_info, effective_at);
+            calculate_context_cost(
+                pricing,
+                caching,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                context_tokens,
+            )
+        }
+        None => {
+            warn_once(format!(
+                "WARNING: Unknown model: {model_name}. Defaulting to $0."
+            ));
+            0.0
+        }
+    }
+}
+
 fn calculate_tiered_cost(
     tokens: u64,
     tiers: &[PricingTier],
@@ -2543,6 +2637,47 @@ where
     None
 }
 
+fn calculate_context_cost(
+    pricing: &PricingStructure,
+    caching: &CachingSupport,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    context_tokens: u64,
+) -> f64 {
+    let token_cost = match pricing {
+        PricingStructure::Flat {
+            input_per_1m,
+            output_per_1m,
+        } => {
+            (input_tokens as f64 / 1_000_000.0) * input_per_1m
+                + (output_tokens as f64 / 1_000_000.0) * output_per_1m
+        }
+        PricingStructure::Tiered(tiered) => {
+            find_tier(context_tokens, &tiered.tiers, |tier| tier.max_tokens)
+                .map(|tier| {
+                    (input_tokens as f64 / 1_000_000.0) * tier.input_per_1m
+                        + (output_tokens as f64 / 1_000_000.0) * tier.output_per_1m
+                })
+                .unwrap_or(0.0)
+        }
+    };
+
+    let cache_cost = match caching {
+        CachingSupport::Tiered(tiered) => {
+            // Tiered caching models currently publish cached-read rates only;
+            // cache creation tokens are intentionally not charged here.
+            find_tier(context_tokens, &tiered.tiers, |tier| tier.max_tokens)
+                .map(|tier| (cache_read_tokens as f64 / 1_000_000.0) * tier.cached_input_per_1m)
+                .unwrap_or(0.0)
+        }
+        _ => cache_cost_for_caching(caching, cache_creation_tokens, cache_read_tokens),
+    };
+
+    token_cost + cache_cost
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2552,8 +2687,8 @@ mod tests {
         calculate_input_cost, calculate_input_cost_for_service_tier,
         calculate_input_cost_for_service_tier_at, calculate_output_cost,
         calculate_output_cost_for_service_tier, calculate_output_cost_for_service_tier_at,
-        calculate_total_cost_for_service_tier_at, get_model_info, get_registry_lock,
-        init_external_models,
+        calculate_total_cost_for_context_at, calculate_total_cost_for_service_tier_at,
+        get_model_info, get_registry_lock, init_external_models,
     };
 
     use chrono::{TimeZone, Utc};
@@ -3360,6 +3495,42 @@ mod tests {
         approx_eq(input_cost, 75.0);
         approx_eq(output_cost, 150.0);
         approx_eq(cache_cost, 37.5);
+    }
+
+    #[test]
+    fn xai_standard_pricing_uses_context_tiers_and_aliases() {
+        assert!(
+            !get_model_info("grok-4.5")
+                .expect("Grok 4.5 should exist")
+                .is_estimated
+        );
+
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.5", 1_000_000, 1_000_000, 0, 1_000_000, 199_999, None,
+            ),
+            8.3,
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-code-fast-1",
+                1_000_000,
+                1_000_000,
+                0,
+                1_000_000,
+                200_001,
+                None,
+            ),
+            6.4,
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.5", 1_000_000, 1_000_000, 999_999, 1_000_000, 2_000_000, None,
+            ),
+            calculate_total_cost_for_context_at(
+                "grok-4.5", 1_000_000, 1_000_000, 0, 1_000_000, 2_000_000, None,
+            ),
+        );
     }
 
     #[test]
