@@ -20,6 +20,7 @@ jobs:
     needs:
       - crate_metadata
       - lint
+      - test
       - license_checks
       - cargo-audit
     steps:
@@ -58,6 +59,27 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Check formatting
         run: cargo fmt --check
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Without this, a failure on one OS cancels the other and hides whether
+      # the problem is platform-specific, which is the main thing this job is
+      # here to tell apart.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rustc-codegen-cranelift-preview
+      - name: Run tests
+        run: cargo test --locked
 
   license_checks:
     name: License checks
