@@ -1801,6 +1801,18 @@ fn populate_defaults(
         CachingSupport::None,
         false
     );
+    // Source: https://platform.minimax.io/docs/api-reference/anthropic-api-compatible-cache
+    add_model!(
+        "minimax-m3",
+        PricingStructure::Flat {
+            input_per_1m: 0.60,
+            output_per_1m: 2.40
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.12
+        },
+        false
+    );
 
     // Moonshot AI Models
     // Source: https://platform.kimi.ai/docs/pricing/chat-k26.md
@@ -2131,6 +2143,7 @@ fn populate_defaults(
     add_alias!("minimax-m2.5", "minimax-m2.5");
     add_alias!("minimax-m2.5-20260211", "minimax-m2.5");
     add_alias!("minimax-m2.7", "minimax-m2.7");
+    add_alias!("minimax-m3", "minimax-m3");
 
     // Moonshot / ByteDance / Qwen / Xiaomi / Meituan aliases
     add_alias!("doubao-seed-code", "doubao-seed-2.0-code");
@@ -3787,6 +3800,10 @@ mod tests {
             calculate_cache_cost("minimax-m2.7", 1_000_000, 1_000_000),
             0.435,
         );
+
+        approx_eq(calculate_input_cost("minimax-m3", 1_000_000), 0.60);
+        approx_eq(calculate_output_cost("minimax-m3", 1_000_000), 2.40);
+        approx_eq(calculate_cache_cost("minimax-m3", 0, 1_000_000), 0.12);
 
         approx_eq(calculate_input_cost("glm-5.1", 1_000_000), 1.40);
         approx_eq(calculate_output_cost("glm-5.1", 1_000_000), 4.40);
