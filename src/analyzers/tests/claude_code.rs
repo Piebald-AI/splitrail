@@ -632,9 +632,9 @@ fn test_calculate_cost_from_tokens() {
 }
 
 #[test]
-fn test_parse_jsonl_file_uses_sonnet_5_dated_pricing() {
-    let jsonl_data = r#"{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/code/test","sessionId":"sonnet-5","version":"2.0.0","message":{"id":"msg_intro","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"intro"}],"usage":{"input_tokens":1000000,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":1000000,"output_tokens":1000000}},"requestId":"req_intro","type":"assistant","uuid":"intro-uuid","timestamp":"2026-08-31T23:59:59Z"}
-{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/code/test","sessionId":"sonnet-5","version":"2.0.0","message":{"id":"msg_sticker","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"sticker"}],"usage":{"input_tokens":1000000,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":1000000,"output_tokens":1000000}},"requestId":"req_sticker","type":"assistant","uuid":"sticker-uuid","timestamp":"2026-09-01T00:00:00Z"}"#;
+fn test_parse_jsonl_file_uses_sonnet_5_permanent_pricing() {
+    let jsonl_data = r#"{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/code/test","sessionId":"sonnet-5","version":"2.0.0","message":{"id":"msg_before","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"before"}],"usage":{"input_tokens":1000000,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":1000000,"output_tokens":1000000}},"requestId":"req_before","type":"assistant","uuid":"before-uuid","timestamp":"2026-08-31T23:59:59Z"}
+{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/code/test","sessionId":"sonnet-5","version":"2.0.0","message":{"id":"msg_after","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"after"}],"usage":{"input_tokens":1000000,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":1000000,"output_tokens":1000000}},"requestId":"req_after","type":"assistant","uuid":"after-uuid","timestamp":"2026-09-01T00:00:00Z"}"#;
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
@@ -648,7 +648,7 @@ fn test_parse_jsonl_file_uses_sonnet_5_dated_pricing() {
 
     assert_eq!(messages.len(), 2);
     assert!((messages[0].stats.cost - 14.7).abs() < 0.0001);
-    assert!((messages[1].stats.cost - 22.05).abs() < 0.0001);
+    assert!((messages[1].stats.cost - 14.7).abs() < 0.0001);
 }
 
 #[test]

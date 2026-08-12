@@ -1032,26 +1032,14 @@ fn populate_defaults(
     add_model!(
         "claude-sonnet-5",
         PricingStructure::Flat {
-            input_per_1m: 3.0,
-            output_per_1m: 15.0
-        },
-        CachingSupport::Anthropic {
-            cache_write_per_1m: 3.75,
-            cache_read_per_1m: 0.3
-        },
-        false
-    );
-    add_dated_pricing!(
-        "claude-sonnet-5",
-        NaiveDate::from_ymd_opt(2026, 9, 1).expect("valid date"),
-        PricingStructure::Flat {
             input_per_1m: 2.0,
             output_per_1m: 10.0
         },
         CachingSupport::Anthropic {
             cache_write_per_1m: 2.5,
             cache_read_per_1m: 0.2
-        }
+        },
+        false
     );
     add_model!(
         "claude-opus-5",
@@ -2986,95 +2974,54 @@ mod tests {
     }
 
     #[test]
-    fn claude_sonnet_5_alias_maps_to_sticker_pricing_by_default() {
+    fn claude_sonnet_5_alias_maps_to_permanent_pricing() {
         let model_info = get_model_info("claude-5-sonnet").expect("model should exist");
         assert!(!model_info.is_estimated);
+        assert!(model_info.dated_pricing.is_empty());
 
         let input_cost = calculate_input_cost("claude-5-sonnet", 1_000_000);
         let output_cost = calculate_output_cost("claude-5-sonnet", 1_000_000);
         let cache_cost = calculate_cache_cost("claude-5-sonnet", 1_000_000, 1_000_000);
 
-        approx_eq(input_cost, 3.0);
-        approx_eq(output_cost, 15.0);
-        approx_eq(cache_cost, 4.05);
+        approx_eq(input_cost, 2.0);
+        approx_eq(output_cost, 10.0);
+        approx_eq(cache_cost, 2.7);
     }
 
     #[test]
-    fn claude_sonnet_5_uses_introductory_pricing_through_august_2026() {
-        let effective_at = Utc.with_ymd_and_hms(2026, 8, 31, 23, 59, 59).unwrap();
-
-        approx_eq(
-            calculate_input_cost_for_service_tier_at(
-                "claude-5-sonnet",
-                ServiceTier::Standard,
-                1_000_000,
-                Some(effective_at),
-            ),
-            2.0,
-        );
-        approx_eq(
-            calculate_output_cost_for_service_tier_at(
-                "claude-5-sonnet",
-                ServiceTier::Standard,
-                1_000_000,
-                Some(effective_at),
-            ),
-            10.0,
-        );
-        approx_eq(
-            calculate_cache_cost_for_service_tier_at(
-                "claude-5-sonnet",
-                ServiceTier::Standard,
-                1_000_000,
-                1_000_000,
-                Some(effective_at),
-            ),
-            2.7,
-        );
+    fn claude_sonnet_5_permanent_pricing_has_no_september_boundary() {
+        for effective_at in [
+            Utc.with_ymd_and_hms(2026, 8, 31, 23, 59, 59).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        ] {
+            approx_eq(
+                calculate_total_cost_for_service_tier_at(
+                    "claude-5-sonnet",
+                    ServiceTier::Standard,
+                    1_000_000,
+                    1_000_000,
+                    1_000_000,
+                    1_000_000,
+                    Some(effective_at),
+                ),
+                14.7,
+            );
+        }
     }
 
     #[test]
-    fn claude_sonnet_5_uses_sticker_pricing_after_introductory_window() {
-        let effective_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
-
-        approx_eq(
-            calculate_total_cost_for_service_tier_at(
-                "claude-5-sonnet",
-                ServiceTier::Standard,
-                1_000_000,
-                1_000_000,
-                1_000_000,
-                1_000_000,
-                Some(effective_at),
-            ),
-            22.05,
-        );
-    }
-
-    #[test]
-    fn claude_sonnet_5_global_anthropic_alias_maps_to_dated_pricing() {
+    fn claude_sonnet_5_global_anthropic_alias_maps_to_permanent_pricing() {
         let model_info = get_model_info("global.anthropic.claude-sonnet-5")
             .expect("global Anthropic alias should resolve");
         assert!(!model_info.is_estimated);
-
-        let effective_at = Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap();
+        assert!(model_info.dated_pricing.is_empty());
 
         approx_eq(
-            calculate_input_cost_for_service_tier_at(
-                "global.anthropic.claude-sonnet-5",
-                ServiceTier::Standard,
-                1_000_000,
-                Some(effective_at),
-            ),
+            calculate_input_cost("global.anthropic.claude-sonnet-5", 1_000_000),
             2.0,
         );
         approx_eq(
-            calculate_output_cost_for_service_tier_at(
-                "global.anthropic.claude-sonnet-5",
-                ServiceTier::Standard,
-                1_000_000,
-                Some(effective_at),
-            ),
+            calculate_output_cost("global.anthropic.claude-sonnet-5", 1_000_000),
             10.0,
         );
     }
