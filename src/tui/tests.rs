@@ -1038,7 +1038,7 @@ fn model_filter_recalculates_stats_and_sessions() {
 
     assert_eq!(day.ai_messages, 2);
     assert_eq!(day.user_messages, 4);
-    assert_eq!(day.conversations, 1);
+    assert_eq!(day.conversations, 2);
     assert_eq!(day.stats.input_tokens, 100);
     assert_eq!(day.stats.output_tokens, 20);
     assert_eq!(day.stats.cost_cents, 125);

@@ -234,6 +234,7 @@ pub enum Application {
     Piebald,
     AntigravityCli,
     Grok,
+    DeepSeekHarness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

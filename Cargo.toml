@@ -18,6 +18,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 anyhow = "1.0"
 glob = "0.3"
 walkdir = "2"
+zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
