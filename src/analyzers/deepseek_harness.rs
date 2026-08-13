@@ -6,7 +6,6 @@ use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rayon::prelude::*;
 use serde::Deserialize;
 use simd_json::prelude::*;
 use std::collections::HashMap;
@@ -28,6 +27,16 @@ impl DeepSeekHarnessAnalyzer {
             std::env::var_os("DSH_HOME").as_deref(),
             dirs::home_dir().as_deref(),
         )
+    }
+
+    fn session_paths() -> impl Iterator<Item = PathBuf> {
+        Self::data_dir()
+            .filter(|dir| dir.is_dir())
+            .into_iter()
+            .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
+            .filter_map(|entry| entry.ok())
+            .map(walkdir::DirEntry::into_path)
+            .filter(|path| is_dsh_session_path(path))
     }
 }
 
@@ -181,10 +190,10 @@ fn add_tool_stats(stats: &mut Stats, tool_name: &str) {
     }
 }
 
-fn event_date(timestamp_ms: Option<i64>) -> DateTime<Utc> {
+fn event_date(timestamp_ms: Option<i64>, fallback: DateTime<Utc>) -> DateTime<Utc> {
     timestamp_ms
         .and_then(DateTime::from_timestamp_millis)
-        .unwrap_or_else(Utc::now)
+        .unwrap_or(fallback)
 }
 
 fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<ConversationMessage>> {
@@ -209,9 +218,26 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
     let mut fallback_session_name = None;
     let mut messages = Vec::new();
     let mut assistant_by_step = HashMap::new();
+    let file_modified_at = path
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .map(DateTime::<Utc>::from)
+        .unwrap_or(DateTime::UNIX_EPOCH);
+    let mut last_event_date = None;
 
     for (line_index, line) in BufReader::new(reader).split(b'\n').enumerate() {
-        let line = line?;
+        let line = match line {
+            Ok(line) => line,
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                crate::utils::warn_once(format!(
+                    "WARNING: DeepSeek Harness session `{}` has a truncated tail; preserving {} parsed messages",
+                    path.display(),
+                    messages.len()
+                ));
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if line.iter().all(|byte| byte.is_ascii_whitespace()) {
             continue;
         }
@@ -228,6 +254,14 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                 continue;
             }
         };
+        let date = event_date(event.time, last_event_date.unwrap_or(file_modified_at));
+        if event
+            .time
+            .and_then(DateTime::from_timestamp_millis)
+            .is_some()
+        {
+            last_event_date = Some(date);
+        }
 
         if event.event_type == "session" {
             if let Some(id) = event.id {
@@ -279,7 +313,7 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                     .unwrap_or_else(|| format!("{canonical_session}:user:{line_index}"));
                 messages.push(ConversationMessage {
                     application: Application::DeepSeekHarness,
-                    date: event_date(event.time),
+                    date,
                     project_hash: hash_text(&project_id),
                     conversation_hash: hash_text(canonical_session),
                     local_hash: Some(message_id.clone()),
@@ -309,7 +343,6 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                     .unwrap_or_else(|| format!("{canonical_session}:assistant:{line_index}"));
                 let model = message.source.and_then(|source| source.model);
                 let usage = data.usage.unwrap_or_default();
-                let date = event_date(event.time);
                 let context_tokens = usage
                     .input_tokens
                     .saturating_add(usage.cache_read_tokens)
@@ -396,38 +429,18 @@ impl Analyzer for DeepSeekHarnessAnalyzer {
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
-        let sources = Self::data_dir()
-            .filter(|dir| dir.is_dir())
-            .into_iter()
-            .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| is_dsh_session_path(entry.path()))
-            .map(|entry| DataSource {
-                path: entry.into_path(),
-            })
+        let sources = Self::session_paths()
+            .map(|path| DataSource { path })
             .collect();
         Ok(sources)
     }
 
     fn is_available(&self) -> bool {
-        Self::data_dir()
-            .filter(|dir| dir.is_dir())
-            .into_iter()
-            .flat_map(|dir| WalkDir::new(dir).min_depth(3).max_depth(3).into_iter())
-            .filter_map(|entry| entry.ok())
-            .any(|entry| is_dsh_session_path(entry.path()))
+        Self::session_paths().next().is_some()
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
         parse_deepseek_harness_file(&source.path)
-    }
-
-    fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
-        let messages: Vec<_> = sources
-            .par_iter()
-            .flat_map(|source| self.parse_source(source).unwrap_or_default())
-            .collect();
-        crate::utils::deduplicate_by_global_hash(messages)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
@@ -538,5 +551,96 @@ mod tests {
 
         assert_eq!(messages[0].conversation_hash, hash_text("parent"));
         assert_eq!(messages[1].conversation_hash, hash_text("child"));
+    }
+
+    #[test]
+    fn missing_event_time_uses_the_last_known_timestamp() {
+        let input = concat!(
+            r#"{"type":"user/message","time":1786629152000,"data":{"id":"user-1","source":{"kind":"user"},"content":"hello"}}"#,
+            "\n",
+            r#"{"type":"assistant/message","data":{"message":{"id":"assistant-1","source":{"kind":"model","model":"deepseek-v4-flash"}},"usage":{}}}"#,
+            "\n",
+        );
+
+        let messages = parse_session_reader(
+            Path::new("/tmp/workspace/session-1/session.jsonl.zstd"),
+            Cursor::new(input),
+        )
+        .expect("session should parse");
+
+        assert_eq!(messages[0].date, messages[1].date);
+        assert_eq!(messages[0].date.timestamp_millis(), 1_786_629_152_000);
+    }
+
+    #[test]
+    fn missing_event_time_uses_stable_file_modification_time() {
+        let file = tempfile::NamedTempFile::new().expect("temporary file should be created");
+        let modified_at = file
+            .as_file()
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .map(DateTime::<Utc>::from)
+            .expect("temporary file should have a modification time");
+        let input = concat!(
+            r#"{"type":"user/message","data":{"id":"user-1","source":{"kind":"user"},"content":"hello"}}"#,
+            "\n",
+        );
+
+        let first = parse_session_reader(file.path(), Cursor::new(input))
+            .expect("first parse should succeed");
+        let second = parse_session_reader(file.path(), Cursor::new(input))
+            .expect("second parse should succeed");
+
+        assert_eq!(first[0].date, modified_at);
+        assert_eq!(second[0].date, modified_at);
+    }
+
+    #[test]
+    fn truncated_final_zstd_frame_preserves_complete_messages() {
+        let first_event = concat!(
+            r#"{"type":"user/message","time":1786629152000,"data":{"id":"user-1","source":{"kind":"user"},"content":"hello"}}"#,
+            "\n",
+        );
+        let second_event = concat!(
+            r#"{"type":"assistant/message","time":1786629153000,"data":{"message":{"id":"assistant-1","source":{"kind":"model","model":"deepseek-v4-flash"}},"usage":{}}}"#,
+            "\n",
+        );
+        let mut compressed = zstd::stream::encode_all(Cursor::new(first_event), 1)
+            .expect("first frame should encode");
+        let mut truncated = zstd::stream::encode_all(Cursor::new(second_event), 1)
+            .expect("second frame should encode");
+        truncated.truncate(truncated.len() - 2);
+        compressed.extend(truncated);
+
+        let decoder = zstd::stream::read::Decoder::new(Cursor::new(compressed))
+            .expect("decoder should initialize");
+        let messages = parse_session_reader(
+            Path::new("/tmp/workspace/session-1/session.jsonl.zstd"),
+            decoder,
+        )
+        .expect("complete messages should survive a truncated tail");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].uuid.as_deref(), Some("user-1"));
+    }
+
+    #[test]
+    fn invalid_zstd_tail_still_returns_an_error() {
+        let first_event = concat!(
+            r#"{"type":"user/message","time":1786629152000,"data":{"id":"user-1","source":{"kind":"user"},"content":"hello"}}"#,
+            "\n",
+        );
+        let mut compressed =
+            zstd::stream::encode_all(Cursor::new(first_event), 1).expect("frame should encode");
+        compressed.extend([1, 2, 3, 4, 5]);
+
+        let decoder = zstd::stream::read::Decoder::new(Cursor::new(compressed))
+            .expect("decoder should initialize");
+        let result = parse_session_reader(
+            Path::new("/tmp/workspace/session-1/session.jsonl.zstd"),
+            decoder,
+        );
+
+        assert!(result.is_err());
     }
 }
