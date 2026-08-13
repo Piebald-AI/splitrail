@@ -308,14 +308,16 @@ fn filter_model_counts(models: &ModelCounts, filter: &str) -> ModelCounts {
 }
 
 fn tui_stats_from_model_stats(stats: &ModelStats) -> TuiStats {
-    TuiStats {
+    let mut tui_stats = TuiStats {
         input_tokens: stats.input_tokens,
         output_tokens: stats.output_tokens,
         reasoning_tokens: stats.reasoning_tokens,
         cached_tokens: stats.cached_tokens,
-        cost_cents: (stats.cost * 100.0).round() as u32,
         tool_calls: stats.tool_calls,
-    }
+        ..Default::default()
+    };
+    tui_stats.set_cost(stats.cost);
+    tui_stats
 }
 
 fn filter_analyzer_view_by_model(

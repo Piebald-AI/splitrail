@@ -45,6 +45,35 @@ fn test_single_session_contribution_from_messages() {
 }
 
 #[test]
+fn test_single_session_contribution_preserves_subcent_costs() {
+    let messages = vec![
+        make_message(
+            "session1",
+            Some("low-cost-model"),
+            100,
+            10,
+            0.004,
+            0,
+            "2025-01-15",
+        ),
+        make_message(
+            "session1",
+            Some("low-cost-model"),
+            100,
+            10,
+            0.004,
+            0,
+            "2025-01-15",
+        ),
+    ];
+
+    let contribution = SingleSessionContribution::from_messages(&messages);
+
+    assert!((contribution.stats.cost() - 0.008).abs() < f64::EPSILON);
+    assert_eq!(contribution.stats.cost_cents, 1);
+}
+
+#[test]
 fn test_single_session_contribution_empty_messages() {
     let messages: Vec<_> = vec![];
 
