@@ -590,6 +590,33 @@ fn test_accumulate_tui_stats_multiple_times() {
 }
 
 #[test]
+fn test_accumulate_tui_stats_preserves_subcent_costs() {
+    let mut dst = TuiStats::default();
+    let src = Stats {
+        cost: 0.004,
+        ..Stats::default()
+    };
+
+    accumulate_tui_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
+
+    assert!((dst.cost() - 0.008).abs() < f64::EPSILON);
+    assert_eq!(dst.cost_cents, 1);
+}
+
+#[test]
+fn test_tui_stats_keeps_cost_json_contract() {
+    let mut stats = TuiStats::default();
+    stats.add_cost(0.008);
+
+    let json = simd_json::to_string(&stats).expect("TUI stats should serialize");
+
+    assert!(json.contains(r#""costCents":1"#));
+    assert!(!json.contains("costMicros"));
+    assert_eq!(std::mem::size_of::<TuiStats>(), 48);
+}
+
+#[test]
 fn test_accumulate_tui_stats_comprehensive() {
     let mut dst = TuiStats::default();
     let src = Stats {
@@ -976,6 +1003,7 @@ fn model_filter_recalculates_stats_and_sessions() {
                 reasoning_tokens: 5,
                 cached_tokens: 50,
                 cost_cents: 525,
+                cost_micros: 5_250_000,
                 tool_calls: 10,
             },
             model_stats: BTreeMap::from([

@@ -20,12 +20,12 @@ use crate::types::{CompactDate, ConversationMessage, TuiStats, intern_model};
 // | output_tokens     | 31,999       | 26        | 67,108,863        |
 // | reasoning_tokens  | 7,005        | 26        | 67,108,863        |
 // | cached_tokens     | 186,677      | 27        | 134,217,727       |
-// | cost_cents        | 356          | 16        | 65,535 ($655.35)  |
+// | cost_micros       | 3,560,000    | 30        | $1,073.74         |
 // | tool_calls        | 73           | 14        | 16,383            |
 // | year_offset       | 2025-2026    | 6         | 63 (2020-2083)    |
 // | month             | 1-12         | 4         | 15                |
 // | day               | 1-31         | 5         | 31                |
-// | duration_ms       | —            | 25        | 33,554,431 (~9.3h)|
+// | duration_ms       | —            | 11        | 2,047 (~2s)       |
 //
 // Total: 176 bits = 22 bytes
 
@@ -36,12 +36,12 @@ use crate::types::{CompactDate, ConversationMessage, TuiStats, intern_model};
 /// - output_tokens:    bits 27-52  (26 bits, max 67,108,863)
 /// - reasoning_tokens: bits 53-78  (26 bits, max 67,108,863)
 /// - cached_tokens:    bits 79-105 (27 bits, max 134,217,727)
-/// - cost_cents:       bits 106-121 (16 bits, max 65,535 = $655.35)
-/// - tool_calls:       bits 122-135 (14 bits, max 16,383)
-/// - year_offset:      bits 136-141 (6 bits, years 2020-2083)
-/// - month:            bits 142-145 (4 bits, 1-12)
-/// - day:              bits 146-150 (5 bits, 1-31)
-/// - duration_ms:      bits 151-175 (25 bits, max ~9.3 hours)
+/// - cost_micros:      bits 106-135 (30 bits, max $1,073.74)
+/// - tool_calls:       bits 136-149 (14 bits, max 16,383)
+/// - year_offset:      bits 150-155 (6 bits, years 2020-2083)
+/// - month:            bits 156-159 (4 bits, 1-12)
+/// - day:              bits 160-164 (5 bits, 1-31)
+/// - duration_ms:      bits 165-175 (11 bits; reserved for future use)
 #[repr(C, align(1))]
 #[derive(BitfieldStruct, Clone, Copy, Default)]
 pub struct PackedStatsDate {
@@ -49,12 +49,12 @@ pub struct PackedStatsDate {
     #[bitfield(name = "output_tokens", ty = "u32", bits = "27..=52")]
     #[bitfield(name = "reasoning_tokens", ty = "u32", bits = "53..=78")]
     #[bitfield(name = "cached_tokens", ty = "u32", bits = "79..=105")]
-    #[bitfield(name = "cost_cents", ty = "u16", bits = "106..=121")]
-    #[bitfield(name = "tool_calls", ty = "u16", bits = "122..=135")]
-    #[bitfield(name = "year_offset", ty = "u8", bits = "136..=141")]
-    #[bitfield(name = "month", ty = "u8", bits = "142..=145")]
-    #[bitfield(name = "day", ty = "u8", bits = "146..=150")]
-    #[bitfield(name = "duration_ms", ty = "u32", bits = "151..=175")]
+    #[bitfield(name = "cost_micros", ty = "u32", bits = "106..=135")]
+    #[bitfield(name = "tool_calls", ty = "u16", bits = "136..=149")]
+    #[bitfield(name = "year_offset", ty = "u8", bits = "150..=155")]
+    #[bitfield(name = "month", ty = "u8", bits = "156..=159")]
+    #[bitfield(name = "day", ty = "u8", bits = "160..=164")]
+    #[bitfield(name = "duration_ms", ty = "u16", bits = "165..=175")]
     data: [u8; 22],
 }
 
@@ -65,7 +65,7 @@ impl std::fmt::Debug for PackedStatsDate {
             .field("output_tokens", &self.output_tokens())
             .field("reasoning_tokens", &self.reasoning_tokens())
             .field("cached_tokens", &self.cached_tokens())
-            .field("cost_cents", &self.cost_cents())
+            .field("cost_micros", &self.cost_micros())
             .field("tool_calls", &self.tool_calls())
             .field("year_offset", &self.year_offset())
             .field("month", &self.month())
@@ -89,7 +89,9 @@ impl PackedStatsDate {
         packed.set_output_tokens(stats.output_tokens.min(0x3FF_FFFF) as u32);
         packed.set_reasoning_tokens(stats.reasoning_tokens.min(0x3FF_FFFF) as u32);
         packed.set_cached_tokens(stats.cached_tokens.min(0x7FF_FFFF) as u32);
-        packed.set_cost_cents((stats.cost * 100.0).round().min(u16::MAX as f64) as u16);
+        packed.set_cost_micros(
+            TuiStats::cost_micros_from_dollars(stats.cost).min(0x3FFF_FFFF) as u32,
+        );
         packed.set_tool_calls(stats.tool_calls.min(0x3FFF) as u16);
 
         // Pack date
@@ -117,14 +119,16 @@ impl PackedStatsDate {
     /// Convert packed stats to TuiStats for display.
     #[inline]
     pub fn to_tui_stats(self) -> TuiStats {
-        TuiStats {
+        let mut stats = TuiStats {
             input_tokens: self.input_tokens() as u64,
             output_tokens: self.output_tokens() as u64,
             reasoning_tokens: self.reasoning_tokens() as u64,
             cached_tokens: self.cached_tokens() as u64,
-            cost_cents: self.cost_cents() as u32,
             tool_calls: self.tool_calls() as u32,
-        }
+            ..Default::default()
+        };
+        stats.set_cost_micros(u64::from(self.cost_micros()));
+        stats
     }
 }
 
@@ -235,7 +239,7 @@ mod size_tests {
         assert_eq!(packed.output_tokens(), 31_999);
         assert_eq!(packed.reasoning_tokens(), 7_005);
         assert_eq!(packed.cached_tokens(), 186_677);
-        assert_eq!(packed.cost_cents(), 356);
+        assert_eq!(packed.cost_micros(), 3_560_000);
         assert_eq!(packed.tool_calls(), 73);
 
         let unpacked_date = packed.unpack_date();
@@ -254,8 +258,8 @@ mod size_tests {
             output_tokens: 67_108_863, // 26-bit max
             reasoning_tokens: 67_108_863,
             cached_tokens: 134_217_727,
-            cost: 655.35,       // u16 max cents
-            tool_calls: 16_383, // 14-bit max
+            cost: 1_073.741_823, // 30-bit max microdollars
+            tool_calls: 16_383,  // 14-bit max
             ..Default::default()
         };
         let date = CompactDate::from_parts(2083, 12, 31); // Max year (2020 + 63)
@@ -264,7 +268,7 @@ mod size_tests {
 
         assert_eq!(packed.input_tokens(), 134_217_727);
         assert_eq!(packed.output_tokens(), 67_108_863);
-        assert_eq!(packed.cost_cents(), 65535);
+        assert_eq!(packed.cost_micros(), 0x3FFF_FFFF);
         assert_eq!(packed.tool_calls(), 16383);
 
         let unpacked_date = packed.unpack_date();

@@ -335,6 +335,37 @@ fn test_aggregate_by_date_basic() {
 }
 
 #[test]
+fn test_aggregate_by_date_preserves_subcent_costs() {
+    let date = Utc.with_ymd_and_hms(2025, 1, 15, 12, 0, 0).unwrap();
+    let make_message = |global_hash: &str| ConversationMessage {
+        date,
+        application: crate::types::Application::ClaudeCode,
+        project_hash: "p".to_string(),
+        conversation_hash: "c1".to_string(),
+        local_hash: None,
+        global_hash: global_hash.to_string(),
+        model: Some("low-cost-model".to_string()),
+        stats: Stats {
+            cost: 0.004,
+            ..Stats::default()
+        },
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: None,
+    };
+
+    let result = aggregate_by_date(&[make_message("g1"), make_message("g2")]);
+    let local_date = date
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let stats = &result[&local_date].stats;
+
+    assert!((stats.cost() - 0.008).abs() < f64::EPSILON);
+    assert_eq!(stats.cost_cents, 1);
+}
+
+#[test]
 fn test_aggregate_by_date_gap_filling() {
     // Create messages 2 days apart
     let date1 = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();

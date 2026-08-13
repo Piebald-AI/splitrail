@@ -483,7 +483,7 @@ impl std::ops::SubAssign for Stats {
     }
 }
 
-/// Lightweight stats for TUI display only (40 bytes vs 320 bytes for full Stats).
+/// Lightweight stats for TUI display only (48 bytes vs 320 bytes for full Stats).
 /// Contains only fields actually rendered in the UI.
 /// Uses u32 for memory efficiency - sufficient for per-session and per-day values.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -494,62 +494,105 @@ pub struct TuiStats {
     pub reasoning_tokens: u64,
     pub cached_tokens: u64,
     pub cost_cents: u32, // Store as cents to avoid f32 precision issues
+    /// Exact internal cost in millionths of a dollar. Kept out of serialized
+    /// output so the existing `costCents` JSON contract remains unchanged.
+    #[serde(skip)]
+    pub(crate) cost_micros: u64,
     pub tool_calls: u32,
 }
 
 impl TuiStats {
+    const MICROS_PER_DOLLAR: f64 = 1_000_000.0;
+    const MICROS_PER_CENT: u64 = 10_000;
+
+    #[inline]
+    pub(crate) fn cost_micros_from_dollars(dollars: f64) -> u64 {
+        if !dollars.is_finite() || dollars <= 0.0 {
+            return 0;
+        }
+
+        (dollars * Self::MICROS_PER_DOLLAR).round() as u64
+    }
+
+    #[inline]
+    fn exact_cost_micros(&self) -> u64 {
+        if self.cost_micros == 0 {
+            u64::from(self.cost_cents).saturating_mul(Self::MICROS_PER_CENT)
+        } else {
+            self.cost_micros
+        }
+    }
+
+    #[inline]
+    pub(crate) fn set_cost_micros(&mut self, cost_micros: u64) {
+        self.cost_micros = cost_micros;
+        self.cost_cents = cost_micros
+            .saturating_add(Self::MICROS_PER_CENT / 2)
+            .saturating_div(Self::MICROS_PER_CENT)
+            .min(u64::from(u32::MAX)) as u32;
+    }
+
     /// Get cost as f64 dollars for display
     #[inline]
     pub fn cost(&self) -> f64 {
-        self.cost_cents as f64 / 100.0
+        self.exact_cost_micros() as f64 / Self::MICROS_PER_DOLLAR
     }
 
     /// Set cost from f64 dollars
     #[inline]
     pub fn set_cost(&mut self, dollars: f64) {
-        self.cost_cents = (dollars * 100.0).round() as u32;
+        self.set_cost_micros(Self::cost_micros_from_dollars(dollars));
     }
 
     /// Add cost from f64 dollars
     #[inline]
     pub fn add_cost(&mut self, dollars: f64) {
-        self.cost_cents = self
-            .cost_cents
-            .saturating_add((dollars * 100.0).round() as u32);
+        let total = self
+            .exact_cost_micros()
+            .saturating_add(Self::cost_micros_from_dollars(dollars));
+        self.set_cost_micros(total);
     }
 }
 
 impl From<&Stats> for TuiStats {
     fn from(s: &Stats) -> Self {
-        TuiStats {
+        let mut stats = TuiStats {
             input_tokens: s.input_tokens,
             output_tokens: s.output_tokens,
             reasoning_tokens: s.reasoning_tokens,
             cached_tokens: s.cached_tokens,
-            cost_cents: (s.cost * 100.0).round() as u32,
             tool_calls: s.tool_calls,
-        }
+            ..Default::default()
+        };
+        stats.set_cost(s.cost);
+        stats
     }
 }
 
 impl std::ops::AddAssign for TuiStats {
     fn add_assign(&mut self, rhs: Self) {
+        let cost_micros = self
+            .exact_cost_micros()
+            .saturating_add(rhs.exact_cost_micros());
         self.input_tokens = self.input_tokens.saturating_add(rhs.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(rhs.output_tokens);
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(rhs.reasoning_tokens);
         self.cached_tokens = self.cached_tokens.saturating_add(rhs.cached_tokens);
-        self.cost_cents = self.cost_cents.saturating_add(rhs.cost_cents);
+        self.set_cost_micros(cost_micros);
         self.tool_calls = self.tool_calls.saturating_add(rhs.tool_calls);
     }
 }
 
 impl std::ops::SubAssign for TuiStats {
     fn sub_assign(&mut self, rhs: Self) {
+        let cost_micros = self
+            .exact_cost_micros()
+            .saturating_sub(rhs.exact_cost_micros());
         self.input_tokens = self.input_tokens.saturating_sub(rhs.input_tokens);
         self.output_tokens = self.output_tokens.saturating_sub(rhs.output_tokens);
         self.reasoning_tokens = self.reasoning_tokens.saturating_sub(rhs.reasoning_tokens);
         self.cached_tokens = self.cached_tokens.saturating_sub(rhs.cached_tokens);
-        self.cost_cents = self.cost_cents.saturating_sub(rhs.cost_cents);
+        self.set_cost_micros(cost_micros);
         self.tool_calls = self.tool_calls.saturating_sub(rhs.tool_calls);
     }
 }
