@@ -22,7 +22,7 @@ fn test_packed_stats_date_from_stats() {
     assert_eq!(packed.output_tokens(), 500);
     assert_eq!(packed.reasoning_tokens(), 100);
     assert_eq!(packed.cached_tokens(), 200);
-    assert_eq!(packed.cost_cents(), 5); // 0.05 * 100 = 5 cents
+    assert_eq!(packed.cost_micros(), 50_000);
     assert_eq!(packed.tool_calls(), 3);
 
     let unpacked_date = packed.unpack_date();
@@ -56,6 +56,20 @@ fn test_packed_stats_date_to_tui_stats() {
 }
 
 #[test]
+fn test_packed_stats_date_preserves_subcent_cost() {
+    let stats = Stats {
+        cost: 0.004,
+        ..Default::default()
+    };
+
+    let packed = PackedStatsDate::pack(&stats, CompactDate::from_parts(2025, 1, 1));
+    let tui = packed.to_tui_stats();
+
+    assert!((tui.cost() - 0.004).abs() < f64::EPSILON);
+    assert_eq!(tui.cost_cents, 0);
+}
+
+#[test]
 fn test_packed_stats_date_max_values() {
     // Test maximum values within bit limits (from diagnostic reference)
     let stats = Stats {
@@ -63,8 +77,8 @@ fn test_packed_stats_date_max_values() {
         output_tokens: 67_108_863, // 26-bit max
         reasoning_tokens: 67_108_863,
         cached_tokens: 134_217_727,
-        cost: 655.35,       // u16 max cents
-        tool_calls: 16_383, // 14-bit max
+        cost: 1_073.741_823, // 30-bit max microdollars
+        tool_calls: 16_383,  // 14-bit max
         ..Default::default()
     };
     let date = CompactDate::from_parts(2083, 12, 31); // Max year (2020 + 63)
@@ -75,7 +89,7 @@ fn test_packed_stats_date_max_values() {
     assert_eq!(packed.output_tokens(), 67_108_863);
     assert_eq!(packed.reasoning_tokens(), 67_108_863);
     assert_eq!(packed.cached_tokens(), 134_217_727);
-    assert_eq!(packed.cost_cents(), 65535);
+    assert_eq!(packed.cost_micros(), 0x3FFF_FFFF);
     assert_eq!(packed.tool_calls(), 16383);
 
     let unpacked_date = packed.unpack_date();
@@ -92,7 +106,7 @@ fn test_packed_stats_date_saturation() {
         output_tokens: 100_000_000, // Exceeds 26-bit max
         reasoning_tokens: 100_000_000,
         cached_tokens: 200_000_000,
-        cost: 1000.00,      // Exceeds u16 max cents
+        cost: 2000.00,      // Exceeds 30-bit microdollar max
         tool_calls: 50_000, // Exceeds 14-bit max
         ..Default::default()
     };
@@ -103,7 +117,7 @@ fn test_packed_stats_date_saturation() {
     // Values should be saturated to max
     assert_eq!(packed.input_tokens(), 0x7FF_FFFF); // 27-bit max
     assert_eq!(packed.output_tokens(), 0x3FF_FFFF); // 26-bit max
-    assert_eq!(packed.cost_cents(), 65535); // u16 max
+    assert_eq!(packed.cost_micros(), 0x3FFF_FFFF); // 30-bit max
     assert_eq!(packed.tool_calls(), 16383); // 14-bit max
 
     let unpacked_date = packed.unpack_date();
@@ -130,7 +144,7 @@ fn test_packed_stats_date_observed_values() {
     assert_eq!(packed.output_tokens(), 31_999);
     assert_eq!(packed.reasoning_tokens(), 7_005);
     assert_eq!(packed.cached_tokens(), 186_677);
-    assert_eq!(packed.cost_cents(), 356);
+    assert_eq!(packed.cost_micros(), 3_560_000);
     assert_eq!(packed.tool_calls(), 73);
 
     let unpacked_date = packed.unpack_date();
@@ -150,7 +164,7 @@ fn test_packed_stats_date_zero_values() {
     assert_eq!(packed.output_tokens(), 0);
     assert_eq!(packed.reasoning_tokens(), 0);
     assert_eq!(packed.cached_tokens(), 0);
-    assert_eq!(packed.cost_cents(), 0);
+    assert_eq!(packed.cost_micros(), 0);
     assert_eq!(packed.tool_calls(), 0);
 
     let unpacked_date = packed.unpack_date();

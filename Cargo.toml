@@ -1,6 +1,6 @@
 [package]
 name = "splitrail"
-version = "3.6.1"
+version = "3.7.0"
 edition = "2024"
 license = "MIT"
 authors = ["Piebald LLC <support@piebald.ai>"]
@@ -18,6 +18,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 anyhow = "1.0"
 glob = "0.3"
 walkdir = "2"
+zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }

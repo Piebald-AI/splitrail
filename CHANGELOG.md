@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0] - 2026-08-01
+- feat(analyzers): add Grok session usage tracking (#229) - @jimyag
+- feat(tui): filter usage by model (#218) - @jimyag
+- fix(tui): correct session details for selected periods (#219) - @jimyag
+- fix(analyzers): respect custom config directories (#224) - @jimyag
+- fix(watcher): show new sessions in live monitor (#216) - @jimyag
+- fix(tui): show only active apps per period (#228) - @jimyag
+- fix(tui): keep filtered session models in sync (#230) - @jimyag
+- fix(tui): keep best-value highlights aligned when reversed (#215) - @jimyag
+- feat(models): reflect the 2026-07-30 Terra and Luna price cut (#232) - @NickAme03
+- feat(models): add Claude Opus 5 pricing (#223) - @NickAme03
+- fix(claude_code): keep the finished record instead of summing streaming snapshots (#222) - @NickAme03
+- test(codex_cli): build session paths component by component so hashes match on Windows (#226) - @NickAme03
+
 ## [3.6.1] - 2026-07-22
 - fix(codex): include archived sessions in usage stats (#210) - @jimyag
 - feat(logging): add configurable warning level (#211) - @jimyag

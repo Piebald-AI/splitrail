@@ -856,17 +856,42 @@ fn populate_defaults(
     add_model!(
         "gpt-5.6-terra",
         PricingStructure::Flat {
+            input_per_1m: 2.0,
+            output_per_1m: 12.0
+        },
+        CachingSupport::OpenAIWithWrites {
+            cache_write_per_1m: 2.5,
+            cache_read_per_1m: 0.20
+        },
+        false
+    );
+    add_dated_pricing!(
+        "gpt-5.6-terra",
+        NaiveDate::from_ymd_opt(2026, 7, 30).expect("valid date"),
+        PricingStructure::Flat {
             input_per_1m: 2.50,
             output_per_1m: 15.0
         },
         CachingSupport::OpenAIWithWrites {
             cache_write_per_1m: 3.125,
             cache_read_per_1m: 0.25
-        },
-        false
+        }
     );
     add_model!(
         "gpt-5.6-luna",
+        PricingStructure::Flat {
+            input_per_1m: 0.20,
+            output_per_1m: 1.20
+        },
+        CachingSupport::OpenAIWithWrites {
+            cache_write_per_1m: 0.25,
+            cache_read_per_1m: 0.02
+        },
+        false
+    );
+    add_dated_pricing!(
+        "gpt-5.6-luna",
+        NaiveDate::from_ymd_opt(2026, 7, 30).expect("valid date"),
         PricingStructure::Flat {
             input_per_1m: 1.0,
             output_per_1m: 6.0
@@ -874,8 +899,7 @@ fn populate_defaults(
         CachingSupport::OpenAIWithWrites {
             cache_write_per_1m: 1.25,
             cache_read_per_1m: 0.10
-        },
-        false
+        }
     );
 
     add_model!(
@@ -1008,26 +1032,14 @@ fn populate_defaults(
     add_model!(
         "claude-sonnet-5",
         PricingStructure::Flat {
-            input_per_1m: 3.0,
-            output_per_1m: 15.0
-        },
-        CachingSupport::Anthropic {
-            cache_write_per_1m: 3.75,
-            cache_read_per_1m: 0.3
-        },
-        false
-    );
-    add_dated_pricing!(
-        "claude-sonnet-5",
-        NaiveDate::from_ymd_opt(2026, 9, 1).expect("valid date"),
-        PricingStructure::Flat {
             input_per_1m: 2.0,
             output_per_1m: 10.0
         },
         CachingSupport::Anthropic {
             cache_write_per_1m: 2.5,
             cache_read_per_1m: 0.2
-        }
+        },
+        false
     );
     add_model!(
         "claude-opus-5",
@@ -1535,15 +1547,69 @@ fn populate_defaults(
     );
 
     // xAI Models
+    // Source: https://docs.x.ai/developers/pricing
     add_model!(
-        "grok-code-fast-1",
-        PricingStructure::Flat {
-            input_per_1m: 0.20,
-            output_per_1m: 1.50
-        },
-        CachingSupport::OpenAI {
-            cached_input_per_1m: 0.02
-        },
+        "grok-4.5",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 2.00,
+                    output_per_1m: 6.00,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 4.00,
+                    output_per_1m: 12.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.30,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.60,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+    add_model!(
+        "grok-build-0.1",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 1.00,
+                    output_per_1m: 2.00,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.00,
+                    output_per_1m: 4.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.20,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.40,
+                },
+            ],
+            bracket_pricing: true,
+        }),
         false
     );
 
@@ -1721,6 +1787,18 @@ fn populate_defaults(
             output_per_1m: 1.10
         },
         CachingSupport::None,
+        false
+    );
+    // Source: https://platform.minimax.io/docs/api-reference/anthropic-api-compatible-cache
+    add_model!(
+        "minimax-m3",
+        PricingStructure::Flat {
+            input_per_1m: 0.60,
+            output_per_1m: 2.40
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.12
+        },
         false
     );
 
@@ -2053,6 +2131,7 @@ fn populate_defaults(
     add_alias!("minimax-m2.5", "minimax-m2.5");
     add_alias!("minimax-m2.5-20260211", "minimax-m2.5");
     add_alias!("minimax-m2.7", "minimax-m2.7");
+    add_alias!("minimax-m3", "minimax-m3");
 
     // Moonshot / ByteDance / Qwen / Xiaomi / Meituan aliases
     add_alias!("doubao-seed-code", "doubao-seed-2.0-code");
@@ -2075,6 +2154,11 @@ fn populate_defaults(
 
     // Aurora aliases
     add_alias!("aurora-alpha", "aurora-alpha");
+
+    // xAI aliases
+    add_alias!("grok-code-fast-1", "grok-build-0.1");
+    add_alias!("grok-code-fast", "grok-build-0.1");
+    add_alias!("grok-code-fast-1-0825", "grok-build-0.1");
 }
 
 /// Free-tier model pricing for models accessed via OpenRouter's `:free` suffix
@@ -2324,6 +2408,8 @@ fn cache_cost_for_caching(
             creation_cost + read_cost
         }
         CachingSupport::Tiered(tiered) => {
+            // Tiered caching models currently publish cached-read rates only;
+            // cache creation tokens are intentionally not charged here.
             calculate_tiered_cache_cost(cache_read_tokens, &tiered.tiers, tiered.bracket_pricing)
         }
     }
@@ -2450,6 +2536,39 @@ pub fn calculate_total_cost_for_service_tier_at(
     }
 }
 
+/// Calculate standard cost when a model's tiers are selected by total prompt
+/// context rather than by each token category independently.
+pub fn calculate_total_cost_for_context_at(
+    model_name: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    context_tokens: u64,
+    effective_at: Option<DateTime<Utc>>,
+) -> f64 {
+    match get_model_info(model_name) {
+        Some(model_info) => {
+            let (pricing, caching) = standard_pricing_for_date(&model_info, effective_at);
+            calculate_context_cost(
+                pricing,
+                caching,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                context_tokens,
+            )
+        }
+        None => {
+            warn_once(format!(
+                "WARNING: Unknown model: {model_name}. Defaulting to $0."
+            ));
+            0.0
+        }
+    }
+}
+
 fn calculate_tiered_cost(
     tokens: u64,
     tiers: &[PricingTier],
@@ -2543,6 +2662,47 @@ where
     None
 }
 
+fn calculate_context_cost(
+    pricing: &PricingStructure,
+    caching: &CachingSupport,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    context_tokens: u64,
+) -> f64 {
+    let token_cost = match pricing {
+        PricingStructure::Flat {
+            input_per_1m,
+            output_per_1m,
+        } => {
+            (input_tokens as f64 / 1_000_000.0) * input_per_1m
+                + (output_tokens as f64 / 1_000_000.0) * output_per_1m
+        }
+        PricingStructure::Tiered(tiered) => {
+            find_tier(context_tokens, &tiered.tiers, |tier| tier.max_tokens)
+                .map(|tier| {
+                    (input_tokens as f64 / 1_000_000.0) * tier.input_per_1m
+                        + (output_tokens as f64 / 1_000_000.0) * tier.output_per_1m
+                })
+                .unwrap_or(0.0)
+        }
+    };
+
+    let cache_cost = match caching {
+        CachingSupport::Tiered(tiered) => {
+            // Tiered caching models currently publish cached-read rates only;
+            // cache creation tokens are intentionally not charged here.
+            find_tier(context_tokens, &tiered.tiers, |tier| tier.max_tokens)
+                .map(|tier| (cache_read_tokens as f64 / 1_000_000.0) * tier.cached_input_per_1m)
+                .unwrap_or(0.0)
+        }
+        _ => cache_cost_for_caching(caching, cache_creation_tokens, cache_read_tokens),
+    };
+
+    token_cost + cache_cost
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2552,8 +2712,8 @@ mod tests {
         calculate_input_cost, calculate_input_cost_for_service_tier,
         calculate_input_cost_for_service_tier_at, calculate_output_cost,
         calculate_output_cost_for_service_tier, calculate_output_cost_for_service_tier_at,
-        calculate_total_cost_for_service_tier_at, get_model_info, get_registry_lock,
-        init_external_models,
+        calculate_total_cost_for_context_at, calculate_total_cost_for_service_tier_at,
+        get_model_info, get_registry_lock, init_external_models,
     };
 
     use chrono::{TimeZone, Utc};
@@ -2814,95 +2974,54 @@ mod tests {
     }
 
     #[test]
-    fn claude_sonnet_5_alias_maps_to_sticker_pricing_by_default() {
+    fn claude_sonnet_5_alias_maps_to_permanent_pricing() {
         let model_info = get_model_info("claude-5-sonnet").expect("model should exist");
         assert!(!model_info.is_estimated);
+        assert!(model_info.dated_pricing.is_empty());
 
         let input_cost = calculate_input_cost("claude-5-sonnet", 1_000_000);
         let output_cost = calculate_output_cost("claude-5-sonnet", 1_000_000);
         let cache_cost = calculate_cache_cost("claude-5-sonnet", 1_000_000, 1_000_000);
 
-        approx_eq(input_cost, 3.0);
-        approx_eq(output_cost, 15.0);
-        approx_eq(cache_cost, 4.05);
+        approx_eq(input_cost, 2.0);
+        approx_eq(output_cost, 10.0);
+        approx_eq(cache_cost, 2.7);
     }
 
     #[test]
-    fn claude_sonnet_5_uses_introductory_pricing_through_august_2026() {
-        let effective_at = Utc.with_ymd_and_hms(2026, 8, 31, 23, 59, 59).unwrap();
-
-        approx_eq(
-            calculate_input_cost_for_service_tier_at(
-                "claude-5-sonnet",
-                ServiceTier::Standard,
-                1_000_000,
-                Some(effective_at),
-            ),
-            2.0,
-        );
-        approx_eq(
-            calculate_output_cost_for_service_tier_at(
-                "claude-5-sonnet",
-                ServiceTier::Standard,
-                1_000_000,
-                Some(effective_at),
-            ),
-            10.0,
-        );
-        approx_eq(
-            calculate_cache_cost_for_service_tier_at(
-                "claude-5-sonnet",
-                ServiceTier::Standard,
-                1_000_000,
-                1_000_000,
-                Some(effective_at),
-            ),
-            2.7,
-        );
+    fn claude_sonnet_5_permanent_pricing_has_no_september_boundary() {
+        for effective_at in [
+            Utc.with_ymd_and_hms(2026, 8, 31, 23, 59, 59).unwrap(),
+            Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+        ] {
+            approx_eq(
+                calculate_total_cost_for_service_tier_at(
+                    "claude-5-sonnet",
+                    ServiceTier::Standard,
+                    1_000_000,
+                    1_000_000,
+                    1_000_000,
+                    1_000_000,
+                    Some(effective_at),
+                ),
+                14.7,
+            );
+        }
     }
 
     #[test]
-    fn claude_sonnet_5_uses_sticker_pricing_after_introductory_window() {
-        let effective_at = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
-
-        approx_eq(
-            calculate_total_cost_for_service_tier_at(
-                "claude-5-sonnet",
-                ServiceTier::Standard,
-                1_000_000,
-                1_000_000,
-                1_000_000,
-                1_000_000,
-                Some(effective_at),
-            ),
-            22.05,
-        );
-    }
-
-    #[test]
-    fn claude_sonnet_5_global_anthropic_alias_maps_to_dated_pricing() {
+    fn claude_sonnet_5_global_anthropic_alias_maps_to_permanent_pricing() {
         let model_info = get_model_info("global.anthropic.claude-sonnet-5")
             .expect("global Anthropic alias should resolve");
         assert!(!model_info.is_estimated);
-
-        let effective_at = Utc.with_ymd_and_hms(2026, 8, 31, 12, 0, 0).unwrap();
+        assert!(model_info.dated_pricing.is_empty());
 
         approx_eq(
-            calculate_input_cost_for_service_tier_at(
-                "global.anthropic.claude-sonnet-5",
-                ServiceTier::Standard,
-                1_000_000,
-                Some(effective_at),
-            ),
+            calculate_input_cost("global.anthropic.claude-sonnet-5", 1_000_000),
             2.0,
         );
         approx_eq(
-            calculate_output_cost_for_service_tier_at(
-                "global.anthropic.claude-sonnet-5",
-                ServiceTier::Standard,
-                1_000_000,
-                Some(effective_at),
-            ),
+            calculate_output_cost("global.anthropic.claude-sonnet-5", 1_000_000),
             10.0,
         );
     }
@@ -2988,21 +3107,105 @@ mod tests {
             6.75,
         );
 
-        approx_eq(calculate_input_cost("gpt-5.6-terra", 1_000_000), 2.50);
-        approx_eq(calculate_output_cost("gpt-5.6-terra", 1_000_000), 15.0);
-        approx_eq(calculate_cache_cost("gpt-5.6-terra", 0, 1_000_000), 0.25);
+        approx_eq(calculate_input_cost("gpt-5.6-terra", 1_000_000), 2.0);
+        approx_eq(calculate_output_cost("gpt-5.6-terra", 1_000_000), 12.0);
+        approx_eq(calculate_cache_cost("gpt-5.6-terra", 0, 1_000_000), 0.20);
         approx_eq(
             calculate_cache_cost("gpt-5.6-terra", 1_000_000, 1_000_000),
-            3.375,
+            2.70,
         );
 
-        approx_eq(calculate_input_cost("gpt-5.6-luna", 1_000_000), 1.0);
-        approx_eq(calculate_output_cost("gpt-5.6-luna", 1_000_000), 6.0);
-        approx_eq(calculate_cache_cost("gpt-5.6-luna", 0, 1_000_000), 0.10);
+        approx_eq(calculate_input_cost("gpt-5.6-luna", 1_000_000), 0.20);
+        approx_eq(calculate_output_cost("gpt-5.6-luna", 1_000_000), 1.20);
+        approx_eq(calculate_cache_cost("gpt-5.6-luna", 0, 1_000_000), 0.02);
         approx_eq(
             calculate_cache_cost("gpt-5.6-luna", 1_000_000, 1_000_000),
-            1.35,
+            0.27,
         );
+    }
+
+    /// Usage from before the 2026-07-30 cut must keep the price it was actually
+    /// billed at. Without the dated overrides the new rates are applied
+    /// retroactively, and every Luna session recorded before the cut is
+    /// suddenly reported at a fifth of what it cost.
+    #[test]
+    fn gpt_5_6_terra_and_luna_keep_pre_cut_pricing_for_older_usage() {
+        let before_cut = Utc.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap();
+
+        for (model, input, output, cache_read, cache_write_and_read) in [
+            ("gpt-5.6-terra", 2.50, 15.0, 0.25, 3.375),
+            ("gpt-5.6-luna", 1.0, 6.0, 0.10, 1.35),
+        ] {
+            approx_eq(
+                calculate_input_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(before_cut),
+                ),
+                input,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(before_cut),
+                ),
+                output,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    0,
+                    1_000_000,
+                    Some(before_cut),
+                ),
+                cache_read,
+            );
+            // Cache writes are the other half of the historical cost, and the
+            // dated override carries its own `CachingSupport`. Without this the
+            // write rate could silently fall through to the post-cut value.
+            approx_eq(
+                calculate_cache_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    1_000_000,
+                    Some(before_cut),
+                ),
+                cache_write_and_read,
+            );
+        }
+    }
+
+    /// The cut took effect on 2026-07-30, so that day is already billed at the
+    /// new rates: `standard_pricing_for_date` treats `valid_until` as exclusive.
+    #[test]
+    fn gpt_5_6_terra_and_luna_use_new_pricing_from_the_cut_date() {
+        let cut_day = Utc.with_ymd_and_hms(2026, 7, 30, 0, 0, 0).unwrap();
+
+        for (model, input, output) in [("gpt-5.6-terra", 2.0, 12.0), ("gpt-5.6-luna", 0.20, 1.20)] {
+            approx_eq(
+                calculate_input_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(cut_day),
+                ),
+                input,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(cut_day),
+                ),
+                output,
+            );
+        }
     }
 
     #[test]
@@ -3363,6 +3566,42 @@ mod tests {
     }
 
     #[test]
+    fn xai_standard_pricing_uses_context_tiers_and_aliases() {
+        assert!(
+            !get_model_info("grok-4.5")
+                .expect("Grok 4.5 should exist")
+                .is_estimated
+        );
+
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.5", 1_000_000, 1_000_000, 0, 1_000_000, 199_999, None,
+            ),
+            8.3,
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-code-fast-1",
+                1_000_000,
+                1_000_000,
+                0,
+                1_000_000,
+                200_001,
+                None,
+            ),
+            6.4,
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.5", 1_000_000, 1_000_000, 999_999, 1_000_000, 2_000_000, None,
+            ),
+            calculate_total_cost_for_context_at(
+                "grok-4.5", 1_000_000, 1_000_000, 0, 1_000_000, 2_000_000, None,
+            ),
+        );
+    }
+
+    #[test]
     fn doubao_seed_code_alias_resolves() {
         let model_info = get_model_info("doubao-seed-code").expect("alias should resolve");
         assert!(model_info.is_estimated);
@@ -3508,6 +3747,10 @@ mod tests {
             calculate_cache_cost("minimax-m2.7", 1_000_000, 1_000_000),
             0.435,
         );
+
+        approx_eq(calculate_input_cost("minimax-m3", 1_000_000), 0.60);
+        approx_eq(calculate_output_cost("minimax-m3", 1_000_000), 2.40);
+        approx_eq(calculate_cache_cost("minimax-m3", 0, 1_000_000), 0.12);
 
         approx_eq(calculate_input_cost("glm-5.1", 1_000_000), 1.40);
         approx_eq(calculate_output_cost("glm-5.1", 1_000_000), 4.40);

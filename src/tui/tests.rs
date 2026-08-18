@@ -14,8 +14,8 @@ use crate::tui::{
 };
 use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, Application, CompactDate, ConversationMessage,
-    DailyStats, MessageRole, ModelCounts, ModelStats, MultiAnalyzerStats, SessionAggregate, Stats,
-    TuiStats, intern_model,
+    DailyStats, MessageRole, ModelCounts, ModelStats, MultiAnalyzerStats, SessionAggregate,
+    SessionPeriodAggregate, Stats, TuiStats, intern_model,
 };
 use chrono::{TimeZone, Utc};
 use ratatui::Terminal;
@@ -388,6 +388,55 @@ fn test_build_display_stats_prepends_all_tools_view() {
     );
 }
 
+#[test]
+fn test_all_tools_apps_only_include_tools_used_that_day() {
+    let empty_day = |date: &str| DailyStats {
+        date: CompactDate::from_str(date).unwrap(),
+        ..DailyStats::default()
+    };
+
+    let mut tool_a = make_tool_stats("tool-a", true);
+    tool_a
+        .daily_stats
+        .insert("2025-01-02".to_string(), empty_day("2025-01-02"));
+
+    let mut tool_b = make_tool_stats("tool-b", true);
+    let mut tool_b_activity = tool_b.daily_stats.remove("2025-01-01").unwrap();
+    tool_b_activity.date = CompactDate::from_str("2025-01-02").unwrap();
+    tool_b
+        .daily_stats
+        .insert("2025-01-01".to_string(), empty_day("2025-01-01"));
+    tool_b
+        .daily_stats
+        .insert("2025-01-02".to_string(), tool_b_activity);
+
+    let display_stats = build_display_stats(
+        &MultiAnalyzerStats {
+            analyzer_stats: vec![tool_a, tool_b],
+        }
+        .into_view()
+        .analyzer_stats,
+    );
+    let all_tools = display_stats[0].read();
+
+    assert_eq!(
+        all_tools.daily_stats["2025-01-01"]
+            .apps
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["tool-a"]
+    );
+    assert_eq!(
+        all_tools.daily_stats["2025-01-02"]
+            .apps
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["tool-b"]
+    );
+}
+
 // ============================================================================
 // UPLOAD PROGRESS & MESSAGES (tui.rs helpers)
 // ============================================================================
@@ -538,6 +587,33 @@ fn test_accumulate_tui_stats_multiple_times() {
     assert_eq!(dst.input_tokens, 200);
     assert_eq!(dst.output_tokens, 100);
     assert_eq!(dst.cost(), 0.02);
+}
+
+#[test]
+fn test_accumulate_tui_stats_preserves_subcent_costs() {
+    let mut dst = TuiStats::default();
+    let src = Stats {
+        cost: 0.004,
+        ..Stats::default()
+    };
+
+    accumulate_tui_stats(&mut dst, &src);
+    accumulate_tui_stats(&mut dst, &src);
+
+    assert!((dst.cost() - 0.008).abs() < f64::EPSILON);
+    assert_eq!(dst.cost_cents, 1);
+}
+
+#[test]
+fn test_tui_stats_keeps_cost_json_contract() {
+    let mut stats = TuiStats::default();
+    stats.add_cost(0.008);
+
+    let json = simd_json::to_string(&stats).expect("TUI stats should serialize");
+
+    assert!(json.contains(r#""costCents":1"#));
+    assert!(!json.contains("costMicros"));
+    assert_eq!(std::mem::size_of::<TuiStats>(), 48);
 }
 
 #[test]
@@ -927,6 +1003,7 @@ fn model_filter_recalculates_stats_and_sessions() {
                 reasoning_tokens: 5,
                 cached_tokens: 50,
                 cost_cents: 525,
+                cost_micros: 5_250_000,
                 tool_calls: 10,
             },
             model_stats: BTreeMap::from([
@@ -951,13 +1028,36 @@ fn model_filter_recalculates_stats_and_sessions() {
         date,
         daily: BTreeMap::new(),
     };
+    let multi_models = {
+        let mut models = ModelCounts::new();
+        models.increment(intern_model("claude-sonnet-4"), 2);
+        models.increment(intern_model("gpt-5"), 1);
+        models
+    };
+    let multi_model_session = SessionAggregate {
+        session_id: "multi-model-session".to_string(),
+        first_timestamp: Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap(),
+        analyzer_name: Arc::from("Test"),
+        stats: TuiStats::default(),
+        models: multi_models.clone(),
+        session_name: None,
+        date,
+        daily: BTreeMap::from([(
+            date,
+            SessionPeriodAggregate {
+                models: multi_models,
+                ..Default::default()
+            },
+        )]),
+    };
     let view = AnalyzerStatsView {
         daily_stats,
         session_aggregates: vec![
+            multi_model_session,
             make_session("claude-session", "claude-sonnet-4"),
             make_session("gpt-session", "gpt-5"),
         ],
-        num_conversations: 2,
+        num_conversations: 3,
         analyzer_name: Arc::from("Test"),
     };
 
@@ -966,15 +1066,39 @@ fn model_filter_recalculates_stats_and_sessions() {
 
     assert_eq!(day.ai_messages, 2);
     assert_eq!(day.user_messages, 4);
-    assert_eq!(day.conversations, 1);
+    assert_eq!(day.conversations, 2);
     assert_eq!(day.stats.input_tokens, 100);
     assert_eq!(day.stats.output_tokens, 20);
     assert_eq!(day.stats.cost_cents, 125);
     assert_eq!(day.stats.tool_calls, 3);
     assert_eq!(day.models.len(), 1);
     assert!(day.models.contains_key("claude-sonnet-4"));
-    assert_eq!(filtered.num_conversations, 1);
-    assert_eq!(filtered.session_aggregates[0].session_id, "claude-session");
+    assert_eq!(filtered.num_conversations, 2);
+    assert_eq!(
+        filtered.session_aggregates[0].session_id,
+        "multi-model-session"
+    );
+    assert_eq!(
+        filtered.session_aggregates[0]
+            .models
+            .get(intern_model("claude-sonnet-4")),
+        Some(2)
+    );
+    assert_eq!(
+        filtered.session_aggregates[0]
+            .models
+            .get(intern_model("gpt-5")),
+        None
+    );
+    assert_eq!(
+        filtered.session_aggregates[0]
+            .daily
+            .get(&date)
+            .unwrap()
+            .models
+            .get(intern_model("gpt-5")),
+        None
+    );
 
     let mut incomplete_view = view.clone();
     incomplete_view
