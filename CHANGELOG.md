@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.1] - 2026-08-20
+- feat(analyzers): add DeepSeek Harness support (#236) - @jimyag
+- fix(tui): preserve subcent costs during aggregation (#237) - @jimyag
+- feat(models): add Qwen3.7 Plus and Flash pricing (#238) - @kozora
+- ci(checks): run the test suite on Linux and Windows (#234) - @NickAme03
+- Add MiniMax-M3 model pricing to the cost registry (#217) - @octo-patch
+- feat(models): Add tiered GPT-5.6 Sol pricing (#239) - @mike1858
+- fix(models): Complete Terra and Luna tiered pricing (#240) - @mike1858
+- Make Sonnet 5 pricing permanent (#235) - @mike1858
+
 ## [3.7.0] - 2026-08-01
 - feat(analyzers): add Grok session usage tracking (#229) - @jimyag
 - feat(tui): filter usage by model (#218) - @jimyag
