@@ -214,7 +214,8 @@ impl Registry {
                 Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
             }
             CachingSupport::TieredWithWrites(tiered) => {
-                Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
+                tiered.bracket_pricing
+                    && Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
             }
             _ => true,
         };
@@ -2633,9 +2634,17 @@ pub fn calculate_total_cost_for_service_tier_at(
         Some(model_info) => {
             let (pricing, caching) =
                 pricing_for_service_tier(&model_info, service_tier, effective_at);
-            input_cost_for_pricing(pricing, input_tokens)
-                + output_cost_for_pricing(pricing, output_tokens)
-                + cache_cost_for_caching(caching, cache_creation_tokens, cache_read_tokens)
+            let context_tokens =
+                input_tokens.saturating_add(cache_creation_tokens.max(cache_read_tokens));
+            calculate_context_cost(
+                pricing,
+                caching,
+                input_tokens,
+                output_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                context_tokens,
+            )
         }
         None => {
             warn_once(format!(
@@ -2763,42 +2772,15 @@ fn calculate_tiered_cache_cost_with_writes(
     tiers: &[CachingTierWithWrites],
     bracket_pricing: bool,
 ) -> f64 {
-    let context_tokens = cache_creation_tokens.saturating_add(cache_read_tokens);
+    debug_assert!(bracket_pricing);
+    let context_tokens = cache_creation_tokens.max(cache_read_tokens);
 
-    if bracket_pricing {
-        return find_tier(context_tokens, tiers, |tier| tier.max_tokens)
-            .map(|tier| {
-                (cache_creation_tokens as f64 / 1_000_000.0) * tier.cache_write_per_1m
-                    + (cache_read_tokens as f64 / 1_000_000.0) * tier.cache_read_per_1m
-            })
-            .unwrap_or(0.0);
-    }
-
-    let mut total_cost = 0.0;
-    let mut remaining_creation = cache_creation_tokens;
-    let mut remaining_reads = cache_read_tokens;
-    let mut lower_bound = 0;
-
-    for tier in tiers {
-        if remaining_creation == 0 && remaining_reads == 0 {
-            break;
-        }
-
-        let upper_bound = tier.max_tokens.unwrap_or(u64::MAX);
-        let tier_width = upper_bound.saturating_sub(lower_bound);
-        let creation_in_tier = remaining_creation.min(tier_width);
-        let read_capacity = tier_width.saturating_sub(creation_in_tier);
-        let reads_in_tier = remaining_reads.min(read_capacity);
-
-        total_cost += (creation_in_tier as f64 / 1_000_000.0) * tier.cache_write_per_1m
-            + (reads_in_tier as f64 / 1_000_000.0) * tier.cache_read_per_1m;
-
-        remaining_creation = remaining_creation.saturating_sub(creation_in_tier);
-        remaining_reads = remaining_reads.saturating_sub(reads_in_tier);
-        lower_bound = upper_bound;
-    }
-
-    total_cost
+    find_tier(context_tokens, tiers, |tier| tier.max_tokens)
+        .map(|tier| {
+            (cache_creation_tokens as f64 / 1_000_000.0) * tier.cache_write_per_1m
+                + (cache_read_tokens as f64 / 1_000_000.0) * tier.cache_read_per_1m
+        })
+        .unwrap_or(0.0)
 }
 
 fn find_tier<T, F>(tokens: u64, tiers: &[T], max_tokens: F) -> Option<&T>
@@ -3253,14 +3235,36 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_6_sol_uses_long_context_pricing_for_full_session() {
-        approx_eq(calculate_input_cost("gpt-5.6-sol", 1_000_000), 10.0);
-        approx_eq(calculate_output_cost("gpt-5.6-sol", 1_000_000), 45.0);
-        approx_eq(calculate_cache_cost("gpt-5.6-sol", 0, 1_000_000), 1.0);
-        approx_eq(
-            calculate_cache_cost("gpt-5.6-sol", 1_000_000, 1_000_000),
-            13.50,
+    fn gpt_5_6_sol_uses_long_context_pricing_for_full_request() {
+        let cost = calculate_total_cost_for_service_tier_at(
+            "gpt-5.6-sol",
+            ServiceTier::Standard,
+            100_000,
+            10_000,
+            0,
+            200_000,
+            None,
         );
+
+        // The 300K prompt crosses the 272K boundary even though uncached input,
+        // cached input, and output are each below it individually.
+        approx_eq(cost, 1.65);
+    }
+
+    #[test]
+    fn gpt_5_6_sol_context_boundary_selects_one_rate_for_every_token_category() {
+        for (input, expected) in [(172_000, 1.21), (172_001, 2.270_01)] {
+            let cost = calculate_total_cost_for_service_tier_at(
+                "gpt-5.6-sol",
+                ServiceTier::Standard,
+                input,
+                10_000,
+                0,
+                100_000,
+                None,
+            );
+            approx_eq(cost, expected);
+        }
     }
 
     #[test]
