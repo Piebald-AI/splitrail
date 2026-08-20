@@ -214,7 +214,13 @@ impl Registry {
                 Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
             }
             CachingSupport::TieredWithWrites(tiered) => {
-                tiered.bracket_pricing
+                !matches!(
+                    pricing,
+                    PricingStructure::Tiered(TieredPricing {
+                        bracket_pricing: false,
+                        ..
+                    })
+                ) && tiered.bracket_pricing
                     && Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
             }
             _ => true,
@@ -2850,8 +2856,9 @@ fn calculate_context_cost(
 #[cfg(test)]
 mod tests {
     use super::{
-        CachingSupport, CachingTier, InputTokenSemantics, ModelInfo, PricingStructure, PricingTier,
-        Registry, ServiceTier, TieredCaching, TieredPricing, calculate_cache_cost,
+        CachingSupport, CachingTier, CachingTierWithWrites, InputTokenSemantics, ModelInfo,
+        PricingStructure, PricingTier, Registry, ServiceTier, TieredCaching,
+        TieredCachingWithWrites, TieredPricing, calculate_cache_cost,
         calculate_cache_cost_for_service_tier, calculate_cache_cost_for_service_tier_at,
         calculate_input_cost, calculate_input_cost_for_service_tier,
         calculate_input_cost_for_service_tier_at, calculate_output_cost,
@@ -3071,6 +3078,59 @@ mod tests {
 
         assert!(get_model_info("review-invalid-tier-model").is_none());
         assert!(get_model_info("review-invalid-tier-alias").is_none());
+
+        reset_global_registry();
+    }
+
+    #[test]
+    fn external_tiered_cache_writes_reject_progressive_pricing() {
+        let _guard = registry_test_guard();
+        reset_global_registry();
+
+        let mut models = HashMap::new();
+        models.insert(
+            "review-progressive-tiered-writes".to_string(),
+            ModelInfo {
+                pricing: PricingStructure::Tiered(TieredPricing {
+                    tiers: vec![
+                        PricingTier {
+                            max_tokens: Some(100),
+                            input_per_1m: 1.0,
+                            output_per_1m: 2.0,
+                        },
+                        PricingTier {
+                            max_tokens: None,
+                            input_per_1m: 3.0,
+                            output_per_1m: 4.0,
+                        },
+                    ],
+                    bracket_pricing: false,
+                }),
+                caching: CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+                    tiers: vec![
+                        CachingTierWithWrites {
+                            max_tokens: Some(100),
+                            cache_write_per_1m: 1.25,
+                            cache_read_per_1m: 0.10,
+                        },
+                        CachingTierWithWrites {
+                            max_tokens: None,
+                            cache_write_per_1m: 3.75,
+                            cache_read_per_1m: 0.30,
+                        },
+                    ],
+                    bracket_pricing: true,
+                }),
+                service_tiers: HashMap::new(),
+                dated_pricing: Vec::new(),
+                input_token_semantics: InputTokenSemantics::default(),
+                is_estimated: false,
+            },
+        );
+
+        init_external_models(models, HashMap::new());
+
+        assert!(get_model_info("review-progressive-tiered-writes").is_none());
 
         reset_global_registry();
     }
