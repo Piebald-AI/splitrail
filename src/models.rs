@@ -1975,6 +1975,59 @@ fn populate_defaults(
         CachingSupport::None,
         true
     );
+    // Source: https://openrouter.ai/qwen/qwen3.7-plus
+    add_model!(
+        "qwen3.7-plus",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(256_000),
+                    input_per_1m: 0.32,
+                    output_per_1m: 1.28
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 0.96,
+                    output_per_1m: 3.84
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 0.40,
+            cache_read_per_1m: 0.064
+        },
+        true
+    );
+    // Source: https://openrouter.ai/qwen/qwen3.7-flash
+    add_model!(
+        "qwen3.7-flash",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(32_000),
+                    input_per_1m: 0.03,
+                    output_per_1m: 0.13
+                },
+                PricingTier {
+                    max_tokens: Some(256_000),
+                    input_per_1m: 0.10,
+                    output_per_1m: 0.40
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 0.20,
+                    output_per_1m: 0.80
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 0.038,
+            cache_read_per_1m: 0.006
+        },
+        true
+    );
 
     // Meituan Models
     // Source: https://anotherwrapper.com/tools/llm-pricing/longcat-flash-lite
@@ -2252,6 +2305,10 @@ fn populate_defaults(
     add_alias!("moonshotai.kimi-k2.5", "kimi-k2.5");
     add_alias!("qwen3.6-plus", "qwen3.6-plus");
     add_alias!("qwen.qwen3.6-plus", "qwen3.6-plus");
+    add_alias!("qwen3.7-plus", "qwen3.7-plus");
+    add_alias!("qwen.qwen3.7-plus", "qwen3.7-plus");
+    add_alias!("qwen3.7-flash", "qwen3.7-flash");
+    add_alias!("qwen.qwen3.7-flash", "qwen3.7-flash");
     add_alias!("mimo-v2.5-pro", "mimo-v2.5-pro");
     add_alias!("xiaomi.mimo-v2.5-pro", "mimo-v2.5-pro");
     add_alias!("mimo-v2-omni", "mimo-v2-omni");
@@ -4016,6 +4073,58 @@ mod tests {
             calculate_output_cost("openai.gpt-oss-safeguard-120b", 1_000_000),
             0.60,
         );
+    }
+
+    #[test]
+    fn qwen_3_7_plus_pricing_and_tiers() {
+        let info = get_model_info("qwen3.7-plus").expect("model should exist");
+        assert!(info.is_estimated);
+
+        // Base tier (<= 256k tokens)
+        approx_eq(calculate_input_cost("qwen3.7-plus", 256_000), 0.08192);
+        approx_eq(calculate_output_cost("qwen3.7-plus", 256_000), 0.32768);
+
+        // Top tier (> 256k tokens)
+        approx_eq(calculate_input_cost("qwen3.7-plus", 1_000_000), 0.96);
+        approx_eq(calculate_output_cost("qwen3.7-plus", 1_000_000), 3.84);
+
+        // Cache write + read
+        approx_eq(
+            calculate_cache_cost("qwen3.7-plus", 1_000_000, 1_000_000),
+            0.464,
+        );
+
+        // Provider-prefixed alias resolves
+        let aliased = get_model_info("qwen/qwen3.7-plus").expect("provider-prefixed alias");
+        assert!(aliased.is_estimated);
+    }
+
+    #[test]
+    fn qwen_3_7_flash_pricing_and_tiers() {
+        let info = get_model_info("qwen3.7-flash").expect("model should exist");
+        assert!(info.is_estimated);
+
+        // First tier (<= 32k tokens)
+        approx_eq(calculate_input_cost("qwen3.7-flash", 32_000), 0.00096);
+        approx_eq(calculate_output_cost("qwen3.7-flash", 32_000), 0.00416);
+
+        // Middle tier (<= 256k tokens)
+        approx_eq(calculate_input_cost("qwen3.7-flash", 256_000), 0.0256);
+        approx_eq(calculate_output_cost("qwen3.7-flash", 256_000), 0.1024);
+
+        // Top tier (> 256k tokens)
+        approx_eq(calculate_input_cost("qwen3.7-flash", 1_000_000), 0.20);
+        approx_eq(calculate_output_cost("qwen3.7-flash", 1_000_000), 0.80);
+
+        // Cache write + read
+        approx_eq(
+            calculate_cache_cost("qwen3.7-flash", 1_000_000, 1_000_000),
+            0.044,
+        );
+
+        // Provider-prefixed alias resolves
+        let aliased = get_model_info("qwen/qwen3.7-flash").expect("provider-prefixed alias");
+        assert!(aliased.is_estimated);
     }
 
     #[test]
