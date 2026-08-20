@@ -54,6 +54,25 @@ pub struct TieredCaching {
     pub bracket_pricing: bool,
 }
 
+/// Cache tier for models with separate, tiered write and read pricing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachingTierWithWrites {
+    /// Maximum tokens for this caching tier (None means unlimited).
+    pub max_tokens: Option<u64>,
+    /// Cache write cost per 1M tokens.
+    pub cache_write_per_1m: f64,
+    /// Cache read cost per 1M tokens.
+    pub cache_read_per_1m: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TieredCachingWithWrites {
+    /// Cache tiers ordered from lowest threshold to highest.
+    pub tiers: Vec<CachingTierWithWrites>,
+    /// If true, bill the entire token count at the single matching tier's rate.
+    pub bracket_pricing: bool,
+}
+
 /// Different cache pricing structures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CachingSupport {
@@ -73,6 +92,8 @@ pub enum CachingSupport {
     },
     /// Tiered cached input pricing.
     Tiered(TieredCaching),
+    /// Tiered cache pricing with separate write and read rates.
+    TieredWithWrites(TieredCachingWithWrites),
 }
 
 /// Provider service tier used for pricing.
@@ -190,6 +211,9 @@ impl Registry {
 
         let caching_ok = match caching {
             CachingSupport::Tiered(tiered) => {
+                Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
+            }
+            CachingSupport::TieredWithWrites(tiered) => {
                 Self::validate_tier_bounds(&tiered.tiers, |tier| tier.max_tokens)
             }
             _ => true,
@@ -345,6 +369,56 @@ fn populate_defaults(
                     cache_write_per_1m: $cache_write,
                     cache_read_per_1m: $cache_read,
                 }
+            );
+        };
+    }
+
+    macro_rules! add_tiered_service_tier_pricing_with_cache_writes {
+        (
+            $name:expr,
+            $service_tier:expr,
+            $short_input:expr,
+            $short_cache_write:expr,
+            $short_cache_read:expr,
+            $short_output:expr,
+            $long_input:expr,
+            $long_cache_write:expr,
+            $long_cache_read:expr,
+            $long_output:expr
+        ) => {
+            add_service_tier_pricing!(
+                $name,
+                $service_tier,
+                PricingStructure::Tiered(TieredPricing {
+                    tiers: vec![
+                        PricingTier {
+                            max_tokens: Some(272_000),
+                            input_per_1m: $short_input,
+                            output_per_1m: $short_output,
+                        },
+                        PricingTier {
+                            max_tokens: None,
+                            input_per_1m: $long_input,
+                            output_per_1m: $long_output,
+                        },
+                    ],
+                    bracket_pricing: true,
+                }),
+                CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+                    tiers: vec![
+                        CachingTierWithWrites {
+                            max_tokens: Some(272_000),
+                            cache_write_per_1m: $short_cache_write,
+                            cache_read_per_1m: $short_cache_read,
+                        },
+                        CachingTierWithWrites {
+                            max_tokens: None,
+                            cache_write_per_1m: $long_cache_write,
+                            cache_read_per_1m: $long_cache_read,
+                        },
+                    ],
+                    bracket_pricing: true,
+                })
             );
         };
     }
@@ -843,14 +917,36 @@ fn populate_defaults(
 
     add_model!(
         "gpt-5.6-sol",
-        PricingStructure::Flat {
-            input_per_1m: 5.0,
-            output_per_1m: 30.0
-        },
-        CachingSupport::OpenAIWithWrites {
-            cache_write_per_1m: 6.25,
-            cache_read_per_1m: 0.50
-        },
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 5.0,
+                    output_per_1m: 30.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 10.0,
+                    output_per_1m: 45.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+            tiers: vec![
+                CachingTierWithWrites {
+                    max_tokens: Some(272_000),
+                    cache_write_per_1m: 6.25,
+                    cache_read_per_1m: 0.50
+                },
+                CachingTierWithWrites {
+                    max_tokens: None,
+                    cache_write_per_1m: 12.50,
+                    cache_read_per_1m: 1.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
         false
     );
     add_model!(
@@ -937,13 +1033,17 @@ fn populate_defaults(
         false
     );
 
-    add_flat_service_tier_pricing_with_cache_writes!(
+    add_tiered_service_tier_pricing_with_cache_writes!(
         "gpt-5.6-sol",
         ServiceTier::Priority,
         10.0,
         12.50,
         1.0,
-        60.0
+        60.0,
+        20.0,
+        25.0,
+        2.0,
+        90.0
     );
     add_flat_service_tier_pricing_with_cache_writes!(
         "gpt-5.6-terra",
@@ -966,13 +1066,17 @@ fn populate_defaults(
     add_flat_service_tier_pricing!("gpt-5.4-mini", ServiceTier::Priority, 1.50, 0.15, 9.0);
 
     for service_tier in [ServiceTier::Flex, ServiceTier::Batch] {
-        add_flat_service_tier_pricing_with_cache_writes!(
+        add_tiered_service_tier_pricing_with_cache_writes!(
             "gpt-5.6-sol",
             service_tier,
             2.50,
             3.125,
             0.25,
-            15.0
+            15.0,
+            5.0,
+            6.25,
+            0.50,
+            22.50
         );
         add_flat_service_tier_pricing_with_cache_writes!(
             "gpt-5.6-terra",
@@ -2412,6 +2516,12 @@ fn cache_cost_for_caching(
             // cache creation tokens are intentionally not charged here.
             calculate_tiered_cache_cost(cache_read_tokens, &tiered.tiers, tiered.bracket_pricing)
         }
+        CachingSupport::TieredWithWrites(tiered) => calculate_tiered_cache_cost_with_writes(
+            cache_creation_tokens,
+            cache_read_tokens,
+            &tiered.tiers,
+            tiered.bracket_pricing,
+        ),
     }
 }
 
@@ -2647,6 +2757,50 @@ fn calculate_tiered_cache_cost(tokens: u64, tiers: &[CachingTier], bracket_prici
     total_cost
 }
 
+fn calculate_tiered_cache_cost_with_writes(
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    tiers: &[CachingTierWithWrites],
+    bracket_pricing: bool,
+) -> f64 {
+    let context_tokens = cache_creation_tokens.saturating_add(cache_read_tokens);
+
+    if bracket_pricing {
+        return find_tier(context_tokens, tiers, |tier| tier.max_tokens)
+            .map(|tier| {
+                (cache_creation_tokens as f64 / 1_000_000.0) * tier.cache_write_per_1m
+                    + (cache_read_tokens as f64 / 1_000_000.0) * tier.cache_read_per_1m
+            })
+            .unwrap_or(0.0);
+    }
+
+    let mut total_cost = 0.0;
+    let mut remaining_creation = cache_creation_tokens;
+    let mut remaining_reads = cache_read_tokens;
+    let mut lower_bound = 0;
+
+    for tier in tiers {
+        if remaining_creation == 0 && remaining_reads == 0 {
+            break;
+        }
+
+        let upper_bound = tier.max_tokens.unwrap_or(u64::MAX);
+        let tier_width = upper_bound.saturating_sub(lower_bound);
+        let creation_in_tier = remaining_creation.min(tier_width);
+        let read_capacity = tier_width.saturating_sub(creation_in_tier);
+        let reads_in_tier = remaining_reads.min(read_capacity);
+
+        total_cost += (creation_in_tier as f64 / 1_000_000.0) * tier.cache_write_per_1m
+            + (reads_in_tier as f64 / 1_000_000.0) * tier.cache_read_per_1m;
+
+        remaining_creation = remaining_creation.saturating_sub(creation_in_tier);
+        remaining_reads = remaining_reads.saturating_sub(reads_in_tier);
+        lower_bound = upper_bound;
+    }
+
+    total_cost
+}
+
 fn find_tier<T, F>(tokens: u64, tiers: &[T], max_tokens: F) -> Option<&T>
 where
     F: Fn(&T) -> Option<u64>,
@@ -2695,6 +2849,14 @@ fn calculate_context_cost(
             // cache creation tokens are intentionally not charged here.
             find_tier(context_tokens, &tiered.tiers, |tier| tier.max_tokens)
                 .map(|tier| (cache_read_tokens as f64 / 1_000_000.0) * tier.cached_input_per_1m)
+                .unwrap_or(0.0)
+        }
+        CachingSupport::TieredWithWrites(tiered) => {
+            find_tier(context_tokens, &tiered.tiers, |tier| tier.max_tokens)
+                .map(|tier| {
+                    (cache_creation_tokens as f64 / 1_000_000.0) * tier.cache_write_per_1m
+                        + (cache_read_tokens as f64 / 1_000_000.0) * tier.cache_read_per_1m
+                })
                 .unwrap_or(0.0)
         }
         _ => cache_cost_for_caching(caching, cache_creation_tokens, cache_read_tokens),
@@ -3091,6 +3253,17 @@ mod tests {
     }
 
     #[test]
+    fn gpt_5_6_sol_uses_long_context_pricing_for_full_session() {
+        approx_eq(calculate_input_cost("gpt-5.6-sol", 1_000_000), 10.0);
+        approx_eq(calculate_output_cost("gpt-5.6-sol", 1_000_000), 45.0);
+        approx_eq(calculate_cache_cost("gpt-5.6-sol", 0, 1_000_000), 1.0);
+        approx_eq(
+            calculate_cache_cost("gpt-5.6-sol", 1_000_000, 1_000_000),
+            13.50,
+        );
+    }
+
+    #[test]
     fn gpt_5_6_pricing_is_available() {
         let sol_info = get_model_info("gpt-5.6-sol").expect("model should exist");
         let terra_info = get_model_info("gpt-5.6-terra").expect("model should exist");
@@ -3099,13 +3272,10 @@ mod tests {
         assert!(!terra_info.is_estimated);
         assert!(!luna_info.is_estimated);
 
-        approx_eq(calculate_input_cost("gpt-5.6-sol", 1_000_000), 5.0);
-        approx_eq(calculate_output_cost("gpt-5.6-sol", 1_000_000), 30.0);
-        approx_eq(calculate_cache_cost("gpt-5.6-sol", 0, 1_000_000), 0.50);
-        approx_eq(
-            calculate_cache_cost("gpt-5.6-sol", 1_000_000, 1_000_000),
-            6.75,
-        );
+        approx_eq(calculate_input_cost("gpt-5.6-sol", 200_000), 1.0);
+        approx_eq(calculate_output_cost("gpt-5.6-sol", 200_000), 6.0);
+        approx_eq(calculate_cache_cost("gpt-5.6-sol", 0, 200_000), 0.10);
+        approx_eq(calculate_cache_cost("gpt-5.6-sol", 100_000, 100_000), 0.675);
 
         approx_eq(calculate_input_cost("gpt-5.6-terra", 1_000_000), 2.0);
         approx_eq(calculate_output_cost("gpt-5.6-terra", 1_000_000), 12.0);
@@ -3213,23 +3383,20 @@ mod tests {
         let model_info = get_model_info("gpt-5.6-sol-ultra").expect("alias should resolve");
         assert!(!model_info.is_estimated);
 
-        approx_eq(calculate_input_cost("gpt-5.6", 1_000_000), 5.0);
-        approx_eq(calculate_output_cost("gpt-5.6", 1_000_000), 30.0);
-        approx_eq(
-            calculate_cache_cost("gpt-5.6-sol-ultra", 0, 1_000_000),
-            0.50,
-        );
+        approx_eq(calculate_input_cost("gpt-5.6", 1_000_000), 10.0);
+        approx_eq(calculate_output_cost("gpt-5.6", 1_000_000), 45.0);
+        approx_eq(calculate_cache_cost("gpt-5.6-sol-ultra", 0, 1_000_000), 1.0);
     }
 
     #[test]
     fn gpt_priority_pricing_is_available_for_supported_models() {
         approx_eq(
             calculate_input_cost_for_service_tier("gpt-5.6-sol", ServiceTier::Priority, 1_000_000),
-            10.0,
+            20.0,
         );
         approx_eq(
             calculate_output_cost_for_service_tier("gpt-5.6-sol", ServiceTier::Priority, 1_000_000),
-            60.0,
+            90.0,
         );
         approx_eq(
             calculate_cache_cost_for_service_tier(
@@ -3238,7 +3405,7 @@ mod tests {
                 0,
                 1_000_000,
             ),
-            1.0,
+            2.0,
         );
         approx_eq(
             calculate_cache_cost_for_service_tier(
@@ -3247,7 +3414,7 @@ mod tests {
                 1_000_000,
                 1_000_000,
             ),
-            13.50,
+            27.0,
         );
 
         approx_eq(
@@ -3370,15 +3537,15 @@ mod tests {
         for service_tier in [ServiceTier::Flex, ServiceTier::Batch] {
             approx_eq(
                 calculate_input_cost_for_service_tier("gpt-5.6-sol", service_tier, 1_000_000),
-                2.50,
+                5.0,
             );
             approx_eq(
                 calculate_output_cost_for_service_tier("gpt-5.6-sol", service_tier, 1_000_000),
-                15.0,
+                22.50,
             );
             approx_eq(
                 calculate_cache_cost_for_service_tier("gpt-5.6-sol", service_tier, 0, 1_000_000),
-                0.25,
+                0.50,
             );
             approx_eq(
                 calculate_cache_cost_for_service_tier(
@@ -3387,7 +3554,7 @@ mod tests {
                     1_000_000,
                     1_000_000,
                 ),
-                3.375,
+                6.75,
             );
 
             approx_eq(
