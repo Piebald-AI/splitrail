@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.2] - 2026-08-21
+- Fix GPT-5.6 Sol promotional pricing (#242) - @mike1858
+
 ## [3.7.1] - 2026-08-20
 - feat(analyzers): add DeepSeek Harness support (#236) - @jimyag
 - fix(tui): preserve subcent costs during aggregation (#237) - @jimyag
