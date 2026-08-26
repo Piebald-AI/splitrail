@@ -1,11 +1,12 @@
 //! Single-session contribution type for 1-file-1-session analyzers.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::SessionHash;
 use crate::types::{
-    CompactDate, ConversationMessage, MessageRole, ModelCounts, SessionPeriodAggregate, TuiStats,
-    intern_model,
+    CompactDate, ConversationMessage, MessageRole, ModelCounts, ModelStats, SessionPeriodAggregate,
+    TuiStats, intern_model,
 };
 
 // ============================================================================
@@ -23,6 +24,10 @@ pub struct SingleSessionContribution {
     pub date: CompactDate,
     /// Models used in this session with reference counts
     pub models: ModelCounts,
+    /// Stable local project identity used to group moved repositories and worktrees.
+    pub project_id: Option<Arc<str>>,
+    /// Local project path used to keep incremental TUI updates in the right project scope.
+    pub project_path: Option<Arc<str>>,
     /// Hash of conversation_hash for session lookup
     pub session_hash: SessionHash,
     /// Number of AI messages (for daily_stats.ai_messages)
@@ -60,9 +65,13 @@ impl SingleSessionContribution {
                 day.stats += message_stats;
 
                 if let Some(model) = &msg.model {
-                    let model = intern_model(model);
-                    models.increment(model, 1);
-                    day.models.increment(model, 1);
+                    let model_key = intern_model(model);
+                    models.increment(model_key, 1);
+                    day.models.increment(model_key, 1);
+                    day.model_stats
+                        .entry(model.to_string())
+                        .or_insert_with(|| ModelStats::new(model.to_string()))
+                        .add_message(&msg.stats);
                 }
             }
         }
@@ -71,6 +80,21 @@ impl SingleSessionContribution {
             stats,
             date: first_date,
             models,
+            project_id: messages
+                .iter()
+                .find_map(|message| {
+                    (!message.project_hash.is_empty()).then_some(message.project_hash.as_str())
+                })
+                .or_else(|| {
+                    messages
+                        .iter()
+                        .find_map(|message| message.project_path.as_deref())
+                })
+                .map(Arc::from),
+            project_path: messages
+                .iter()
+                .find_map(|message| message.project_path.as_deref())
+                .map(Arc::from),
             session_hash,
             ai_message_count,
             daily,

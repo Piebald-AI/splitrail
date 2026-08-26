@@ -31,6 +31,7 @@ fn make_test_message(conversation_hash: &str) -> ConversationMessage {
         application: Application::ClaudeCode,
         date: Utc::now(),
         project_hash: "project".to_string(),
+        project_path: None,
         conversation_hash: conversation_hash.to_string(),
         local_hash: None,
         global_hash: format!("global-{conversation_hash}"),

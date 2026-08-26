@@ -676,6 +676,7 @@ pub fn parse_jsonl_file<R: Read>(
     let mut fallback_session_name = None;
 
     let mut current_model = None;
+    let mut current_project_path = None;
 
     // Read entire file at once to avoid per-line allocations
     let mut buffer = Vec::new();
@@ -695,6 +696,9 @@ pub fn parse_jsonl_file<R: Read>(
                 summaries.insert(summary.leaf_uuid, summary.summary);
             }
             Ok(ClaudeCodeEntry::Message(entry)) => {
+                if let Some(cwd) = entry.cwd.as_deref().and_then(normalize_project_path) {
+                    current_project_path = Some(cwd);
+                }
                 // Track all UUIDs for summary linking, even if we skip the message
                 all_uuids.push(entry.uuid.clone());
 
@@ -726,6 +730,7 @@ pub fn parse_jsonl_file<R: Read>(
                         model: model.clone(),
                         date: timestamp,
                         project_hash: project_hash.to_string(),
+                        project_path: current_project_path.clone(),
                         conversation_hash: conversation_hash.to_string(),
                         stats: Stats::default(), // Will be filled below
                         role: match role.as_deref() {
@@ -826,6 +831,16 @@ pub fn parse_jsonl_file<R: Read>(
     }
 
     Ok((messages, summaries, all_uuids, fallback_session_name))
+}
+
+fn normalize_project_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized: PathBuf = Path::new(trimmed).components().collect();
+    Some(normalized.to_string_lossy().into_owned())
 }
 
 // Type alias for token fingerprint

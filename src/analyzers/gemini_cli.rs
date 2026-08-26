@@ -335,6 +335,7 @@ fn messages_from_session(
                     date: timestamp,
                     application: Application::GeminiCli,
                     project_hash: project_hash.clone(),
+                    project_path: None,
                     local_hash: None,
                     global_hash: hash_text(&format!(
                         "{}_{}",
@@ -380,6 +381,7 @@ fn messages_from_session(
                     )),
                     date: timestamp,
                     project_hash: project_hash.clone(),
+                    project_path: None,
                     conversation_hash: conversation_hash.clone(),
                     stats,
                     role: MessageRole::Assistant,

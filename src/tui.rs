@@ -32,8 +32,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Write, stdout};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -271,6 +272,8 @@ fn sessions_for_period(
                 analyzer_name: Arc::clone(&session.analyzer_name),
                 stats: TuiStats::default(),
                 models: ModelCounts::new(),
+                project_id: session.project_id.clone(),
+                project_path: session.project_path.clone(),
                 session_name: session.session_name.clone(),
                 date: session.date,
                 daily: BTreeMap::new(),
@@ -470,6 +473,243 @@ fn filter_stats_by_model(
         .collect()
 }
 
+#[derive(Debug, Clone, Default)]
+struct ProjectSummary {
+    ids: BTreeSet<String>,
+    path: String,
+    paths: BTreeSet<String>,
+    name: String,
+    stats: TuiStats,
+    sessions: u64,
+    tools: BTreeMap<String, u32>,
+    models: BTreeMap<String, u32>,
+}
+
+impl ProjectSummary {
+    fn primary_id(&self) -> &str {
+        self.ids
+            .iter()
+            .next()
+            .map(String::as_str)
+            .unwrap_or_default()
+    }
+
+    fn includes_session(&self, session: &SessionAggregate) -> bool {
+        session
+            .project_id
+            .as_deref()
+            .is_some_and(|id| self.ids.contains(id))
+            || session
+                .project_path
+                .as_deref()
+                .is_some_and(|path| self.paths.contains(path))
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.ids.extend(other.ids);
+        self.paths.extend(other.paths);
+        self.stats += other.stats;
+        self.sessions = self.sessions.saturating_add(other.sessions);
+        for (tool, count) in other.tools {
+            *self.tools.entry(tool).or_insert(0) += count;
+        }
+        for (model, count) in other.models {
+            *self.models.entry(model).or_insert(0) += count;
+        }
+        self.prefer_path(&other.path);
+    }
+
+    fn prefer_path(&mut self, candidate: &str) {
+        let current_exists = Path::new(&self.path).exists();
+        let candidate_exists = Path::new(candidate).exists();
+        if (candidate_exists && !current_exists)
+            || (candidate_exists == current_exists && candidate < self.path.as_str())
+        {
+            self.path = candidate.to_string();
+            self.name = project_display_name(candidate);
+        }
+    }
+
+    fn total_tokens(&self) -> u64 {
+        self.stats
+            .input_tokens
+            .saturating_add(self.stats.output_tokens)
+            .saturating_add(self.stats.cached_tokens)
+    }
+
+    fn matches(&self, filter: &str) -> bool {
+        let filter = filter.trim().to_lowercase();
+        filter.is_empty()
+            || self.name.to_lowercase().contains(&filter)
+            || self.path.to_lowercase().contains(&filter)
+            || self
+                .paths
+                .iter()
+                .any(|path| path.to_lowercase().contains(&filter))
+            || self
+                .tools
+                .keys()
+                .any(|tool| tool.to_lowercase().contains(&filter))
+            || self
+                .models
+                .keys()
+                .any(|model| model.to_lowercase().contains(&filter))
+    }
+}
+
+fn project_display_name(path: &str) -> String {
+    let path = Path::new(path);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.to_str().unwrap_or_default());
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|parent| parent.to_str())
+        .filter(|parent| !parent.is_empty())
+        .map(|parent| format!("{parent}/{name}"))
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn collect_project_summaries(stats: &[SharedAnalyzerView]) -> Vec<ProjectSummary> {
+    let mut projects: Vec<ProjectSummary> = Vec::new();
+
+    for stats in stats {
+        let view = stats.read();
+        for session in &view.session_aggregates {
+            let Some(path) = session.project_path.as_deref() else {
+                continue;
+            };
+            let project_id = session.project_id.as_deref().unwrap_or(path);
+            let mut matching: Vec<_> = projects
+                .iter()
+                .enumerate()
+                .filter_map(|(index, project)| {
+                    (project.ids.contains(project_id) || project.paths.contains(path))
+                        .then_some(index)
+                })
+                .collect();
+            let mut project = ProjectSummary {
+                path: path.to_string(),
+                name: project_display_name(path),
+                ..Default::default()
+            };
+            for index in matching.drain(..).rev() {
+                project.merge(projects.remove(index));
+            }
+            project.ids.insert(project_id.to_string());
+            project.paths.insert(path.to_string());
+            project.prefer_path(path);
+            project.stats += session.stats;
+            project.sessions = project.sessions.saturating_add(1);
+            *project
+                .tools
+                .entry(view.analyzer_name.to_string())
+                .or_insert(0) += 1;
+            for &(model, count) in session.models.iter() {
+                *project
+                    .models
+                    .entry(resolve_model(model).to_string())
+                    .or_insert(0) += count;
+            }
+            projects.push(project);
+        }
+    }
+
+    let mut display_name_counts = BTreeMap::new();
+    for project in &projects {
+        *display_name_counts
+            .entry(project.name.clone())
+            .or_insert(0u32) += 1;
+    }
+    for project in &mut projects {
+        if display_name_counts.get(&project.name).copied().unwrap_or(0) > 1 {
+            let hash = crate::utils::hash_text(&project.path);
+            project.name = format!("{} [{}]", project.name, &hash[..6]);
+        }
+    }
+    projects.sort_by(|left, right| {
+        right
+            .total_tokens()
+            .cmp(&left.total_tokens())
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    projects
+}
+
+fn filter_analyzer_view_by_project(
+    view: &AnalyzerStatsView,
+    project: &ProjectSummary,
+) -> AnalyzerStatsView {
+    let session_aggregates: Vec<_> = view
+        .session_aggregates
+        .iter()
+        .filter(|session| project.includes_session(session))
+        .cloned()
+        .collect();
+    let mut daily_stats: BTreeMap<String, DailyStats> = BTreeMap::new();
+
+    for session in &session_aggregates {
+        for (date, activity) in &session.daily {
+            let day = daily_stats
+                .entry(date.to_string())
+                .or_insert_with(|| DailyStats {
+                    date: *date,
+                    ..Default::default()
+                });
+            day.user_messages = day.user_messages.saturating_add(
+                activity
+                    .message_count
+                    .saturating_sub(activity.ai_message_count),
+            );
+            day.ai_messages = day.ai_messages.saturating_add(activity.ai_message_count);
+            day.stats += activity.stats;
+            if *date == session.date {
+                day.conversations = day.conversations.saturating_add(1);
+            }
+            for &(model, count) in activity.models.iter() {
+                *day.models
+                    .entry(resolve_model(model).to_string())
+                    .or_insert(0) += count;
+            }
+            for (model, stats) in &activity.model_stats {
+                day.model_stats
+                    .entry(model.clone())
+                    .or_insert_with(|| ModelStats::new(model.clone()))
+                    .add_model_stats(stats);
+            }
+        }
+    }
+
+    AnalyzerStatsView {
+        daily_stats,
+        num_conversations: session_aggregates.len() as u64,
+        session_aggregates,
+        analyzer_name: Arc::clone(&view.analyzer_name),
+    }
+}
+
+fn apply_stats_filters(
+    stats: &[SharedAnalyzerView],
+    project: Option<&ProjectSummary>,
+    model_filter: &str,
+) -> Vec<SharedAnalyzerView> {
+    let project_filtered = match project {
+        Some(project) => stats
+            .iter()
+            .filter_map(|stats| {
+                let filtered = filter_analyzer_view_by_project(&stats.read(), project);
+                (!filtered.session_aggregates.is_empty())
+                    .then(|| Arc::new(parking_lot::RwLock::new(filtered)))
+            })
+            .collect(),
+        None => stats.to_vec(),
+    };
+    filter_stats_by_model(&project_filtered, model_filter)
+}
+
 fn clamp_table_selection(table_state: &mut TableState, total_rows: usize) {
     if total_rows == 0 {
         table_state.select(None);
@@ -576,6 +816,7 @@ struct UiState<'a> {
     date_jump_buffer: &'a str,
     model_filter_active: bool,
     model_filter: &'a str,
+    project_name: Option<&'a str>,
     sort_reversed: bool,
     hide_empty_periods: bool,
     show_totals: bool,
@@ -584,6 +825,15 @@ struct UiState<'a> {
     hidden_cols: &'a std::collections::HashSet<String>,
     color_costs: bool,
     show_header: bool,
+}
+
+struct ProjectBrowserUiState<'a> {
+    table_state: &'a mut TableState,
+    filter: &'a str,
+    filter_active: bool,
+    accent: Color,
+    show_header: bool,
+    quit_pending: bool,
 }
 
 /// Build the tab data shown in the TUI, prepending a synthetic "All Tools"
@@ -735,6 +985,13 @@ async fn run_app(
     let mut model_filter_active = false;
     let mut model_filter = String::new();
     let mut model_filter_before_edit = String::new();
+    let mut project_browser_active = false;
+    let mut project_filter_active = false;
+    let mut project_filter = String::new();
+    let mut project_filter_before_edit = String::new();
+    let mut selected_project: Option<ProjectSummary> = None;
+    let mut project_table_state = TableState::default();
+    project_table_state.select(Some(0));
     let mut sort_reversed = tui_config.reverse_sort_default;
     let mut hide_empty_periods = tui_config.hide_empty_periods;
     let mut show_totals = true;
@@ -780,7 +1037,14 @@ async fn run_app(
         .filter(|stats| has_data_shared(stats))
         .cloned()
         .collect();
-    let mut filtered_stats = filter_stats_by_model(&available_stats, &model_filter);
+    let mut project_summaries = collect_project_summaries(&available_stats);
+    let mut visible_projects: Vec<ProjectSummary> = project_summaries
+        .iter()
+        .filter(|project| project.matches(&project_filter))
+        .cloned()
+        .collect();
+    let mut filtered_stats =
+        apply_stats_filters(&available_stats, selected_project.as_ref(), &model_filter);
     let mut display_stats = build_display_stats(&filtered_stats);
 
     // Open on the configured default tab (matched by tool name; empty or
@@ -817,7 +1081,15 @@ async fn run_app(
                 .filter(|stats| has_data_shared(stats))
                 .cloned()
                 .collect();
-            filtered_stats = filter_stats_by_model(&available_stats, &model_filter);
+            project_summaries = collect_project_summaries(&available_stats);
+            visible_projects = project_summaries
+                .iter()
+                .filter(|project| project.matches(&project_filter))
+                .cloned()
+                .collect();
+            clamp_table_selection(&mut project_table_state, visible_projects.len());
+            filtered_stats =
+                apply_stats_filters(&available_stats, selected_project.as_ref(), &model_filter);
             display_stats = build_display_stats(&filtered_stats);
             update_table_states(&mut table_states, &current_stats, selected_tab);
             update_window_offsets(&mut session_window_offsets, &table_states.len());
@@ -862,6 +1134,26 @@ async fn run_app(
         // Only redraw if something has changed
         if needs_redraw {
             terminal.draw(|frame| {
+                if project_browser_active {
+                    let mut project_ui_state = ProjectBrowserUiState {
+                        table_state: &mut project_table_state,
+                        filter: &project_filter,
+                        filter_active: project_filter_active,
+                        accent,
+                        show_header,
+                        quit_pending,
+                    };
+                    draw_project_browser(
+                        frame,
+                        &visible_projects,
+                        format_options,
+                        &mut project_ui_state,
+                    );
+                    return;
+                }
+                let selected_project_name = selected_project
+                    .as_ref()
+                    .map(|project| project.name.as_str());
                 let mut ui_state = UiState {
                     table_states: &mut table_states,
                     _scroll_offset: *scroll_offset,
@@ -874,6 +1166,7 @@ async fn run_app(
                     date_jump_buffer: &date_jump_buffer,
                     model_filter_active,
                     model_filter: &model_filter,
+                    project_name: selected_project_name,
                     sort_reversed,
                     hide_empty_periods,
                     show_totals,
@@ -914,7 +1207,10 @@ async fn run_app(
 
             // Handle quitting. Esc is intentionally *not* a quit key; it acts as
             // a context-aware "go back"/cancel below.
-            if !model_filter_active && matches!(key.code, KeyCode::Char('q')) {
+            if !model_filter_active
+                && !project_filter_active
+                && matches!(key.code, KeyCode::Char('q'))
+            {
                 if tui_config.confirm_quit && !quit_pending {
                     quit_pending = true;
                     needs_redraw = true;
@@ -929,7 +1225,10 @@ async fn run_app(
             }
 
             // Handle update notification dismissal
-            if !model_filter_active && matches!(key.code, KeyCode::Char('u')) {
+            if !model_filter_active
+                && !project_browser_active
+                && matches!(key.code, KeyCode::Char('u'))
+            {
                 let mut status = update_status.lock();
                 if matches!(
                     *status,
@@ -938,6 +1237,113 @@ async fn run_app(
                     *status = crate::version_check::UpdateStatus::Dismissed;
                     needs_redraw = true;
                 }
+            }
+
+            if project_filter_active {
+                let mut filter_changed = false;
+                match key.code {
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        project_filter.clear();
+                        filter_changed = true;
+                    }
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        project_filter.push(c);
+                        filter_changed = true;
+                    }
+                    KeyCode::Backspace => {
+                        project_filter.pop();
+                        filter_changed = true;
+                    }
+                    KeyCode::Enter => {
+                        project_filter = project_filter.trim().to_string();
+                        project_filter_active = false;
+                        filter_changed = true;
+                    }
+                    KeyCode::Esc => {
+                        project_filter.clone_from(&project_filter_before_edit);
+                        project_filter_active = false;
+                        filter_changed = true;
+                    }
+                    _ => {}
+                }
+
+                if filter_changed {
+                    visible_projects = project_summaries
+                        .iter()
+                        .filter(|project| project.matches(&project_filter))
+                        .cloned()
+                        .collect();
+                    clamp_table_selection(&mut project_table_state, visible_projects.len());
+                }
+                needs_redraw = true;
+                continue;
+            }
+
+            if project_browser_active {
+                match key.code {
+                    KeyCode::Char('/') => {
+                        project_filter_before_edit.clone_from(&project_filter);
+                        project_filter_active = true;
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        project_filter.clear();
+                        visible_projects = project_summaries.clone();
+                        clamp_table_selection(&mut project_table_state, visible_projects.len());
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        let selected = project_table_state.selected().unwrap_or(0);
+                        if selected + 1 < visible_projects.len() {
+                            project_table_state.select(Some(selected + 1));
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        let selected = project_table_state.selected().unwrap_or(0);
+                        project_table_state.select(Some(selected.saturating_sub(1)));
+                    }
+                    KeyCode::Home => project_table_state.select(Some(0)),
+                    KeyCode::End => {
+                        project_table_state.select(visible_projects.len().checked_sub(1))
+                    }
+                    KeyCode::Enter => {
+                        if let Some(project) = project_table_state
+                            .selected()
+                            .and_then(|index| visible_projects.get(index))
+                        {
+                            selected_project = Some(project.clone());
+                            filtered_stats = apply_stats_filters(
+                                &available_stats,
+                                selected_project.as_ref(),
+                                &model_filter,
+                            );
+                            display_stats = build_display_stats(&filtered_stats);
+                            *selected_tab = 0;
+                            *stats_view_mode = StatsViewMode::Aggregate;
+                            table_states
+                                .iter_mut()
+                                .for_each(|state| state.select(Some(0)));
+                            session_window_offsets.fill(0);
+                            session_period_filters.fill(None);
+                            project_browser_active = false;
+                        }
+                    }
+                    KeyCode::Char('p') => project_browser_active = false,
+                    KeyCode::Esc => {
+                        project_browser_active = false;
+                        if selected_project.take().is_some() {
+                            filtered_stats =
+                                apply_stats_filters(&available_stats, None, &model_filter);
+                            display_stats = build_display_stats(&filtered_stats);
+                            *selected_tab = 0;
+                        }
+                    }
+                    _ => {}
+                }
+                needs_redraw = true;
+                continue;
             }
 
             if model_filter_active {
@@ -973,10 +1379,27 @@ async fn run_app(
                 }
 
                 if filter_changed {
-                    filtered_stats = filter_stats_by_model(&available_stats, &model_filter);
+                    filtered_stats = apply_stats_filters(
+                        &available_stats,
+                        selected_project.as_ref(),
+                        &model_filter,
+                    );
                     display_stats = build_display_stats(&filtered_stats);
                     session_window_offsets.fill(0);
                 }
+                needs_redraw = true;
+                continue;
+            }
+
+            if matches!(key.code, KeyCode::Char('p')) {
+                project_browser_active = true;
+                let selected_index = selected_project.as_ref().and_then(|selected| {
+                    visible_projects
+                        .iter()
+                        .position(|project| project.primary_id() == selected.primary_id())
+                });
+                project_table_state
+                    .select(selected_index.or_else(|| (!visible_projects.is_empty()).then_some(0)));
                 needs_redraw = true;
                 continue;
             }
@@ -1363,6 +1786,9 @@ async fn run_app(
                         date_jump_active = false;
                         date_jump_buffer.clear();
                         needs_redraw = true;
+                    } else if selected_project.is_some() {
+                        project_browser_active = true;
+                        needs_redraw = true;
                     }
                 }
                 KeyCode::Enter => {
@@ -1633,11 +2059,11 @@ fn draw_ui(
                     };
 
                     format!(
-                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q to quit"
+                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • p for projects • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q to quit"
                     )
                 }
                 StatsViewMode::Session => {
-                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • m to cycle day/week/month/year • Esc or Ctrl+T for aggregate view • q to quit".to_string()
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • p for projects • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • m to cycle day/week/month/year • Esc or Ctrl+T for aggregate view • q to quit".to_string()
                 }
             };
 
@@ -1662,6 +2088,12 @@ fn draw_ui(
                 format!("{} • * = estimated pricing", base_help_text)
             } else {
                 base_help_text
+            };
+
+            let help_text = if let Some(project_name) = ui_state.project_name {
+                format!("Project: {project_name} • {help_text}")
+            } else {
+                help_text
             };
 
             let help_style = if ui_state.quit_pending {
@@ -1744,6 +2176,115 @@ fn draw_ui(
             Paragraph::new("Press q to quit").style(Style::default().add_modifier(Modifier::DIM));
         frame.render_widget(help, chunks[2]);
     }
+}
+
+fn draw_project_browser(
+    frame: &mut Frame,
+    projects: &[ProjectSummary],
+    format_options: &NumberFormatOptions,
+    ui_state: &mut ProjectBrowserUiState,
+) {
+    let chunks = Layout::vertical([
+        Constraint::Length(if ui_state.show_header { 3 } else { 0 }),
+        Constraint::Min(3),
+        Constraint::Length(2),
+    ])
+    .split(frame.area());
+
+    if ui_state.show_header {
+        frame.render_widget(
+            Paragraph::new(Text::from(vec![
+                Line::styled(
+                    "PROJECT ACTIVITY",
+                    Style::default()
+                        .fg(ui_state.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::styled(
+                    "================",
+                    Style::default()
+                        .fg(ui_state.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            chunks[0],
+        );
+    }
+
+    if projects.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matching projects found")
+                .style(Style::default().add_modifier(Modifier::DIM)),
+            chunks[1],
+        );
+    } else {
+        let rows = projects.iter().map(|project| {
+            let tools = project.tools.keys().cloned().collect::<Vec<_>>().join(", ");
+            let models = project
+                .models
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            Row::new(vec![
+                Cell::new(project.name.clone()),
+                Cell::new(format_number_fit(
+                    project.total_tokens(),
+                    format_options,
+                    11,
+                )),
+                Cell::new(format!(
+                    "{}{:.prec$}",
+                    format_options.currency_symbol,
+                    project.stats.cost(),
+                    prec = format_options.cost_decimal_places
+                )),
+                Cell::new(format_number(project.sessions, format_options)),
+                Cell::new(tools),
+                Cell::new(models),
+            ])
+        });
+        let header = Row::new(["Project", "Tokens", "Cost", "Sessions", "Tools", "Models"])
+            .style(Style::default().add_modifier(Modifier::BOLD));
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(24),
+                Constraint::Length(11),
+                Constraint::Length(9),
+                Constraint::Length(8),
+                Constraint::Length(12),
+                Constraint::Min(12),
+            ],
+        )
+        .header(header)
+        .highlight_symbol("→ ")
+        .row_highlight_style(Style::default().fg(Color::Black).bg(ui_state.accent));
+        frame.render_stateful_widget(table, chunks[1], ui_state.table_state);
+    }
+
+    let help = if ui_state.filter_active {
+        format!(
+            "Project filter: {}_  •  Enter to apply  •  Esc to cancel",
+            ui_state.filter
+        )
+    } else if ui_state.quit_pending {
+        "Quit splitrail?  Press q again to confirm  •  any other key to cancel".to_string()
+    } else if ui_state.filter.is_empty() {
+        "↑/↓ or j/k to navigate • Enter to open project • / to filter • Esc to return • q to quit"
+            .to_string()
+    } else {
+        format!(
+            "Project filter: {}  •  ↑/↓ or j/k to navigate • Enter to open • / to edit • Ctrl+U to clear • Esc to return",
+            ui_state.filter
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(help)
+            .style(Style::default().add_modifier(Modifier::DIM))
+            .wrap(ratatui::widgets::Wrap { trim: true }),
+        chunks[2],
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -35,6 +35,13 @@ fn merge_daily_add(
         for &(model, count) in activity.models.iter() {
             daily.models.increment(model, count);
         }
+        for (model, stats) in &activity.model_stats {
+            daily
+                .model_stats
+                .entry(model.clone())
+                .or_insert_with(|| crate::types::ModelStats::new(model.clone()))
+                .add_model_stats(stats);
+        }
     }
 }
 
@@ -52,6 +59,12 @@ fn merge_daily_subtract(
             for &(model, count) in activity.models.iter() {
                 daily.models.decrement(model, count);
             }
+            for (model, stats) in &activity.model_stats {
+                if let Some(existing) = daily.model_stats.get_mut(model) {
+                    existing.sub_model_stats(stats);
+                }
+            }
+            daily.model_stats.retain(|_, stats| stats.message_count > 0);
         }
     }
     dst.retain(|_, activity| activity.message_count > 0);
@@ -328,6 +341,19 @@ impl AnalyzerStatsView {
                     });
             day_stats.ai_messages += activity.ai_message_count;
             day_stats.stats += activity.stats;
+            for &(model, count) in activity.models.iter() {
+                *day_stats
+                    .models
+                    .entry(crate::types::resolve_model(model).to_string())
+                    .or_insert(0) += count;
+            }
+            for (model, stats) in &activity.model_stats {
+                day_stats
+                    .model_stats
+                    .entry(model.clone())
+                    .or_insert_with(|| crate::types::ModelStats::new(model.clone()))
+                    .add_model_stats(stats);
+            }
             if *date != contrib.date {
                 day_stats.conversations = day_stats.conversations.saturating_add(1);
             }
@@ -337,6 +363,8 @@ impl AnalyzerStatsView {
         if let Some(existing) = self.session_aggregates.iter_mut().find(|s| {
             SingleMessageContribution::hash_session_id(&s.session_id) == contrib.session_hash
         }) {
+            existing.project_id = contrib.project_id.clone();
+            existing.project_path = contrib.project_path.clone();
             existing.stats += contrib.stats;
             for &(model, count) in contrib.models.iter() {
                 existing.models.increment(model, count);
@@ -355,6 +383,21 @@ impl AnalyzerStatsView {
                     .ai_messages
                     .saturating_sub(activity.ai_message_count);
                 day_stats.stats -= activity.stats;
+                for &(model, count) in activity.models.iter() {
+                    let model = crate::types::resolve_model(model);
+                    if let Some(existing) = day_stats.models.get_mut(model) {
+                        *existing = existing.saturating_sub(count);
+                    }
+                }
+                day_stats.models.retain(|_, count| *count > 0);
+                for (model, stats) in &activity.model_stats {
+                    if let Some(existing) = day_stats.model_stats.get_mut(model) {
+                        existing.sub_model_stats(stats);
+                    }
+                }
+                day_stats
+                    .model_stats
+                    .retain(|_, stats| stats.message_count > 0);
                 if *date != contrib.date {
                     day_stats.conversations = day_stats.conversations.saturating_sub(1);
                 }

@@ -308,6 +308,7 @@ fn convert_messages(
                 application: Application::Piebald,
                 date,
                 project_hash,
+                project_path: None,
                 conversation_hash,
                 local_hash: Some(msg.id.to_string()),
                 global_hash,

@@ -338,6 +338,9 @@ pub(crate) fn parse_codex_cli_jsonl_file(
     let mut current_tool_call_ids: HashSet<String> = HashSet::with_capacity(20);
     let mut session_name: Option<String> = None;
     let mut fallback_session_name: Option<String> = None;
+    let mut project_path: Option<String> = None;
+    let mut project_hash = String::new();
+    let mut has_repository_project_id = false;
 
     for line in buffer.split(|&b| b == b'\n') {
         // Skip empty lines
@@ -356,11 +359,24 @@ pub(crate) fn parse_codex_cli_jsonl_file(
             "session_meta" => {
                 // Try to parse the payload as session metadata
                 let mut payload_bytes = simd_json::to_vec(&wrapper.payload)?;
-                if let Ok(_session_meta) =
+                if let Ok(session_meta) =
                     simd_json::from_slice::<CodexCliSessionMeta>(&mut payload_bytes)
                 {
                     session_model =
                         extract_model_from_value(&wrapper.payload).map(SessionModel::explicit);
+                    project_path = session_meta.cwd.as_deref().and_then(normalize_project_path);
+                    if let Some(repository_url) = session_meta
+                        .git
+                        .as_ref()
+                        .and_then(|git| git.repository_url.as_deref())
+                        .map(str::trim)
+                        .filter(|url| !url.is_empty())
+                    {
+                        project_hash = hash_text(repository_url);
+                        has_repository_project_id = true;
+                    } else if let Some(path) = project_path.as_deref() {
+                        project_hash = hash_text(path);
+                    }
                 }
             }
             "turn_context" => {
@@ -368,6 +384,12 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                 if let Ok(context) =
                     simd_json::from_slice::<CodexCliTurnContext>(&mut payload_bytes)
                 {
+                    if let Some(cwd) = context.cwd.as_deref().and_then(normalize_project_path) {
+                        if !has_repository_project_id {
+                            project_hash = hash_text(&cwd);
+                        }
+                        project_path = Some(cwd);
+                    }
                     if let Some(model_name) = extract_model_from_value(&wrapper.payload) {
                         session_model = Some(SessionModel::explicit(model_name));
                     }
@@ -484,7 +506,8 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 local_hash: None,
                                 conversation_hash: hash_text(&session_path_str),
                                 application: Application::CodexCli,
-                                project_hash: "".to_string(),
+                                project_hash: project_hash.clone(),
+                                project_path: project_path.clone(),
                                 model: None,
                                 stats: Stats::default(),
                                 role: MessageRole::User,
@@ -521,7 +544,8 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 local_hash: None,
                                 conversation_hash: hash_text(&session_path_str),
                                 date: wrapper.timestamp,
-                                project_hash: "".to_string(),
+                                project_hash: project_hash.clone(),
+                                project_path: project_path.clone(),
                                 stats: Stats::default(),
                                 role: MessageRole::Assistant,
                                 uuid: None,
@@ -589,7 +613,8 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 local_hash: None,
                                 conversation_hash: hash_text(&session_path_str),
                                 date: wrapper.timestamp,
-                                project_hash: "".to_string(),
+                                project_hash: project_hash.clone(),
+                                project_path: project_path.clone(),
                                 stats,
                                 role: MessageRole::Assistant,
                                 uuid: None,
@@ -612,6 +637,16 @@ pub(crate) fn parse_codex_cli_jsonl_file(
     // Return both messages and the detected session model name
     let detected_model = session_model.map(|m| m.name);
     Ok((entries, detected_model))
+}
+
+fn normalize_project_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized: PathBuf = Path::new(trimmed).components().collect();
+    Some(normalized.to_string_lossy().into_owned())
 }
 
 fn calculate_cost_from_tokens(

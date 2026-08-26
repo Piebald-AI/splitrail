@@ -292,6 +292,7 @@ mod tests {
             application: Application::ClaudeCode,
             date: Utc.with_ymd_and_hms(2025, 8, 2, 14, 5, 17).unwrap(),
             project_hash: "project".to_string(),
+            project_path: None,
             conversation_hash: conversation.to_string(),
             local_hash: Some(local_hash.to_string()),
             global_hash: hash.to_string(),

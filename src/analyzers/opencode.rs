@@ -369,6 +369,7 @@ pub(crate) fn build_conversation_message(
         application,
         date,
         project_hash,
+        project_path: None,
         conversation_hash,
         local_hash,
         global_hash,

@@ -199,6 +199,45 @@ fn test_parse_codex_cli_new_wrapper_format() {
     assert_eq!(assistant_msg.stats.output_tokens, 14); // Codex output_tokens already include reasoning
     assert_eq!(assistant_msg.stats.reasoning_tokens, 0);
     assert_eq!(assistant_msg.stats.cached_tokens, 2560);
+    assert_eq!(assistant_msg.project_path.as_deref(), Some("/home/test"));
+    assert_eq!(
+        assistant_msg.project_hash,
+        crate::utils::hash_text("https://github.com/test/repo.git")
+    );
+    let serialized = simd_json::to_string(assistant_msg).unwrap();
+    assert!(!serialized.contains("projectPath"));
+}
+
+#[test]
+fn test_codex_cli_turn_context_updates_project_path() {
+    let mut temp_file = NamedTempFile::new().unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:00:00.000Z","type":"session_meta","payload":{{"id":"session","timestamp":"2025-09-18T00:00:00.000Z","cwd":"/home/test/old"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:00:01.000Z","type":"turn_context","payload":{{"cwd":"/home/test/new/./project","model":"gpt-5-codex"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2025-09-18T00:00:02.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Hello"}}]}}}}"#
+    )
+    .unwrap();
+
+    let (messages, _) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].project_path.as_deref(),
+        Some("/home/test/new/project")
+    );
+    assert_eq!(
+        messages[0].project_hash,
+        crate::utils::hash_text("/home/test/new/project")
+    );
 }
 
 #[test]

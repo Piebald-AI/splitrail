@@ -643,6 +643,7 @@ impl Analyzer for AntigravityCliAnalyzer {
                 application: Application::AntigravityCli,
                 date: ts,
                 project_hash: "".to_string(),
+                project_path: None,
                 conversation_hash: conversation_hash.clone(),
                 local_hash: None,
                 global_hash,

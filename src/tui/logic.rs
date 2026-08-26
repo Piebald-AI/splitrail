@@ -415,6 +415,10 @@ pub fn aggregate_sessions_from_messages(
                 analyzer_name: Arc::clone(&analyzer_name),
                 stats: TuiStats::default(),
                 models: ModelCounts::new(),
+                project_id: (!msg.project_hash.is_empty())
+                    .then(|| Arc::from(msg.project_hash.as_str()))
+                    .or_else(|| msg.project_path.as_deref().map(Arc::from)),
+                project_path: msg.project_path.as_deref().map(Arc::from),
                 session_name: None,
                 date: CompactDate::from_local(&msg.date),
                 daily: BTreeMap::new(),
@@ -436,9 +440,14 @@ pub fn aggregate_sessions_from_messages(
             accumulate_tui_stats(&mut daily.stats, &msg.stats);
 
             if let Some(model) = &msg.model {
-                let model = intern_model(model);
-                entry.models.increment(model, 1);
-                daily.models.increment(model, 1);
+                let model_key = intern_model(model);
+                entry.models.increment(model_key, 1);
+                daily.models.increment(model_key, 1);
+                daily
+                    .model_stats
+                    .entry(model.to_string())
+                    .or_insert_with(|| crate::types::ModelStats::new(model.to_string()))
+                    .add_message(&msg.stats);
             }
         }
 
