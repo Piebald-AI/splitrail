@@ -70,6 +70,46 @@ fn session_detail_includes_sessions_active_after_their_start_date() {
     assert_eq!(filtered[0].stats.input_tokens, 20);
 }
 
+#[test]
+fn aggregate_sessions_splits_conversation_when_project_changes() {
+    let make_message = |project_hash: &str, project_path: &str, input_tokens| ConversationMessage {
+        application: Application::CodexCli,
+        date: Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap(),
+        project_hash: project_hash.to_string(),
+        project_path: Some(project_path.to_string()),
+        conversation_hash: "shared-conversation".into(),
+        local_hash: None,
+        global_hash: format!("{project_hash}-message"),
+        model: Some("gpt-5.6-sol".into()),
+        stats: Stats {
+            input_tokens,
+            ..Default::default()
+        },
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: None,
+    };
+    let messages = [
+        make_message("project-a", "/work/a", 10),
+        make_message("project-b", "/work/b", 20),
+    ];
+
+    let sessions = aggregate_sessions_from_messages(&messages, Arc::from("Codex CLI"));
+
+    assert_eq!(sessions.len(), 2);
+    assert!(
+        sessions
+            .iter()
+            .all(|session| session.session_id == "shared-conversation")
+    );
+    assert!(sessions.iter().any(|session| {
+        session.project_id.as_deref() == Some("project-a") && session.stats.input_tokens == 10
+    }));
+    assert!(sessions.iter().any(|session| {
+        session.project_id.as_deref() == Some("project-b") && session.stats.input_tokens == 20
+    }));
+}
+
 // ============================================================================
 // CONFIG-DRIVEN APPEARANCE TESTS
 // ============================================================================

@@ -328,6 +328,7 @@ fn push_copilot_cli_user_message(
     user_index: &mut usize,
     conversation_hash: &str,
     project_hash: &str,
+    project_path: Option<&str>,
     session_name: Option<&String>,
 ) {
     let user_local_hash = format!("{conversation_hash}-cli-user-{}", *user_index);
@@ -341,7 +342,7 @@ fn push_copilot_cli_user_message(
         application: Application::CopilotCli,
         date: pending_user.date,
         project_hash: project_hash.to_string(),
-        project_path: None,
+        project_path: project_path.map(str::to_string),
         conversation_hash: conversation_hash.to_string(),
         local_hash: Some(user_local_hash),
         global_hash: user_global_hash,
@@ -553,6 +554,7 @@ fn flush_copilot_cli_turn(
     assistant_index: &mut usize,
     conversation_hash: &str,
     project_hash: &str,
+    project_path: Option<&str>,
     session_name: Option<&String>,
 ) {
     let Some(turn) = current_turn.take() else {
@@ -572,6 +574,7 @@ fn flush_copilot_cli_turn(
             user_index,
             conversation_hash,
             project_hash,
+            project_path,
             session_name,
         );
         pending_user.emitted = true;
@@ -615,7 +618,7 @@ fn flush_copilot_cli_turn(
             application: Application::CopilotCli,
             date: assistant_date,
             project_hash: project_hash.to_string(),
-            project_path: None,
+            project_path: project_path.map(str::to_string),
             conversation_hash: conversation_hash.to_string(),
             local_hash: Some(assistant_local_hash),
             global_hash: assistant_global_hash,
@@ -721,6 +724,7 @@ pub(crate) fn parse_copilot_cli_session_file(
                     &mut assistant_index,
                     &conversation_hash,
                     &project_hash,
+                    workspace_path.as_deref(),
                     session_name.as_ref(),
                 );
 
@@ -733,6 +737,7 @@ pub(crate) fn parse_copilot_cli_session_file(
                         &mut user_index,
                         &conversation_hash,
                         &project_hash,
+                        workspace_path.as_deref(),
                         session_name.as_ref(),
                     );
                 }
@@ -771,6 +776,7 @@ pub(crate) fn parse_copilot_cli_session_file(
                     &mut assistant_index,
                     &conversation_hash,
                     &project_hash,
+                    workspace_path.as_deref(),
                     session_name.as_ref(),
                 );
 
@@ -797,6 +803,7 @@ pub(crate) fn parse_copilot_cli_session_file(
                     &mut assistant_index,
                     &conversation_hash,
                     &project_hash,
+                    workspace_path.as_deref(),
                     session_name.as_ref(),
                 );
             }
@@ -1053,6 +1060,7 @@ pub(crate) fn parse_copilot_cli_session_file(
         &mut assistant_index,
         &conversation_hash,
         &project_hash,
+        workspace_path.as_deref(),
         session_name.as_ref(),
     );
 
@@ -1065,6 +1073,7 @@ pub(crate) fn parse_copilot_cli_session_file(
             &mut user_index,
             &conversation_hash,
             &project_hash,
+            workspace_path.as_deref(),
             session_name.as_ref(),
         );
     }

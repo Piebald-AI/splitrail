@@ -32,7 +32,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
 use ratatui::{Frame, Terminal};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Write, stdout};
 use std::path::Path;
 use std::sync::Arc;
@@ -505,7 +505,7 @@ impl ProjectSummary {
                 .is_some_and(|path| self.paths.contains(path))
     }
 
-    fn merge(&mut self, other: Self) {
+    fn merge(&mut self, other: Self, path_exists: &mut HashMap<String, bool>) {
         self.ids.extend(other.ids);
         self.paths.extend(other.paths);
         self.stats += other.stats;
@@ -516,12 +516,16 @@ impl ProjectSummary {
         for (model, count) in other.models {
             *self.models.entry(model).or_insert(0) += count;
         }
-        self.prefer_path(&other.path);
+        self.prefer_path(&other.path, path_exists);
     }
 
-    fn prefer_path(&mut self, candidate: &str) {
-        let current_exists = Path::new(&self.path).exists();
-        let candidate_exists = Path::new(candidate).exists();
+    fn prefer_path(&mut self, candidate: &str, path_exists: &mut HashMap<String, bool>) {
+        let current_exists = *path_exists
+            .entry(self.path.clone())
+            .or_insert_with(|| Path::new(&self.path).exists());
+        let candidate_exists = *path_exists
+            .entry(candidate.to_string())
+            .or_insert_with(|| Path::new(candidate).exists());
         if (candidate_exists && !current_exists)
             || (candidate_exists == current_exists && candidate < self.path.as_str())
         {
@@ -574,6 +578,7 @@ fn project_display_name(path: &str) -> String {
 
 fn collect_project_summaries(stats: &[SharedAnalyzerView]) -> Vec<ProjectSummary> {
     let mut projects: Vec<ProjectSummary> = Vec::new();
+    let mut path_exists = HashMap::new();
 
     for stats in stats {
         let view = stats.read();
@@ -596,11 +601,11 @@ fn collect_project_summaries(stats: &[SharedAnalyzerView]) -> Vec<ProjectSummary
                 ..Default::default()
             };
             for index in matching.drain(..).rev() {
-                project.merge(projects.remove(index));
+                project.merge(projects.remove(index), &mut path_exists);
             }
             project.ids.insert(project_id.to_string());
             project.paths.insert(path.to_string());
-            project.prefer_path(path);
+            project.prefer_path(path, &mut path_exists);
             project.stats += session.stats;
             project.sessions = project.sessions.saturating_add(1);
             *project

@@ -401,23 +401,21 @@ pub fn aggregate_sessions_from_messages(
     messages: &[ConversationMessage],
     analyzer_name: Arc<str>,
 ) -> Vec<SessionAggregate> {
-    let mut sessions: BTreeMap<String, SessionAggregate> = BTreeMap::new();
+    let mut sessions: BTreeMap<(String, Option<String>), SessionAggregate> = BTreeMap::new();
 
     for msg in messages {
-        // Use or_insert_with_key to avoid redundant cloning:
-        // - Pass owned key to entry() (1 clone of conversation_hash)
-        // - Clone key only when inserting a new session (via closure's &key)
+        let project_id = (!msg.project_hash.is_empty())
+            .then(|| msg.project_hash.clone())
+            .or_else(|| msg.project_path.clone());
         let entry = sessions
-            .entry(msg.conversation_hash.clone())
-            .or_insert_with_key(|key| SessionAggregate {
-                session_id: key.clone(),
+            .entry((msg.conversation_hash.clone(), project_id.clone()))
+            .or_insert_with(|| SessionAggregate {
+                session_id: msg.conversation_hash.clone(),
                 first_timestamp: msg.date,
                 analyzer_name: Arc::clone(&analyzer_name),
                 stats: TuiStats::default(),
                 models: ModelCounts::new(),
-                project_id: (!msg.project_hash.is_empty())
-                    .then(|| Arc::from(msg.project_hash.as_str()))
-                    .or_else(|| msg.project_path.as_deref().map(Arc::from)),
+                project_id: project_id.as_deref().map(Arc::from),
                 project_path: msg.project_path.as_deref().map(Arc::from),
                 session_name: None,
                 date: CompactDate::from_local(&msg.date),

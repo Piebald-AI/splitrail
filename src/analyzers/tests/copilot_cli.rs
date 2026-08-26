@@ -84,6 +84,10 @@ fn test_parse_sample_copilot_cli_session() {
     assert_eq!(messages[0].model, None);
     assert_eq!(messages[0].stats.input_tokens, 0);
     assert_eq!(messages[0].stats.output_tokens, 0);
+    assert_eq!(
+        messages[0].project_path.as_deref(),
+        Some("/home/user/project")
+    );
 
     assert_eq!(messages[1].role, MessageRole::Assistant);
     assert_eq!(messages[1].model.as_deref(), Some("gpt-4.1"));
@@ -92,6 +96,10 @@ fn test_parse_sample_copilot_cli_session() {
     assert_eq!(messages[1].stats.terminal_commands, 1);
     assert!(messages[1].stats.input_tokens > 0);
     assert!(messages[1].stats.output_tokens > 0);
+    assert_eq!(
+        messages[1].project_path.as_deref(),
+        Some("/home/user/project")
+    );
     assert_eq!(
         messages[1].session_name.as_deref(),
         Some("Add a health check endpoint")

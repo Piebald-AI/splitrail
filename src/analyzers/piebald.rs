@@ -308,7 +308,7 @@ fn convert_messages(
                 application: Application::Piebald,
                 date,
                 project_hash,
-                project_path: None,
+                project_path: chat.project_directory.clone(),
                 conversation_hash,
                 local_hash: Some(msg.id.to_string()),
                 global_hash,
@@ -448,6 +448,7 @@ mod tests {
         let converted = convert_messages(&chats, messages, &tool_call_counts);
 
         assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].project_path.as_deref(), Some("/tmp/project"));
         assert_eq!(converted[0].stats.output_tokens, 1_000_000);
         assert_eq!(converted[0].stats.reasoning_tokens, 100_000);
         assert_eq!(converted[0].stats.cost, 38.0);

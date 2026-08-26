@@ -490,7 +490,7 @@ fn to_conversation_message(
         application,
         date,
         project_hash,
-        project_path: None,
+        project_path: project.map(|project| project.worktree.clone()),
         conversation_hash,
         local_hash,
         global_hash,
@@ -957,5 +957,45 @@ mod tests {
         let stats = extract_tool_stats_from_parts(Path::new("/nonexistent"), "msg_fake");
         assert_eq!(stats.tool_calls, 0);
         assert_eq!(stats.files_read, 0);
+    }
+
+    #[test]
+    fn test_conversation_message_preserves_project_worktree() {
+        let mut project_json = br#"{
+            "id": "project-1",
+            "worktree": "/work/splitrail",
+            "time": { "created": 0 }
+        }"#
+        .to_vec();
+        let project: Project = simd_json::from_slice(&mut project_json).unwrap();
+        let mut session_json = br#"{
+            "id": "session-1",
+            "projectID": "project-1",
+            "directory": "/work/splitrail",
+            "time": { "created": 0, "updated": 0 }
+        }"#
+        .to_vec();
+        let session: Session = simd_json::from_slice(&mut session_json).unwrap();
+        let mut message_json = br#"{
+            "id": "message-1",
+            "sessionID": "session-1",
+            "role": "user",
+            "time": { "created": 0 }
+        }"#
+        .to_vec();
+        let message: Message = simd_json::from_slice(&mut message_json).unwrap();
+        let projects = HashMap::from([(project.id.clone(), project)]);
+        let sessions = HashMap::from([(session.id.clone(), session)]);
+
+        let converted = to_conversation_message(
+            message,
+            &sessions,
+            &projects,
+            Path::new("/nonexistent"),
+            Application::OpenCode,
+            "opencode",
+        );
+
+        assert_eq!(converted.project_path.as_deref(), Some("/work/splitrail"));
     }
 }
