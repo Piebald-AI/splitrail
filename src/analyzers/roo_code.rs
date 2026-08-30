@@ -112,11 +112,7 @@ fn is_probably_shell_command(text: &str) -> bool {
     }
 
     // Pipelines or multiple commands chained
-    if lower.contains(" && ") || lower.contains(" || ") || lower.contains(" | ") {
-        return true;
-    }
-
-    false
+    lower.contains(" && ") || lower.contains(" || ") || lower.contains(" | ")
 }
 
 // Helper function to extract model from environment details text

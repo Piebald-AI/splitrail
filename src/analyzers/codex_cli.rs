@@ -645,8 +645,9 @@ fn normalize_project_path(raw: &str) -> Option<String> {
         return None;
     }
 
-    let normalized: PathBuf = Path::new(trimmed).components().collect();
-    Some(normalized.to_string_lossy().into_owned())
+    let portable = trimmed.replace('\\', "/");
+    let normalized: PathBuf = Path::new(&portable).components().collect();
+    Some(normalized.to_string_lossy().replace('\\', "/"))
 }
 
 fn calculate_cost_from_tokens(
@@ -769,5 +770,22 @@ fn normalize_model_name(raw: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_project_path;
+
+    #[test]
+    fn project_paths_are_normalized_independently_of_host_separators() {
+        assert_eq!(
+            normalize_project_path(r"C:\work\.\splitrail"),
+            Some("C:/work/splitrail".to_string())
+        );
+        assert_eq!(
+            normalize_project_path("/home/user/./splitrail"),
+            Some("/home/user/splitrail".to_string())
+        );
     }
 }
