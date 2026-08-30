@@ -195,6 +195,7 @@ impl ModelCounts {
 pub struct SessionPeriodAggregate {
     pub stats: TuiStats,
     pub models: ModelCounts,
+    pub model_stats: BTreeMap<String, ModelStats>,
     pub message_count: u32,
     pub ai_message_count: u32,
 }
@@ -209,6 +210,10 @@ pub struct SessionAggregate {
     /// Reference-counted model names for correct incremental update subtraction.
     /// Inline storage for up to 3 models; interned keys are 4 bytes each.
     pub models: ModelCounts,
+    /// Stable local project identity used to group moved repositories and worktrees.
+    pub project_id: Option<Arc<str>>,
+    /// Local project path used for TUI project browsing. Never uploaded.
+    pub project_path: Option<Arc<str>>,
     pub session_name: Option<String>,
     pub date: CompactDate,
     /// Per-day activity used when drilling into a day, week, month, or year.
@@ -252,6 +257,9 @@ pub struct ConversationMessage {
     #[serde(rename = "date")]
     pub date: DateTime<Utc>,
     pub project_hash: String,
+    /// Local project path used for TUI project browsing. Never serialized or uploaded.
+    #[serde(skip)]
+    pub project_path: Option<String>,
     pub conversation_hash: String,
     /// The hash of this message, local to the application that we're gathering data from.  E.g.,
     /// in the Claude Code analyzer, this will be set to the message's hash within Claude Code.
@@ -819,6 +827,7 @@ mod tests {
             application: Application::ClaudeCode,
             date: Utc.from_utc_datetime(&date),
             project_hash: "proj".into(),
+            project_path: None,
             conversation_hash: conv_hash.into(),
             local_hash: None,
             global_hash: format!("global_{}", conv_hash),
@@ -940,6 +949,8 @@ mod tests {
                 analyzer_name: Arc::from("Test"),
                 stats: TuiStats::default(),
                 models: ModelCounts::from_single(intern_model(model), count),
+                project_id: None,
+                project_path: None,
                 session_name: None,
                 date: CompactDate::default(),
                 daily: BTreeMap::new(),

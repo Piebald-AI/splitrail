@@ -112,11 +112,7 @@ fn is_probably_shell_command(text: &str) -> bool {
     }
 
     // Pipelines or multiple commands chained
-    if lower.contains(" && ") || lower.contains(" || ") || lower.contains(" | ") {
-        return true;
-    }
-
-    false
+    lower.contains(" && ") || lower.contains(" || ") || lower.contains(" | ")
 }
 
 // Helper function to extract model from environment details text
@@ -217,6 +213,7 @@ fn parse_roo_code_task_directory(
                             application: application.clone(),
                             date,
                             project_hash: project_hash.clone(),
+                            project_path: None,
                             conversation_hash: conversation_hash.clone(),
                             local_hash: Some(local_hash),
                             global_hash,
@@ -267,6 +264,7 @@ fn parse_roo_code_task_directory(
                         application: application.clone(),
                         date,
                         project_hash: project_hash.clone(),
+                        project_path: None,
                         conversation_hash: conversation_hash.clone(),
                         local_hash: Some(local_hash),
                         global_hash,

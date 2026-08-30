@@ -44,6 +44,7 @@ use crate::types::{CompactDate, ConversationMessage, TuiStats, intern_model};
 /// - duration_ms:      bits 165-175 (11 bits; reserved for future use)
 #[repr(C, align(1))]
 #[derive(BitfieldStruct, Clone, Copy, Default)]
+#[allow(clippy::duplicated_attributes)]
 pub struct PackedStatsDate {
     #[bitfield(name = "input_tokens", ty = "u32", bits = "0..=26")]
     #[bitfield(name = "output_tokens", ty = "u32", bits = "27..=52")]

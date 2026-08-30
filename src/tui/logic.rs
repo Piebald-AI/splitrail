@@ -401,20 +401,22 @@ pub fn aggregate_sessions_from_messages(
     messages: &[ConversationMessage],
     analyzer_name: Arc<str>,
 ) -> Vec<SessionAggregate> {
-    let mut sessions: BTreeMap<String, SessionAggregate> = BTreeMap::new();
+    let mut sessions: BTreeMap<(String, Option<String>), SessionAggregate> = BTreeMap::new();
 
     for msg in messages {
-        // Use or_insert_with_key to avoid redundant cloning:
-        // - Pass owned key to entry() (1 clone of conversation_hash)
-        // - Clone key only when inserting a new session (via closure's &key)
+        let project_id = (!msg.project_hash.is_empty())
+            .then(|| msg.project_hash.clone())
+            .or_else(|| msg.project_path.clone());
         let entry = sessions
-            .entry(msg.conversation_hash.clone())
-            .or_insert_with_key(|key| SessionAggregate {
-                session_id: key.clone(),
+            .entry((msg.conversation_hash.clone(), project_id.clone()))
+            .or_insert_with(|| SessionAggregate {
+                session_id: msg.conversation_hash.clone(),
                 first_timestamp: msg.date,
                 analyzer_name: Arc::clone(&analyzer_name),
                 stats: TuiStats::default(),
                 models: ModelCounts::new(),
+                project_id: project_id.as_deref().map(Arc::from),
+                project_path: msg.project_path.as_deref().map(Arc::from),
                 session_name: None,
                 date: CompactDate::from_local(&msg.date),
                 daily: BTreeMap::new(),
@@ -436,9 +438,14 @@ pub fn aggregate_sessions_from_messages(
             accumulate_tui_stats(&mut daily.stats, &msg.stats);
 
             if let Some(model) = &msg.model {
-                let model = intern_model(model);
-                entry.models.increment(model, 1);
-                daily.models.increment(model, 1);
+                let model_key = intern_model(model);
+                entry.models.increment(model_key, 1);
+                daily.models.increment(model_key, 1);
+                daily
+                    .model_stats
+                    .entry(model.to_string())
+                    .or_insert_with(|| crate::types::ModelStats::new(model.to_string()))
+                    .add_message(&msg.stats);
             }
         }
 

@@ -5,12 +5,12 @@ use crate::tui::logic::{
     filtered_aggregate_keys,
 };
 use crate::tui::{
-    AggregateViewMode, PeriodFilter, build_display_stats, cost_heat,
+    AggregateViewMode, PeriodFilter, build_display_stats, collect_project_summaries, cost_heat,
     create_upload_progress_callback, draw_aggregate_stats_table, filter_analyzer_view_by_model,
-    filtered_session_count, format_model_usage_shares, format_month_for_display,
-    format_week_for_display, format_year_for_display, parse_accent, sessions_for_period,
-    show_upload_error, show_upload_success, update_period_filters, update_table_states,
-    update_window_offsets,
+    filter_analyzer_view_by_project, filtered_session_count, format_model_usage_shares,
+    format_month_for_display, format_week_for_display, format_year_for_display, parse_accent,
+    sessions_for_period, show_upload_error, show_upload_success, update_period_filters,
+    update_table_states, update_window_offsets,
 };
 use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, Application, CompactDate, ConversationMessage,
@@ -32,6 +32,7 @@ fn session_detail_includes_sessions_active_after_their_start_date() {
         application: Application::CodexCli,
         date: Utc.with_ymd_and_hms(2026, 7, day, 12, 0, 0).unwrap(),
         project_hash: String::new(),
+        project_path: None,
         conversation_hash: "continued-session".into(),
         local_hash: None,
         global_hash: format!("message-{day}"),
@@ -67,6 +68,46 @@ fn session_detail_includes_sessions_active_after_their_start_date() {
         Some(PeriodFilter::Day(CompactDate::from_parts(2026, 7, 31))),
     );
     assert_eq!(filtered[0].stats.input_tokens, 20);
+}
+
+#[test]
+fn aggregate_sessions_splits_conversation_when_project_changes() {
+    let make_message = |project_hash: &str, project_path: &str, input_tokens| ConversationMessage {
+        application: Application::CodexCli,
+        date: Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap(),
+        project_hash: project_hash.to_string(),
+        project_path: Some(project_path.to_string()),
+        conversation_hash: "shared-conversation".into(),
+        local_hash: None,
+        global_hash: format!("{project_hash}-message"),
+        model: Some("gpt-5.6-sol".into()),
+        stats: Stats {
+            input_tokens,
+            ..Default::default()
+        },
+        role: MessageRole::Assistant,
+        uuid: None,
+        session_name: None,
+    };
+    let messages = [
+        make_message("project-a", "/work/a", 10),
+        make_message("project-b", "/work/b", 20),
+    ];
+
+    let sessions = aggregate_sessions_from_messages(&messages, Arc::from("Codex CLI"));
+
+    assert_eq!(sessions.len(), 2);
+    assert!(
+        sessions
+            .iter()
+            .all(|session| session.session_id == "shared-conversation")
+    );
+    assert!(sessions.iter().any(|session| {
+        session.project_id.as_deref() == Some("project-a") && session.stats.input_tokens == 10
+    }));
+    assert!(sessions.iter().any(|session| {
+        session.project_id.as_deref() == Some("project-b") && session.stats.input_tokens == 20
+    }));
 }
 
 // ============================================================================
@@ -967,6 +1008,110 @@ fn test_date_filter_exclusions() {
 }
 
 #[test]
+fn project_summary_and_filter_merge_tools_by_path() {
+    let make_message = |session: &str,
+                        project_id: &str,
+                        project: &str,
+                        model: &str,
+                        input_tokens: u64|
+     -> ConversationMessage {
+        ConversationMessage {
+            application: Application::CodexCli,
+            date: Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap(),
+            project_hash: project_id.to_string(),
+            project_path: Some(project.to_string()),
+            conversation_hash: session.to_string(),
+            local_hash: None,
+            global_hash: format!("{session}-{model}"),
+            model: Some(model.to_string()),
+            stats: Stats {
+                input_tokens,
+                output_tokens: 10,
+                reasoning_tokens: 5,
+                cost: 0.25,
+                ..Default::default()
+            },
+            role: MessageRole::Assistant,
+            uuid: None,
+            session_name: None,
+        }
+    };
+    let messages = vec![
+        make_message(
+            "splitrail-1",
+            "splitrail-repository",
+            "/old/work/splitrail",
+            "gpt-5",
+            100,
+        ),
+        make_message(
+            "splitrail-2",
+            "splitrail-repository",
+            "/work/splitrail",
+            "gpt-5.6",
+            200,
+        ),
+        make_message(
+            "homelab-1",
+            "homelab-repository",
+            "/work/homelab",
+            "gpt-5",
+            50,
+        ),
+    ];
+    let sessions = aggregate_sessions_from_messages(&messages, Arc::from("Codex CLI"));
+    let view = AnalyzerStatsView {
+        daily_stats: BTreeMap::new(),
+        session_aggregates: sessions,
+        num_conversations: 3,
+        analyzer_name: Arc::from("Codex CLI"),
+    };
+    let shared = Arc::new(parking_lot::RwLock::new(view.clone()));
+    let claude_messages = vec![make_message(
+        "splitrail-claude",
+        "claude-project-directory",
+        "/work/splitrail",
+        "claude-sonnet-4",
+        75,
+    )];
+    let claude_view = AnalyzerStatsView {
+        daily_stats: BTreeMap::new(),
+        session_aggregates: aggregate_sessions_from_messages(
+            &claude_messages,
+            Arc::from("Claude Code"),
+        ),
+        num_conversations: 1,
+        analyzer_name: Arc::from("Claude Code"),
+    };
+
+    let projects =
+        collect_project_summaries(&[shared, Arc::new(parking_lot::RwLock::new(claude_view))]);
+    assert_eq!(projects.len(), 2, "{projects:#?}");
+    assert_eq!(projects[0].name, "work/splitrail");
+    assert_eq!(projects[0].sessions, 3);
+    assert_eq!(projects[0].total_tokens(), 405);
+    assert_eq!(
+        projects[0].tools.keys().collect::<Vec<_>>(),
+        vec!["Claude Code", "Codex CLI"]
+    );
+    assert_eq!(projects[0].models.len(), 3);
+
+    let splitrail = projects
+        .iter()
+        .find(|project| project.ids.contains("splitrail-repository"))
+        .unwrap();
+    let filtered = filter_analyzer_view_by_project(&view, splitrail);
+    assert_eq!(filtered.num_conversations, 2);
+    assert_eq!(filtered.session_aggregates.len(), 2);
+    let day = filtered.daily_stats.get("2026-08-26").unwrap();
+    assert_eq!(day.stats.input_tokens, 300);
+    assert_eq!(day.stats.output_tokens, 20);
+    assert_eq!(day.conversations, 2);
+    assert_eq!(day.model_stats["gpt-5"].input_tokens, 100);
+    assert_eq!(day.model_stats["gpt-5.6"].input_tokens, 200);
+}
+
+#[test]
 fn model_filter_recalculates_stats_and_sessions() {
     let date = CompactDate::from_str("2025-01-01").unwrap();
     let claude_stats = ModelStats {
@@ -1024,6 +1169,8 @@ fn model_filter_recalculates_stats_and_sessions() {
             models.increment(intern_model(model), 1);
             models
         },
+        project_id: None,
+        project_path: None,
         session_name: None,
         date,
         daily: BTreeMap::new(),
@@ -1040,6 +1187,8 @@ fn model_filter_recalculates_stats_and_sessions() {
         analyzer_name: Arc::from("Test"),
         stats: TuiStats::default(),
         models: multi_models.clone(),
+        project_id: None,
+        project_path: None,
         session_name: None,
         date,
         daily: BTreeMap::from([(

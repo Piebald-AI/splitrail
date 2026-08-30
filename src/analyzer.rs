@@ -1040,6 +1040,7 @@ mod tests {
             application: Application::ClaudeCode,
             date,
             project_hash: "proj".into(),
+            project_path: None,
             conversation_hash: "conv".into(),
             local_hash: None,
             global_hash: "global".into(),

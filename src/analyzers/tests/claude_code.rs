@@ -86,6 +86,7 @@ fn test_deduplicate_messages_resolves_same_local_hash_across_uuids() {
         application: Application::ClaudeCode,
         date: Utc.with_ymd_and_hms(2025, 8, 2, 16, 0, 0).unwrap(),
         project_hash: "project".to_string(),
+        project_path: None,
         conversation_hash: "conversation".to_string(),
         local_hash: Some("shared-local-hash".to_string()),
         global_hash: "uuid-a".to_string(),
@@ -125,6 +126,7 @@ fn test_streaming_snapshots_do_not_inflate_identical_fields() {
         application: Application::ClaudeCode,
         date: Utc.with_ymd_and_hms(2025, 8, 2, 16, 0, 0).unwrap(),
         project_hash: "project".to_string(),
+        project_path: None,
         conversation_hash: "conversation".to_string(),
         local_hash: Some("streaming-local-hash".to_string()),
         global_hash: "uuid-partial".to_string(),
@@ -171,6 +173,11 @@ fn test_parse_jsonl_file_basic() {
     .unwrap();
 
     assert_eq!(messages.len(), 4);
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.project_path.as_deref() == Some(r"D:\splitrail"))
+    );
 
     // Check first message (user message)
     assert_eq!(messages[0].role, MessageRole::User);
@@ -451,6 +458,7 @@ fn test_deduplicate_messages_by_local_hash() {
         model: Some("test-model".to_string()),
         date: Utc.timestamp_opt(1609459200, 0).unwrap(),
         project_hash: "project1".to_string(),
+        project_path: None,
         conversation_hash: "conv1".to_string(),
         stats: Stats {
             input_tokens: 10,

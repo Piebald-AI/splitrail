@@ -447,6 +447,7 @@ pub fn parse_chat_history_file(path: &Path) -> Result<Vec<ConversationMessage>> 
             application: Application::Grok,
             date,
             project_hash: project_hash.clone(),
+            project_path: None,
             conversation_hash: conversation_hash.clone(),
             local_hash: Some(format!("{conversation_hash}:{line_index}")),
             global_hash: hash_text(&format!("{file_path}:{line_index}")),
