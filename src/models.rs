@@ -1509,10 +1509,9 @@ fn populate_defaults(
         },
         false
     );
-    // Anthropic's Batch API halves base input and output prices. Prompt-cache
-    // billing is intentionally omitted from this tier because Anthropic says
-    // pricing modifiers stack, while Splitrail cannot yet identify cache TTLs
-    // or represent the combined Batch-plus-cache rate without guessing.
+    // Anthropic's Batch discount stacks with prompt-caching prices. Apply its
+    // 50% discount to the same default five-minute write approximation used by
+    // standard pricing so Batch usage with cache tokens is not undercounted.
     add_service_tier_pricing!(
         "claude-fable-5-1",
         ServiceTier::Batch,
@@ -1520,7 +1519,10 @@ fn populate_defaults(
             input_per_1m: 5.0,
             output_per_1m: 25.0
         },
-        CachingSupport::None
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 6.25,
+            cache_read_per_1m: 0.125
+        }
     );
     add_model!(
         "claude-fable-5",
@@ -3641,18 +3643,20 @@ mod tests {
     }
 
     #[test]
-    fn claude_fable_5_1_batch_tier_uses_half_price_base_tokens() {
+    fn claude_fable_5_1_batch_tier_stacks_with_cache_discount() {
+        // Anthropic applies Batch's 50% discount to base and prompt-cache
+        // prices, so every token category must participate in this assertion.
         approx_eq(
             calculate_total_cost_for_service_tier_at(
                 "claude-fable-5-1",
                 ServiceTier::Batch,
                 1_000_000,
                 1_000_000,
-                0,
-                0,
+                1_000_000,
+                1_000_000,
                 None,
             ),
-            30.0,
+            36.375,
         );
     }
 
