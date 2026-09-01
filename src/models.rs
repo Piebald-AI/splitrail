@@ -1494,6 +1494,35 @@ fn populate_defaults(
 
     // Anthropic Models
     add_model!(
+        "claude-fable-5-1",
+        PricingStructure::Flat {
+            input_per_1m: 10.0,
+            output_per_1m: 50.0
+        },
+        // Splitrail receives one undifferentiated cache-creation count, so use
+        // Anthropic's default 5-minute write rate here. The optional one-hour
+        // cache write remains $20/MTok, but cannot be selected without losing
+        // the token source's TTL information before pricing.
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 12.5,
+            cache_read_per_1m: 0.25
+        },
+        false
+    );
+    // Anthropic's Batch API halves base input and output prices. Prompt-cache
+    // billing is intentionally omitted from this tier because Anthropic says
+    // pricing modifiers stack, while Splitrail cannot yet identify cache TTLs
+    // or represent the combined Batch-plus-cache rate without guessing.
+    add_service_tier_pricing!(
+        "claude-fable-5-1",
+        ServiceTier::Batch,
+        PricingStructure::Flat {
+            input_per_1m: 5.0,
+            output_per_1m: 25.0
+        },
+        CachingSupport::None
+    );
+    add_model!(
         "claude-fable-5",
         PricingStructure::Flat {
             input_per_1m: 10.0,
@@ -2527,6 +2556,10 @@ fn populate_defaults(
     add_alias!("openai.gpt-oss-safeguard-120b", "gpt-oss-safeguard-120b");
 
     // Anthropic aliases
+    add_alias!("claude-fable-5-1", "claude-fable-5-1");
+    add_alias!("claude-fable-5.1", "claude-fable-5-1");
+    add_alias!("claude-5.1-fable", "claude-fable-5-1");
+    add_alias!("anthropic.claude-fable-5-1", "claude-fable-5-1");
     add_alias!("claude-fable-5", "claude-fable-5");
     add_alias!("claude-fable-5.0", "claude-fable-5");
     add_alias!("claude-5-fable", "claude-fable-5");
@@ -3585,6 +3618,42 @@ mod tests {
         approx_eq(input_cost, 5.0);
         approx_eq(output_cost, 25.0);
         approx_eq(cache_cost, 6.75);
+    }
+
+    #[test]
+    fn claude_fable_5_1_aliases_map_to_official_pricing() {
+        for model in [
+            "claude-fable-5-1",
+            "claude-fable-5.1",
+            "claude-5.1-fable",
+            "anthropic.claude-fable-5-1",
+        ] {
+            let model_info = get_model_info(model).expect("Fable 5.1 alias should resolve");
+            assert!(!model_info.is_estimated);
+
+            approx_eq(calculate_input_cost(model, 1_000_000), 10.0);
+            approx_eq(calculate_output_cost(model, 1_000_000), 50.0);
+            // One million default 5-minute cache writes plus one million reads
+            // cost $12.50 + $0.25. This assertion locks in Fable 5.1's special
+            // 0.025x read multiplier rather than Anthropic's usual 0.1x rate.
+            approx_eq(calculate_cache_cost(model, 1_000_000, 1_000_000), 12.75);
+        }
+    }
+
+    #[test]
+    fn claude_fable_5_1_batch_tier_uses_half_price_base_tokens() {
+        approx_eq(
+            calculate_total_cost_for_service_tier_at(
+                "claude-fable-5-1",
+                ServiceTier::Batch,
+                1_000_000,
+                1_000_000,
+                0,
+                0,
+                None,
+            ),
+            30.0,
+        );
     }
 
     #[test]
