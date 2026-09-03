@@ -2625,7 +2625,6 @@ fn populate_defaults(
     add_alias!("gpt-5.5-pro", "gpt-5.5-pro");
     add_alias!("gpt-6", "gpt-6-astra");
     add_alias!("gpt-6-astra", "gpt-6-astra");
-    add_alias!("gpt-6-astra-2026-09-03", "gpt-6-astra");
     add_alias!("gpt-5.6", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol-ultra", "gpt-5.6-sol");
@@ -3175,6 +3174,11 @@ pub fn calculate_total_cost_for_service_tier_at(
         Some(model_info) => {
             let (pricing, caching) =
                 pricing_for_service_tier(&model_info, service_tier, effective_at);
+            // Token sources report disjoint billable categories here: ordinary
+            // input excludes cached reads and writes. Reads and writes can
+            // overlap, so their maximum reconstructs the cached portion without
+            // double-counting that overlap; adding it back recovers the prompt
+            // context used to select whole-request long-context brackets.
             let context_tokens =
                 input_tokens.saturating_add(cache_creation_tokens.max(cache_read_tokens));
             calculate_context_cost(
@@ -3838,14 +3842,18 @@ mod tests {
 
     #[test]
     fn gpt_6_astra_aliases_map_to_official_standard_pricing() {
-        for model in ["gpt-6-astra", "gpt-6", "gpt-6-astra-2026-09-03"] {
+        assert!(get_model_info("gpt-6-astra-2026-09-03").is_none());
+
+        for model in ["gpt-6-astra", "gpt-6"] {
             let model_info = get_model_info(model).expect("GPT-6 Astra alias should resolve");
             assert!(!model_info.is_estimated);
 
             approx_eq(calculate_input_cost(model, 200_000), 2.0);
             approx_eq(calculate_output_cost(model, 200_000), 10.0);
-            // One million cache writes and reads below the long-context bracket
-            // cost $12.50 + $1.00 at Astra's published Standard rates.
+            // Cache-only helpers select their bracket from the cache counts,
+            // so exercise both published tiers directly: 200K writes plus
+            // reads cost $2.50 + $0.20; one million of each costs $25 + $2.
+            approx_eq(calculate_cache_cost(model, 200_000, 200_000), 2.70);
             approx_eq(calculate_cache_cost(model, 1_000_000, 1_000_000), 27.0);
         }
     }
