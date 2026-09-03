@@ -3174,13 +3174,13 @@ pub fn calculate_total_cost_for_service_tier_at(
         Some(model_info) => {
             let (pricing, caching) =
                 pricing_for_service_tier(&model_info, service_tier, effective_at);
-            // OpenAI's long-context threshold is based on prompt input,
-            // including cached input. Cache writes are a billing side effect of
-            // that prompt, not additional context; counting them here can
-            // double-count newly cached tokens and incorrectly select the long
-            // bracket. Callers with an authoritative provider context length
-            // can still supply it through `calculate_total_cost_for_context_at`.
-            let context_tokens = input_tokens.saturating_add(cache_read_tokens);
+            // Token sources report disjoint billable categories here: ordinary
+            // input excludes cached reads and writes. Reads and writes can
+            // overlap, so their maximum reconstructs the cached portion without
+            // double-counting that overlap; adding it back recovers the prompt
+            // context used to select whole-request long-context brackets.
+            let context_tokens =
+                input_tokens.saturating_add(cache_creation_tokens.max(cache_read_tokens));
             calculate_context_cost(
                 pricing,
                 caching,
@@ -3842,6 +3842,8 @@ mod tests {
 
     #[test]
     fn gpt_6_astra_aliases_map_to_official_standard_pricing() {
+        assert!(get_model_info("gpt-6-astra-2026-09-03").is_none());
+
         for model in ["gpt-6-astra", "gpt-6"] {
             let model_info = get_model_info(model).expect("GPT-6 Astra alias should resolve");
             assert!(!model_info.is_estimated);
@@ -3854,24 +3856,6 @@ mod tests {
             approx_eq(calculate_cache_cost(model, 200_000, 200_000), 2.70);
             approx_eq(calculate_cache_cost(model, 1_000_000, 1_000_000), 27.0);
         }
-    }
-
-    #[test]
-    fn gpt_6_astra_cache_writes_do_not_inflate_prompt_context() {
-        let cost = calculate_total_cost_for_service_tier_at(
-            "gpt-6-astra",
-            ServiceTier::Standard,
-            100_000,
-            10_000,
-            300_000,
-            0,
-            None,
-        );
-
-        // The 100K prompt remains below 272K even though the provider writes
-        // 300K cache tokens. Cache creation is charged, but it cannot select a
-        // higher context bracket because it is not additional prompt input.
-        approx_eq(cost, 5.25);
     }
 
     #[test]

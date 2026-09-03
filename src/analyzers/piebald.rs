@@ -502,6 +502,41 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_messages_counts_cache_writes_toward_astra_context() {
+        let chats = vec![PiebaldChat {
+            id: 1,
+            title: Some("Long cached Astra chat".to_string()),
+            model: Some("gpt-6-astra".to_string()),
+            project_directory: Some("/tmp/project".to_string()),
+        }];
+        let messages = vec![PiebaldMessage {
+            id: 10,
+            parent_chat_id: 1,
+            role: "assistant".to_string(),
+            model: Some("gpt-6-astra".to_string()),
+            input_tokens: Some(400_000),
+            output_tokens: Some(10_000),
+            reasoning_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(300_000),
+            service_tier: None,
+            created_at: "2026-09-03T12:00:00Z".to_string(),
+            updated_at: "2026-09-03T12:00:01Z".to_string(),
+        }];
+
+        let converted = convert_messages(&chats, messages, &HashMap::new());
+        let stats = &converted[0].stats;
+
+        // Piebald's raw 400K input includes the 300K cache write, leaving
+        // 100K ordinary input for billing. Reconstructing the prompt with the
+        // cache write crosses Astra's 272K boundary, so the full request uses
+        // $20/M input, $75/M output, and $25/M cache-write rates.
+        assert_eq!(stats.input_tokens, 100_000);
+        assert_eq!(stats.cache_creation_tokens, 300_000);
+        assert!((stats.cost - 10.25).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_convert_messages_uses_cache_write_rate_without_double_charging() {
         let chats = vec![PiebaldChat {
             id: 1,
