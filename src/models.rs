@@ -3175,8 +3175,13 @@ pub fn calculate_total_cost_for_service_tier_at(
         Some(model_info) => {
             let (pricing, caching) =
                 pricing_for_service_tier(&model_info, service_tier, effective_at);
-            let context_tokens =
-                input_tokens.saturating_add(cache_creation_tokens.max(cache_read_tokens));
+            // OpenAI's long-context threshold is based on prompt input,
+            // including cached input. Cache writes are a billing side effect of
+            // that prompt, not additional context; counting them here can
+            // double-count newly cached tokens and incorrectly select the long
+            // bracket. Callers with an authoritative provider context length
+            // can still supply it through `calculate_total_cost_for_context_at`.
+            let context_tokens = input_tokens.saturating_add(cache_read_tokens);
             calculate_context_cost(
                 pricing,
                 caching,
@@ -3844,10 +3849,30 @@ mod tests {
 
             approx_eq(calculate_input_cost(model, 200_000), 2.0);
             approx_eq(calculate_output_cost(model, 200_000), 10.0);
-            // One million cache writes and reads below the long-context bracket
-            // cost $12.50 + $1.00 at Astra's published Standard rates.
+            // Cache-only helpers select their bracket from the cache counts,
+            // so exercise both published tiers directly: 200K writes plus
+            // reads cost $2.50 + $0.20; one million of each costs $25 + $2.
+            approx_eq(calculate_cache_cost(model, 200_000, 200_000), 2.70);
             approx_eq(calculate_cache_cost(model, 1_000_000, 1_000_000), 27.0);
         }
+    }
+
+    #[test]
+    fn gpt_6_astra_cache_writes_do_not_inflate_prompt_context() {
+        let cost = calculate_total_cost_for_service_tier_at(
+            "gpt-6-astra",
+            ServiceTier::Standard,
+            100_000,
+            10_000,
+            300_000,
+            0,
+            None,
+        );
+
+        // The 100K prompt remains below 272K even though the provider writes
+        // 300K cache tokens. Cache creation is charged, but it cannot select a
+        // higher context bracket because it is not additional prompt input.
+        approx_eq(cost, 5.25);
     }
 
     #[test]

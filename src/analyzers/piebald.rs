@@ -170,7 +170,11 @@ fn parse_service_tier(service_tier: Option<&str>) -> ServiceTier {
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("priority") => ServiceTier::Priority,
+        // OpenAI names its premium low-latency tier `fast`, while older
+        // records and Splitrail's provider-neutral enum use `priority`.
+        // Treat both spellings as the same billing class so current Astra
+        // traffic is not silently charged at the Standard rate.
+        Some("fast" | "priority") => ServiceTier::Priority,
         Some("flex") => ServiceTier::Flex,
         Some("batch") => ServiceTier::Batch,
         _ => ServiceTier::Standard,
@@ -410,6 +414,7 @@ mod tests {
     #[test]
     fn test_parse_service_tier_maps_known_values() {
         assert_eq!(parse_service_tier(Some("priority")), ServiceTier::Priority);
+        assert_eq!(parse_service_tier(Some(" FAST ")), ServiceTier::Priority);
         assert_eq!(parse_service_tier(Some(" flex ")), ServiceTier::Flex);
         assert_eq!(parse_service_tier(Some("BATCH")), ServiceTier::Batch);
     }
