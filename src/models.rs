@@ -931,6 +931,48 @@ fn populate_defaults(
         false
     );
 
+    // GPT-6 Astra uses OpenAI's whole-request long-context bracket: once the
+    // prompt (uncached input plus cache reads) exceeds 272K tokens, every input,
+    // output, cache-write, and cache-read token in the request is billed at the
+    // long-context rate. Keeping matching tier boundaries across pricing and
+    // caching lets the shared calculator make that decision once for the whole
+    // request rather than accidentally pricing each token category separately.
+    // Source: https://developers.openai.com/api/docs/models/gpt-6-astra
+    add_model!(
+        "gpt-6-astra",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 10.0,
+                    output_per_1m: 50.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 20.0,
+                    output_per_1m: 75.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+            tiers: vec![
+                CachingTierWithWrites {
+                    max_tokens: Some(272_000),
+                    cache_write_per_1m: 12.50,
+                    cache_read_per_1m: 1.0
+                },
+                CachingTierWithWrites {
+                    max_tokens: None,
+                    cache_write_per_1m: 25.0,
+                    cache_read_per_1m: 2.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+
     add_model!(
         "gpt-5.6-sol",
         PricingStructure::Tiered(TieredPricing {
@@ -1170,6 +1212,37 @@ fn populate_defaults(
         CachingSupport::None,
         false
     );
+
+    // OpenAI publishes Fast mode at 2x Standard and Flex/Batch at 0.5x.
+    // Splitrail's existing `Priority` tier represents that premium low-latency
+    // class, so map Fast pricing there while preserving the provider-neutral
+    // service-tier vocabulary used by analyzers and callers.
+    add_tiered_service_tier_pricing_with_cache_writes!(
+        "gpt-6-astra",
+        ServiceTier::Priority,
+        20.0,
+        25.0,
+        2.0,
+        100.0,
+        40.0,
+        50.0,
+        4.0,
+        150.0
+    );
+    for service_tier in [ServiceTier::Flex, ServiceTier::Batch] {
+        add_tiered_service_tier_pricing_with_cache_writes!(
+            "gpt-6-astra",
+            service_tier,
+            5.0,
+            6.25,
+            0.50,
+            25.0,
+            10.0,
+            12.50,
+            1.0,
+            37.50
+        );
+    }
 
     add_tiered_service_tier_pricing_with_cache_writes!(
         "gpt-5.6-sol",
@@ -2550,6 +2623,9 @@ fn populate_defaults(
     add_alias!("gpt-5.5", "gpt-5.5");
     add_alias!("gpt-5.5-2026-04-23", "gpt-5.5");
     add_alias!("gpt-5.5-pro", "gpt-5.5-pro");
+    add_alias!("gpt-6", "gpt-6-astra");
+    add_alias!("gpt-6-astra", "gpt-6-astra");
+    add_alias!("gpt-6-astra-2026-09-03", "gpt-6-astra");
     add_alias!("gpt-5.6", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol-ultra", "gpt-5.6-sol");
@@ -3758,6 +3834,71 @@ mod tests {
     fn gemini_2_5_pro_remains_progressive() {
         let cost = calculate_input_cost("gemini-2.5-pro", 250_000);
         approx_eq(cost, 0.375);
+    }
+
+    #[test]
+    fn gpt_6_astra_aliases_map_to_official_standard_pricing() {
+        for model in ["gpt-6-astra", "gpt-6", "gpt-6-astra-2026-09-03"] {
+            let model_info = get_model_info(model).expect("GPT-6 Astra alias should resolve");
+            assert!(!model_info.is_estimated);
+
+            approx_eq(calculate_input_cost(model, 200_000), 2.0);
+            approx_eq(calculate_output_cost(model, 200_000), 10.0);
+            // One million cache writes and reads below the long-context bracket
+            // cost $12.50 + $1.00 at Astra's published Standard rates.
+            approx_eq(calculate_cache_cost(model, 1_000_000, 1_000_000), 27.0);
+        }
+    }
+
+    #[test]
+    fn gpt_6_astra_context_boundary_selects_one_rate_for_every_token_category() {
+        for (input, expected) in [(172_000, 2.32), (172_001, 4.390_02)] {
+            let cost = calculate_total_cost_for_service_tier_at(
+                "gpt-6-astra",
+                ServiceTier::Standard,
+                input,
+                10_000,
+                0,
+                100_000,
+                None,
+            );
+            // Crossing 272K total prompt tokens changes the bracket for the
+            // entire request, including output and cached input; it does not
+            // progressively surcharge only the 272,001st input token.
+            approx_eq(cost, expected);
+        }
+    }
+
+    #[test]
+    fn gpt_6_astra_service_tiers_preserve_long_context_multipliers() {
+        for (service_tier, expected_short, expected_long) in [
+            (ServiceTier::Standard, 2.32, 4.390_002),
+            (ServiceTier::Priority, 4.64, 8.780_004),
+            (ServiceTier::Flex, 1.16, 2.195_001),
+            (ServiceTier::Batch, 1.16, 2.195_001),
+        ] {
+            let short = calculate_total_cost_for_service_tier_at(
+                "gpt-6-astra",
+                service_tier,
+                172_000,
+                10_000,
+                0,
+                100_000,
+                None,
+            );
+            let long = calculate_total_cost_for_service_tier_at(
+                "gpt-6-astra",
+                service_tier,
+                172_000,
+                10_000,
+                0,
+                100_001,
+                None,
+            );
+
+            approx_eq(short, expected_short);
+            approx_eq(long, expected_long);
+        }
     }
 
     #[test]
