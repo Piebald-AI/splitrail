@@ -2625,7 +2625,6 @@ fn populate_defaults(
     add_alias!("gpt-5.5-pro", "gpt-5.5-pro");
     add_alias!("gpt-6", "gpt-6-astra");
     add_alias!("gpt-6-astra", "gpt-6-astra");
-    add_alias!("gpt-6-astra-2026-09-03", "gpt-6-astra");
     add_alias!("gpt-5.6", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol-ultra", "gpt-5.6-sol");
@@ -3843,7 +3842,7 @@ mod tests {
 
     #[test]
     fn gpt_6_astra_aliases_map_to_official_standard_pricing() {
-        for model in ["gpt-6-astra", "gpt-6", "gpt-6-astra-2026-09-03"] {
+        for model in ["gpt-6-astra", "gpt-6"] {
             let model_info = get_model_info(model).expect("GPT-6 Astra alias should resolve");
             assert!(!model_info.is_estimated);
 
