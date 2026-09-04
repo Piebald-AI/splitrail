@@ -321,6 +321,13 @@ fn add_new_sessions_to_view(
             activity.message_count = 0;
             activity.ai_message_count = 0;
         }
+        for activity in session.hourly.values_mut() {
+            activity.stats = TuiStats::default();
+            activity.models = ModelCounts::new();
+            activity.model_stats.clear();
+            activity.message_count = 0;
+            activity.ai_message_count = 0;
+        }
         let date = session.date;
         view.session_aggregates.push(session);
         view.num_conversations += 1;

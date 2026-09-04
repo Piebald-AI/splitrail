@@ -104,7 +104,7 @@ pub struct TuiConfig {
     pub reverse_sort_default: bool,
     #[serde(default)]
     pub hide_empty_periods: bool,
-    /// Aggregation the TUI opens in: "daily" | "weekly" | "monthly" | "yearly".
+    /// Aggregation the TUI opens in: "hourly" | "daily" | "weekly" | "monthly" | "yearly".
     #[serde(default = "default_view")]
     pub default_view: String,
     /// Tab the TUI opens on, by tool name (e.g. "Claude Code"). Empty / "All

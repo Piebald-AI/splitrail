@@ -3,9 +3,9 @@
 /// Provides functions to aggregate statistics, filter dates, and check for data presence.
 use crate::types::{
     CompactDate, ConversationMessage, DailyStats, MessageRole, ModelCounts, Stats, TuiStats,
-    intern_model,
+    intern_model, resolve_model,
 };
-use chrono::{Datelike, NaiveDate, Weekday};
+use chrono::{Datelike, Local, NaiveDate, Weekday};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -21,6 +21,67 @@ pub fn accumulate_tui_stats(dst: &mut TuiStats, src: &Stats) {
     dst.cached_tokens = dst.cached_tokens.saturating_add(src.cached_tokens);
     dst.add_cost(src.cost);
     dst.tool_calls = dst.tool_calls.saturating_add(src.tool_calls);
+}
+
+/// Format a timestamp as a local hourly bucket key (`YYYY-MM-DDTHH`).
+pub fn local_hour_key(timestamp: &chrono::DateTime<chrono::Utc>) -> String {
+    timestamp
+        .with_timezone(&Local)
+        .format("%Y-%m-%dT%H")
+        .to_string()
+}
+
+/// Aggregate per-session hourly activity for TUI display.
+pub fn aggregate_session_stats_by_hour(
+    sessions: &[SessionAggregate],
+    include_apps: bool,
+) -> BTreeMap<String, DailyStats> {
+    let mut result = BTreeMap::new();
+
+    for session in sessions {
+        let start_hour = session.hourly.keys().next().cloned();
+        for (hour_key, activity) in &session.hourly {
+            let Some(date) = hour_key.get(..10).and_then(CompactDate::from_str) else {
+                continue;
+            };
+            let hour = result
+                .entry(hour_key.clone())
+                .or_insert_with(|| DailyStats {
+                    date,
+                    ..Default::default()
+                });
+            hour.user_messages = hour.user_messages.saturating_add(
+                activity
+                    .message_count
+                    .saturating_sub(activity.ai_message_count),
+            );
+            hour.ai_messages = hour.ai_messages.saturating_add(activity.ai_message_count);
+            hour.stats += activity.stats;
+            if Some(hour_key) == start_hour.as_ref() {
+                hour.conversations = hour.conversations.saturating_add(1);
+            }
+            for &(model, count) in activity.models.iter() {
+                *hour
+                    .models
+                    .entry(resolve_model(model).to_string())
+                    .or_insert(0) += count;
+            }
+            for (model, stats) in &activity.model_stats {
+                hour.model_stats
+                    .entry(model.clone())
+                    .or_insert_with(|| crate::types::ModelStats::new(model.clone()))
+                    .add_model_stats(stats);
+            }
+            if include_apps && activity.message_count > 0 {
+                *hour
+                    .apps
+                    .entry(session.analyzer_name.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    result
 }
 
 fn parse_period_parts(day: &str) -> Option<(u32, u32, Option<u32>)> {
@@ -148,6 +209,13 @@ fn month_name_to_number(lower: &str) -> Option<u32> {
 pub fn date_matches_buffer(day: &str, buffer: &str) -> bool {
     if buffer.is_empty() {
         return true;
+    }
+
+    if let Some((date, hour)) = day.split_once('T') {
+        let normalized = buffer.trim().replace(' ', "T");
+        return day.contains(&normalized)
+            || hour == normalized
+            || date_matches_buffer(date, buffer);
     }
 
     if let Some((week_year, iso_week)) = parse_week_key(day) {
@@ -420,11 +488,14 @@ pub fn aggregate_sessions_from_messages(
                 session_name: None,
                 date: CompactDate::from_local(&msg.date),
                 daily: BTreeMap::new(),
+                hourly: BTreeMap::new(),
             });
 
         let activity_date = CompactDate::from_local(&msg.date);
         let daily = entry.daily.entry(activity_date).or_default();
         daily.message_count = daily.message_count.saturating_add(1);
+        let hourly = entry.hourly.entry(local_hour_key(&msg.date)).or_default();
+        hourly.message_count = hourly.message_count.saturating_add(1);
 
         if msg.date < entry.first_timestamp {
             entry.first_timestamp = msg.date;
@@ -434,14 +505,22 @@ pub fn aggregate_sessions_from_messages(
         // Only aggregate stats for assistant messages and track models when known.
         if msg.role == MessageRole::Assistant {
             daily.ai_message_count = daily.ai_message_count.saturating_add(1);
+            hourly.ai_message_count = hourly.ai_message_count.saturating_add(1);
             accumulate_tui_stats(&mut entry.stats, &msg.stats);
             accumulate_tui_stats(&mut daily.stats, &msg.stats);
+            accumulate_tui_stats(&mut hourly.stats, &msg.stats);
 
             if let Some(model) = &msg.model {
                 let model_key = intern_model(model);
                 entry.models.increment(model_key, 1);
                 daily.models.increment(model_key, 1);
+                hourly.models.increment(model_key, 1);
                 daily
+                    .model_stats
+                    .entry(model.to_string())
+                    .or_insert_with(|| crate::types::ModelStats::new(model.to_string()))
+                    .add_message(&msg.stats);
+                hourly
                     .model_stats
                     .entry(model.to_string())
                     .or_insert_with(|| crate::types::ModelStats::new(model.to_string()))
@@ -469,7 +548,65 @@ pub fn aggregate_sessions_from_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::AnalyzerStatsView;
+    use crate::types::{AnalyzerStatsView, Application};
+    use chrono::{TimeZone, Utc};
+
+    fn message_at(hour: u32, conversation: &str, input_tokens: u64) -> ConversationMessage {
+        ConversationMessage {
+            application: Application::CodexCli,
+            date: Utc.with_ymd_and_hms(2025, 1, 15, hour, 30, 0).unwrap(),
+            project_hash: String::new(),
+            project_path: None,
+            conversation_hash: conversation.to_string(),
+            local_hash: None,
+            global_hash: format!("{conversation}-{hour}"),
+            model: Some("gpt-test".to_string()),
+            stats: Stats {
+                input_tokens,
+                ..Default::default()
+            },
+            role: MessageRole::Assistant,
+            uuid: None,
+            session_name: None,
+        }
+    }
+
+    #[test]
+    fn aggregates_session_activity_by_local_hour() {
+        let messages = vec![
+            message_at(9, "session-a", 100),
+            message_at(10, "session-a", 200),
+            message_at(10, "session-b", 300),
+        ];
+        let sessions = aggregate_sessions_from_messages(&messages, Arc::from("Codex CLI"));
+
+        let hourly = aggregate_session_stats_by_hour(&sessions, false);
+        let hour_09 = Utc
+            .with_ymd_and_hms(2025, 1, 15, 9, 30, 0)
+            .unwrap()
+            .with_timezone(&Local)
+            .format("%Y-%m-%dT%H")
+            .to_string();
+        let hour_10 = Utc
+            .with_ymd_and_hms(2025, 1, 15, 10, 30, 0)
+            .unwrap()
+            .with_timezone(&Local)
+            .format("%Y-%m-%dT%H")
+            .to_string();
+
+        assert_eq!(hourly[&hour_09].stats.input_tokens, 100);
+        assert_eq!(hourly[&hour_09].conversations, 1);
+        assert_eq!(hourly[&hour_10].stats.input_tokens, 500);
+        assert_eq!(hourly[&hour_10].conversations, 1);
+        assert_eq!(hourly[&hour_10].ai_messages, 2);
+
+        let mut filtered_sessions = sessions.clone();
+        for session in &mut filtered_sessions {
+            session.hourly.retain(|hour, _| hour == &hour_10);
+        }
+        let filtered_hourly = aggregate_session_stats_by_hour(&filtered_sessions, false);
+        assert_eq!(filtered_hourly[&hour_10].conversations, 2);
+    }
 
     #[test]
     fn has_data_view_returns_true_for_non_empty() {

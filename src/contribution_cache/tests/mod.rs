@@ -95,6 +95,7 @@ pub fn make_view_with_session(analyzer_name: &str, session_id: &str) -> Analyzer
             session_name: Some(format!("Session {}", session_id)),
             date: CompactDate::from_str("2025-01-01").unwrap(),
             daily: BTreeMap::new(),
+            hourly: BTreeMap::new(),
         }],
         num_conversations: 0,
         analyzer_name,

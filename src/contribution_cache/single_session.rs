@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use chrono::{Local, Timelike};
+
 use super::SessionHash;
 use crate::types::{
     CompactDate, ConversationMessage, MessageRole, ModelCounts, ModelStats, SessionPeriodAggregate,
@@ -34,6 +36,8 @@ pub struct SingleSessionContribution {
     pub ai_message_count: u32,
     /// Per-day session activity for period drill-down and incremental updates.
     pub daily: BTreeMap<CompactDate, SessionPeriodAggregate>,
+    /// Per-hour session activity keyed by local time as `YYYY-MM-DDTHH`.
+    pub hourly: BTreeMap<String, SessionPeriodAggregate>,
 }
 
 impl SingleSessionContribution {
@@ -45,6 +49,7 @@ impl SingleSessionContribution {
         let mut first_date = CompactDate::default();
         let mut session_hash = SessionHash::default();
         let mut daily = BTreeMap::new();
+        let mut hourly = BTreeMap::new();
 
         for (i, msg) in messages.iter().enumerate() {
             let date = CompactDate::from_local(&msg.date);
@@ -57,18 +62,30 @@ impl SingleSessionContribution {
                 .entry(date)
                 .or_insert_with(SessionPeriodAggregate::default);
             day.message_count = day.message_count.saturating_add(1);
+            let local = msg.date.with_timezone(&Local);
+            let hour = hourly
+                .entry(format!("{}T{:02}", date, local.hour()))
+                .or_insert_with(SessionPeriodAggregate::default);
+            hour.message_count = hour.message_count.saturating_add(1);
             if msg.role == MessageRole::Assistant {
                 ai_message_count += 1;
                 day.ai_message_count = day.ai_message_count.saturating_add(1);
+                hour.ai_message_count = hour.ai_message_count.saturating_add(1);
                 let message_stats = TuiStats::from(&msg.stats);
                 stats += message_stats;
                 day.stats += message_stats;
+                hour.stats += message_stats;
 
                 if let Some(model) = &msg.model {
                     let model_key = intern_model(model);
                     models.increment(model_key, 1);
                     day.models.increment(model_key, 1);
+                    hour.models.increment(model_key, 1);
                     day.model_stats
+                        .entry(model.to_string())
+                        .or_insert_with(|| ModelStats::new(model.to_string()))
+                        .add_message(&msg.stats);
+                    hour.model_stats
                         .entry(model.to_string())
                         .or_insert_with(|| ModelStats::new(model.to_string()))
                         .add_message(&msg.stats);
@@ -98,6 +115,7 @@ impl SingleSessionContribution {
             session_hash,
             ai_message_count,
             daily,
+            hourly,
         }
     }
 }

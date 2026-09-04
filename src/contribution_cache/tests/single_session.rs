@@ -167,6 +167,11 @@ fn test_view_add_single_session_contribution() {
     // Check session stats
     let session = &view.session_aggregates[0];
     assert_eq!(session.stats.input_tokens, 1300);
+    assert_eq!(session.hourly.len(), 1);
+    assert_eq!(
+        session.hourly.values().next().unwrap().stats.input_tokens,
+        1300
+    );
 }
 
 #[test]
@@ -204,6 +209,7 @@ fn test_view_subtract_single_session_contribution() {
     // Session stats should be zeroed
     let session = &view.session_aggregates[0];
     assert_eq!(session.stats.input_tokens, 0);
+    assert!(session.hourly.is_empty());
 }
 
 #[test]

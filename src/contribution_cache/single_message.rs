@@ -3,6 +3,7 @@
 //! Optimized to 32 bytes for cache alignment using bitfield packing.
 
 use c2rust_bitfields::BitfieldStruct;
+use chrono::{Local, Timelike};
 
 use super::SessionHash;
 use crate::cache::ModelKey;
@@ -25,7 +26,8 @@ use crate::types::{CompactDate, ConversationMessage, TuiStats, intern_model};
 // | year_offset       | 2025-2026    | 6         | 63 (2020-2083)    |
 // | month             | 1-12         | 4         | 15                |
 // | day               | 1-31         | 5         | 31                |
-// | duration_ms       | —            | 11        | 2,047 (~2s)       |
+// | hour              | 0-23         | 5         | 31                |
+// | duration_ms       | —            | 6         | 63ms              |
 //
 // Total: 176 bits = 22 bytes
 
@@ -41,7 +43,8 @@ use crate::types::{CompactDate, ConversationMessage, TuiStats, intern_model};
 /// - year_offset:      bits 150-155 (6 bits, years 2020-2083)
 /// - month:            bits 156-159 (4 bits, 1-12)
 /// - day:              bits 160-164 (5 bits, 1-31)
-/// - duration_ms:      bits 165-175 (11 bits; reserved for future use)
+/// - hour:             bits 165-169 (5 bits, 0-23)
+/// - duration_ms:      bits 170-175 (6 bits; reserved for future use)
 #[repr(C, align(1))]
 #[derive(BitfieldStruct, Clone, Copy, Default)]
 #[allow(clippy::duplicated_attributes)]
@@ -55,7 +58,8 @@ pub struct PackedStatsDate {
     #[bitfield(name = "year_offset", ty = "u8", bits = "150..=155")]
     #[bitfield(name = "month", ty = "u8", bits = "156..=159")]
     #[bitfield(name = "day", ty = "u8", bits = "160..=164")]
-    #[bitfield(name = "duration_ms", ty = "u16", bits = "165..=175")]
+    #[bitfield(name = "hour", ty = "u8", bits = "165..=169")]
+    #[bitfield(name = "duration_ms", ty = "u8", bits = "170..=175")]
     data: [u8; 22],
 }
 
@@ -71,6 +75,7 @@ impl std::fmt::Debug for PackedStatsDate {
             .field("year_offset", &self.year_offset())
             .field("month", &self.month())
             .field("day", &self.day())
+            .field("hour", &self.hour())
             .field("duration_ms", &self.duration_ms())
             .finish()
     }
@@ -82,7 +87,7 @@ const BASE_YEAR: u16 = 2020;
 impl PackedStatsDate {
     /// Pack stats and date into the bitfield.
     #[inline]
-    pub fn pack(stats: &crate::types::Stats, date: CompactDate) -> Self {
+    pub fn pack(stats: &crate::types::Stats, date: CompactDate, hour: u8) -> Self {
         let mut packed = Self::default();
 
         // Pack stats (with saturation for safety)
@@ -100,6 +105,7 @@ impl PackedStatsDate {
         packed.set_year_offset(year_offset);
         packed.set_month(date.month());
         packed.set_day(date.day());
+        packed.set_hour(hour.min(23));
 
         // duration_ms reserved for future use
         packed.set_duration_ms(0);
@@ -161,7 +167,11 @@ impl SingleMessageContribution {
         Self {
             session_hash: SessionHash::from_str(&msg.conversation_hash),
             model: msg.model.as_ref().map(|m| intern_model(m)),
-            packed: PackedStatsDate::pack(&msg.stats, CompactDate::from_local(&msg.date)),
+            packed: PackedStatsDate::pack(
+                &msg.stats,
+                CompactDate::from_local(&msg.date),
+                msg.date.with_timezone(&Local).hour() as u8,
+            ),
         }
     }
 
@@ -169,6 +179,12 @@ impl SingleMessageContribution {
     #[inline]
     pub fn date(&self) -> CompactDate {
         self.packed.unpack_date()
+    }
+
+    /// Get the local hour bucket key (`YYYY-MM-DDTHH`).
+    #[inline]
+    pub fn hour_key(&self) -> String {
+        format!("{}T{:02}", self.date(), self.packed.hour())
     }
 
     /// Convert packed stats to TuiStats for display.
@@ -234,7 +250,7 @@ mod size_tests {
         };
         let date = CompactDate::from_parts(2025, 6, 15);
 
-        let packed = PackedStatsDate::pack(&stats, date);
+        let packed = PackedStatsDate::pack(&stats, date, 17);
 
         assert_eq!(packed.input_tokens(), 170_749);
         assert_eq!(packed.output_tokens(), 31_999);
@@ -242,6 +258,7 @@ mod size_tests {
         assert_eq!(packed.cached_tokens(), 186_677);
         assert_eq!(packed.cost_micros(), 3_560_000);
         assert_eq!(packed.tool_calls(), 73);
+        assert_eq!(packed.hour(), 17);
 
         let unpacked_date = packed.unpack_date();
         assert_eq!(unpacked_date.year(), 2025);
@@ -265,7 +282,7 @@ mod size_tests {
         };
         let date = CompactDate::from_parts(2083, 12, 31); // Max year (2020 + 63)
 
-        let packed = PackedStatsDate::pack(&stats, date);
+        let packed = PackedStatsDate::pack(&stats, date, 0);
 
         assert_eq!(packed.input_tokens(), 134_217_727);
         assert_eq!(packed.output_tokens(), 67_108_863);

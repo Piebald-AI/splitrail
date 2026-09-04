@@ -218,6 +218,8 @@ pub struct SessionAggregate {
     pub date: CompactDate,
     /// Per-day activity used when drilling into a day, week, month, or year.
     pub daily: BTreeMap<CompactDate, SessionPeriodAggregate>,
+    /// Per-hour activity, keyed by local time as `YYYY-MM-DDTHH`.
+    pub hourly: BTreeMap<String, SessionPeriodAggregate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -954,6 +956,7 @@ mod tests {
                 session_name: None,
                 date: CompactDate::default(),
                 daily: BTreeMap::new(),
+                hourly: BTreeMap::new(),
             }],
             ..Default::default()
         }
