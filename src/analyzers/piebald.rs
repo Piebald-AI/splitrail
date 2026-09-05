@@ -95,10 +95,56 @@ fn query_chats(conn: &Connection) -> Result<Vec<PiebaldChat>> {
     Ok(chats)
 }
 
-/// Query all messages from the database.
-fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
-    let mut stmt = conn.prepare(
-        "SELECT m.id, m.parent_chat_id, m.role, m.model, m.input_tokens, m.output_tokens,
+/// Database layout before or after Piebald's typed-message-parts migration.
+#[derive(Clone, Copy)]
+enum PiebaldSchema {
+    Legacy,
+    TypedParts,
+}
+
+impl PiebaldSchema {
+    /// Detect the layout from storage rather than an application version. The migration
+    /// creates and backfills generation rows before dropping the legacy columns, all
+    /// in one transaction, so readers see either complete layout. SQL failures must
+    /// still propagate rather than being mistaken for an older schema.
+    fn detect(conn: &Connection) -> Result<Self> {
+        let typed_parts: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'message_generations')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(if typed_parts {
+            Self::TypedParts
+        } else {
+            Self::Legacy
+        })
+    }
+}
+
+/// Query messages using the matching generation layout, retaining user messages
+/// without generation rows while excluding non-conversational context containers.
+fn query_messages(conn: &Connection, schema: PiebaldSchema) -> Result<Vec<PiebaldMessage>> {
+    let sql = match schema {
+        PiebaldSchema::TypedParts => {
+            // Generation metadata is one-to-one with assistant messages, not user
+            // messages. Keep the outer join and the original message timestamps so
+            // migration does not change deduplication identities or streaming dates.
+            "SELECT m.id, m.parent_chat_id, m.role, g.model, g.input_tokens, g.output_tokens,
+                    g.reasoning_tokens, g.cache_read_tokens, g.cache_write_tokens,
+                    COALESCE(responses.service_tier, completions.service_tier) AS service_tier,
+                    m.created_at, m.updated_at
+             FROM messages m
+             LEFT JOIN message_generations g ON g.message_id = m.id
+             LEFT JOIN override_gen_cfg_data_openai_responses responses
+                    ON responses.gen_cfg_id = g.config_id
+             LEFT JOIN override_gen_cfg_data_openai_completions completions
+                    ON completions.gen_cfg_id = g.config_id
+             WHERE m.message_kind = 'normal'
+             ORDER BY m.updated_at"
+        }
+        PiebaldSchema::Legacy => {
+            "SELECT m.id, m.parent_chat_id, m.role, m.model, m.input_tokens, m.output_tokens,
                 m.reasoning_tokens, m.cache_read_tokens, m.cache_write_tokens,
                 COALESCE(responses.service_tier, completions.service_tier) AS service_tier,
                 m.created_at, m.updated_at
@@ -107,8 +153,10 @@ fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
                 ON responses.gen_cfg_id = m.config_id
          LEFT JOIN override_gen_cfg_data_openai_completions completions
                 ON completions.gen_cfg_id = m.config_id
-         ORDER BY m.updated_at",
-    )?;
+         ORDER BY m.updated_at"
+        }
+    };
+    let mut stmt = conn.prepare(sql)?;
 
     let messages = stmt
         .query_map([], |row| {
@@ -135,15 +183,26 @@ fn query_messages(conn: &Connection) -> Result<Vec<PiebaldMessage>> {
 
 /// Query tool call counts per message.
 ///
-/// Joins `message_parts` → `message_part_tool_call` to count how many tool calls
-/// each message made. Returns a map from message ID to tool call count.
-fn query_tool_call_counts(conn: &Connection) -> Result<HashMap<i64, u32>> {
-    let mut stmt = conn.prepare(
-        "SELECT mp.parent_chat_message_id, COUNT(*) as tool_call_count
-         FROM message_parts mp
-         JOIN message_part_tool_call tc ON tc.message_part_id = mp.id
-         GROUP BY mp.parent_chat_message_id",
-    )?;
+/// Returns counts by owning message ID. Typed tools share one execution-context
+/// row per part; counting that row avoids enumerating subtype tables and includes
+/// MCP, legacy, invalid, and still-streaming calls without double counting results.
+fn query_tool_call_counts(conn: &Connection, schema: PiebaldSchema) -> Result<HashMap<i64, u32>> {
+    let sql = match schema {
+        PiebaldSchema::Legacy => {
+            "SELECT mp.parent_chat_message_id, COUNT(*) as tool_call_count
+             FROM message_parts mp
+             JOIN message_part_tool_call tc ON tc.message_part_id = mp.id
+             GROUP BY mp.parent_chat_message_id"
+        }
+        PiebaldSchema::TypedParts => {
+            "SELECT mp.parent_chat_message_id, COUNT(*) as tool_call_count
+             FROM message_parts mp
+             JOIN tool_execution_context tc ON tc.message_part_id = mp.id
+             WHERE mp.part_type = 'tool'
+             GROUP BY mp.parent_chat_message_id"
+        }
+    };
+    let mut stmt = conn.prepare(sql)?;
 
     let counts = stmt
         .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u32>(1)?)))?
@@ -352,10 +411,17 @@ impl Analyzer for PiebaldAnalyzer {
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
-        let conn = open_piebald_db(&source.path)?;
-        let chats = query_chats(&conn)?;
-        let messages = query_messages(&conn)?;
-        let tool_call_counts = query_tool_call_counts(&conn)?;
+        let mut conn = open_piebald_db(&source.path)?;
+        // Pin schema detection and all reads to one snapshot. Piebald may migrate
+        // or stream new usage while Splitrail is running; mixing snapshots could
+        // select a dropped table or combine usage and tool counts from different turns.
+        // This is a deferred read transaction on a read-only connection, never a write.
+        let tx = conn.transaction()?;
+        let schema = PiebaldSchema::detect(&tx)?;
+        let chats = query_chats(&tx)?;
+        let messages = query_messages(&tx, schema)?;
+        let tool_call_counts = query_tool_call_counts(&tx, schema)?;
+        tx.commit()?;
         Ok(convert_messages(&chats, messages, &tool_call_counts))
     }
 
@@ -385,6 +451,10 @@ impl Analyzer for PiebaldAnalyzer {
         ContributionStrategy::MultiSession
     }
 }
+
+#[cfg(test)]
+#[path = "piebald_schema_tests.rs"]
+mod schema_tests;
 
 #[cfg(test)]
 mod tests {
