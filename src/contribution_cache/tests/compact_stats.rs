@@ -16,7 +16,7 @@ fn test_packed_stats_date_from_stats() {
     };
     let date = CompactDate::from_parts(2025, 6, 15);
 
-    let packed = PackedStatsDate::pack(&stats, date);
+    let packed = PackedStatsDate::pack(&stats, date, 0);
 
     assert_eq!(packed.input_tokens(), 1000);
     assert_eq!(packed.output_tokens(), 500);
@@ -44,7 +44,7 @@ fn test_packed_stats_date_to_tui_stats() {
     };
     let date = CompactDate::from_parts(2025, 1, 1);
 
-    let packed = PackedStatsDate::pack(&stats, date);
+    let packed = PackedStatsDate::pack(&stats, date, 0);
     let tui = packed.to_tui_stats();
 
     assert_eq!(tui.input_tokens, 1000);
@@ -62,7 +62,7 @@ fn test_packed_stats_date_preserves_subcent_cost() {
         ..Default::default()
     };
 
-    let packed = PackedStatsDate::pack(&stats, CompactDate::from_parts(2025, 1, 1));
+    let packed = PackedStatsDate::pack(&stats, CompactDate::from_parts(2025, 1, 1), 0);
     let tui = packed.to_tui_stats();
 
     assert!((tui.cost() - 0.004).abs() < f64::EPSILON);
@@ -83,7 +83,7 @@ fn test_packed_stats_date_max_values() {
     };
     let date = CompactDate::from_parts(2083, 12, 31); // Max year (2020 + 63)
 
-    let packed = PackedStatsDate::pack(&stats, date);
+    let packed = PackedStatsDate::pack(&stats, date, 0);
 
     assert_eq!(packed.input_tokens(), 134_217_727);
     assert_eq!(packed.output_tokens(), 67_108_863);
@@ -112,7 +112,7 @@ fn test_packed_stats_date_saturation() {
     };
     let date = CompactDate::from_parts(2100, 1, 1); // Exceeds max year
 
-    let packed = PackedStatsDate::pack(&stats, date);
+    let packed = PackedStatsDate::pack(&stats, date, 0);
 
     // Values should be saturated to max
     assert_eq!(packed.input_tokens(), 0x7FF_FFFF); // 27-bit max
@@ -138,7 +138,7 @@ fn test_packed_stats_date_observed_values() {
     };
     let date = CompactDate::from_parts(2025, 6, 15);
 
-    let packed = PackedStatsDate::pack(&stats, date);
+    let packed = PackedStatsDate::pack(&stats, date, 0);
 
     assert_eq!(packed.input_tokens(), 170_749);
     assert_eq!(packed.output_tokens(), 31_999);
@@ -158,7 +158,7 @@ fn test_packed_stats_date_zero_values() {
     let stats = Stats::default();
     let date = CompactDate::from_parts(2020, 1, 1); // Minimum year
 
-    let packed = PackedStatsDate::pack(&stats, date);
+    let packed = PackedStatsDate::pack(&stats, date, 0);
 
     assert_eq!(packed.input_tokens(), 0);
     assert_eq!(packed.output_tokens(), 0);

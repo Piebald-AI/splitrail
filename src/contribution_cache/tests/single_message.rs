@@ -89,6 +89,15 @@ fn test_view_add_single_message_contribution() {
     let session = &view.session_aggregates[0];
     assert_eq!(session.stats.input_tokens, 1000);
     assert_eq!(session.stats.output_tokens, 500);
+    assert_eq!(session.hourly.len(), 1);
+    assert_eq!(
+        session.hourly.values().next().unwrap().stats.input_tokens,
+        1000
+    );
+    assert_eq!(
+        session.hourly.values().next().unwrap().model_stats["claude-3-5-sonnet"].input_tokens,
+        1000
+    );
 }
 
 #[test]
@@ -120,6 +129,7 @@ fn test_view_subtract_single_message_contribution() {
     // Session stats should be zeroed
     let session = &view.session_aggregates[0];
     assert_eq!(session.stats.input_tokens, 0);
+    assert!(session.hourly.is_empty());
 }
 
 #[test]

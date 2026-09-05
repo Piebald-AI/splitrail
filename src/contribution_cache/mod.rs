@@ -19,14 +19,38 @@ use std::path::Path;
 use dashmap::DashMap;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::types::{AnalyzerStatsView, CompactDate, DailyStats, SessionPeriodAggregate};
+use crate::types::{
+    AnalyzerStatsView, CompactDate, DailyStats, ModelStats, SessionPeriodAggregate, TuiStats,
+    resolve_model,
+};
 
-fn merge_daily_add(
-    dst: &mut BTreeMap<CompactDate, SessionPeriodAggregate>,
-    src: &BTreeMap<CompactDate, SessionPeriodAggregate>,
+fn single_message_model_stats(
+    contrib: &SingleMessageContribution,
+    stats: TuiStats,
+) -> Option<(String, ModelStats)> {
+    let model = resolve_model(contrib.model?);
+    Some((
+        model.to_string(),
+        ModelStats {
+            model: model.to_string(),
+            message_count: 1,
+            input_tokens: stats.input_tokens,
+            output_tokens: stats.output_tokens,
+            reasoning_tokens: stats.reasoning_tokens,
+            cached_tokens: stats.cached_tokens,
+            cost: stats.cost(),
+            tool_calls: stats.tool_calls,
+            ..Default::default()
+        },
+    ))
+}
+
+fn merge_period_add<K: Ord + Clone>(
+    dst: &mut BTreeMap<K, SessionPeriodAggregate>,
+    src: &BTreeMap<K, SessionPeriodAggregate>,
 ) {
-    for (date, activity) in src {
-        let daily = dst.entry(*date).or_default();
+    for (period, activity) in src {
+        let daily = dst.entry(period.clone()).or_default();
         daily.message_count = daily.message_count.saturating_add(activity.message_count);
         daily.ai_message_count = daily
             .ai_message_count
@@ -45,12 +69,12 @@ fn merge_daily_add(
     }
 }
 
-fn merge_daily_subtract(
-    dst: &mut BTreeMap<CompactDate, SessionPeriodAggregate>,
-    src: &BTreeMap<CompactDate, SessionPeriodAggregate>,
+fn merge_period_subtract<K: Ord>(
+    dst: &mut BTreeMap<K, SessionPeriodAggregate>,
+    src: &BTreeMap<K, SessionPeriodAggregate>,
 ) {
-    for (date, activity) in src {
-        if let Some(daily) = dst.get_mut(date) {
+    for (period, activity) in src {
+        if let Some(daily) = dst.get_mut(period) {
             daily.message_count = daily.message_count.saturating_sub(activity.message_count);
             daily.ai_message_count = daily
                 .ai_message_count
@@ -275,12 +299,24 @@ impl AnalyzerStatsView {
             let stats = contrib.to_tui_stats();
             existing.stats += stats;
             let daily = existing.daily.entry(date).or_default();
+            let hourly = existing.hourly.entry(contrib.hour_key()).or_default();
             daily.message_count = daily.message_count.saturating_add(1);
+            hourly.message_count = hourly.message_count.saturating_add(1);
             daily.stats += stats;
+            hourly.stats += stats;
             if let Some(model) = contrib.model {
                 daily.ai_message_count = daily.ai_message_count.saturating_add(1);
+                hourly.ai_message_count = hourly.ai_message_count.saturating_add(1);
                 existing.models.increment(model, 1);
                 daily.models.increment(model, 1);
+                hourly.models.increment(model, 1);
+                if let Some((model, model_stats)) = single_message_model_stats(contrib, stats) {
+                    hourly
+                        .model_stats
+                        .entry(model.clone())
+                        .or_insert_with(|| ModelStats::new(model))
+                        .add_model_stats(&model_stats);
+                }
             }
         }
         // Note: We don't create new sessions here - they should already exist from initial load.
@@ -319,11 +355,30 @@ impl AnalyzerStatsView {
                     daily.models.decrement(model, 1);
                 }
             }
+            if let Some(hourly) = existing.hourly.get_mut(&contrib.hour_key()) {
+                hourly.message_count = hourly.message_count.saturating_sub(1);
+                hourly.stats -= stats;
+                if let Some(model) = contrib.model {
+                    hourly.ai_message_count = hourly.ai_message_count.saturating_sub(1);
+                    hourly.models.decrement(model, 1);
+                    if let Some((model, model_stats)) = single_message_model_stats(contrib, stats)
+                        && let Some(existing) = hourly.model_stats.get_mut(&model)
+                    {
+                        existing.sub_model_stats(&model_stats);
+                    }
+                    hourly
+                        .model_stats
+                        .retain(|_, stats| stats.message_count > 0);
+                }
+            }
             if let Some(model) = contrib.model {
                 existing.models.decrement(model, 1);
             }
             existing
                 .daily
+                .retain(|_, activity| activity.message_count > 0);
+            existing
+                .hourly
                 .retain(|_, activity| activity.message_count > 0);
         }
     }
@@ -369,7 +424,8 @@ impl AnalyzerStatsView {
             for &(model, count) in contrib.models.iter() {
                 existing.models.increment(model, count);
             }
-            merge_daily_add(&mut existing.daily, &contrib.daily);
+            merge_period_add(&mut existing.daily, &contrib.daily);
+            merge_period_add(&mut existing.hourly, &contrib.hourly);
         }
     }
 
@@ -419,7 +475,8 @@ impl AnalyzerStatsView {
             for &(model, count) in contrib.models.iter() {
                 existing.models.decrement(model, count);
             }
-            merge_daily_subtract(&mut existing.daily, &contrib.daily);
+            merge_period_subtract(&mut existing.daily, &contrib.daily);
+            merge_period_subtract(&mut existing.hourly, &contrib.hourly);
         }
     }
 
@@ -448,7 +505,8 @@ impl AnalyzerStatsView {
                 for &(model, count) in new_session.models.iter() {
                     existing.models.increment(model, count);
                 }
-                merge_daily_add(&mut existing.daily, &new_session.daily);
+                merge_period_add(&mut existing.daily, &new_session.daily);
+                merge_period_add(&mut existing.hourly, &new_session.hourly);
                 if new_session.first_timestamp < existing.first_timestamp {
                     existing.first_timestamp = new_session.first_timestamp;
                     existing.date = new_session.date;
@@ -495,7 +553,8 @@ impl AnalyzerStatsView {
                 for &(model, count) in old_session.models.iter() {
                     existing.models.decrement(model, count);
                 }
-                merge_daily_subtract(&mut existing.daily, &old_session.daily);
+                merge_period_subtract(&mut existing.daily, &old_session.daily);
+                merge_period_subtract(&mut existing.hourly, &old_session.hourly);
             }
         }
 

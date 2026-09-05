@@ -117,6 +117,10 @@ fn aggregate_sessions_splits_conversation_when_project_changes() {
 #[test]
 fn aggregate_view_from_config() {
     assert!(matches!(
+        AggregateViewMode::from_config("hour"),
+        AggregateViewMode::Hourly
+    ));
+    assert!(matches!(
         AggregateViewMode::from_config("daily"),
         AggregateViewMode::Daily
     ));
@@ -1174,6 +1178,7 @@ fn model_filter_recalculates_stats_and_sessions() {
         session_name: None,
         date,
         daily: BTreeMap::new(),
+        hourly: BTreeMap::new(),
     };
     let multi_models = {
         let mut models = ModelCounts::new();
@@ -1198,6 +1203,7 @@ fn model_filter_recalculates_stats_and_sessions() {
                 ..Default::default()
             },
         )]),
+        hourly: BTreeMap::new(),
     };
     let view = AnalyzerStatsView {
         daily_stats,

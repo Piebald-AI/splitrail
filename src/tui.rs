@@ -22,12 +22,12 @@ use crossterm::terminal::{
 use crossterm::{ExecutableCommand, execute};
 use logic::{
     SessionAggregate, aggregate_daily_stats_by_month, aggregate_daily_stats_by_week,
-    aggregate_daily_stats_by_year, date_matches_buffer, filtered_aggregate_keys, has_data_shared,
-    is_empty_period,
+    aggregate_daily_stats_by_year, aggregate_session_stats_by_hour, date_matches_buffer,
+    filtered_aggregate_keys, has_data_shared, is_empty_period,
 };
 use parking_lot::Mutex;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Tabs};
@@ -57,6 +57,7 @@ pub enum UploadStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AggregateViewMode {
+    Hourly,
     Daily,
     Weekly,
     Monthly,
@@ -67,6 +68,7 @@ impl AggregateViewMode {
     /// Parse the configured startup view (tui.default_view).
     fn from_config(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
+            "hourly" | "hour" => Self::Hourly,
             "weekly" | "week" => Self::Weekly,
             "monthly" | "month" => Self::Monthly,
             "yearly" | "year" => Self::Yearly,
@@ -79,13 +81,15 @@ impl AggregateViewMode {
             Self::Daily => Self::Weekly,
             Self::Weekly => Self::Monthly,
             Self::Monthly => Self::Yearly,
-            Self::Yearly => Self::Daily,
+            Self::Yearly => Self::Hourly,
+            Self::Hourly => Self::Daily,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PeriodFilter {
+    Hour { date: CompactDate, hour: u8 },
     Day(CompactDate),
     Week { iso_year: i32, iso_week: u32 },
     Month { year: u16, month: u8 },
@@ -95,6 +99,13 @@ enum PeriodFilter {
 impl PeriodFilter {
     fn from_period_key(period: &str, aggregate_view_mode: AggregateViewMode) -> Option<Self> {
         match aggregate_view_mode {
+            AggregateViewMode::Hourly => {
+                let (date, hour) = period.split_once('T')?;
+                Some(Self::Hour {
+                    date: CompactDate::from_str(date)?,
+                    hour: hour.parse().ok()?,
+                })
+            }
             AggregateViewMode::Daily => CompactDate::from_str(period).map(Self::Day),
             AggregateViewMode::Weekly => {
                 let (year, week) = period.split_once("-W")?;
@@ -118,6 +129,9 @@ impl PeriodFilter {
 
     fn matches_compact_date(self, date: CompactDate) -> bool {
         match self {
+            Self::Hour {
+                date: hour_date, ..
+            } => hour_date == date,
             Self::Day(day) => day == date,
             Self::Week { iso_year, iso_week } => compact_date_to_naive(date)
                 .map(|date| {
@@ -130,8 +144,19 @@ impl PeriodFilter {
         }
     }
 
+    fn matches_hour_key(self, key: &str) -> bool {
+        match self {
+            Self::Hour { date, hour } => key == format!("{date}T{hour:02}"),
+            _ => key
+                .get(..10)
+                .and_then(CompactDate::from_str)
+                .is_some_and(|date| self.matches_compact_date(date)),
+        }
+    }
+
     fn display_key(self) -> String {
         match self {
+            Self::Hour { date, hour } => format!("{date}T{hour:02}"),
             Self::Day(day) => day.to_string(),
             Self::Week { iso_year, iso_week } => format!("{iso_year:04}-W{iso_week:02}"),
             Self::Month { year, month } => format!("{year:04}-{month:02}"),
@@ -141,6 +166,7 @@ impl PeriodFilter {
 
     fn view_mode(self) -> AggregateViewMode {
         match self {
+            Self::Hour { .. } => AggregateViewMode::Hourly,
             Self::Day(_) => AggregateViewMode::Daily,
             Self::Week { .. } => AggregateViewMode::Weekly,
             Self::Month { .. } => AggregateViewMode::Monthly,
@@ -174,6 +200,10 @@ fn get_aggregate_stats<'a>(
     aggregate_view_mode: AggregateViewMode,
 ) -> AggregateStatsData<'a> {
     match aggregate_view_mode {
+        AggregateViewMode::Hourly => AggregateStatsData::Owned(aggregate_session_stats_by_hour(
+            &view.session_aggregates,
+            view.analyzer_name.as_ref() == "All Tools",
+        )),
         AggregateViewMode::Daily => AggregateStatsData::Borrowed(&view.daily_stats),
         AggregateViewMode::Weekly => {
             AggregateStatsData::Owned(aggregate_daily_stats_by_week(&view.daily_stats))
@@ -235,7 +265,12 @@ fn filtered_session_count(view: &AnalyzerStatsView, period_filter: Option<Period
             view.session_aggregates
                 .iter()
                 .filter(|session| {
-                    if session.daily.is_empty() {
+                    if matches!(filter, PeriodFilter::Hour { .. }) {
+                        session
+                            .hourly
+                            .keys()
+                            .any(|hour| filter.matches_hour_key(hour))
+                    } else if session.daily.is_empty() {
                         filter.matches_compact_date(session.date)
                     } else {
                         session
@@ -260,6 +295,29 @@ fn sessions_for_period(
     sessions
         .iter()
         .filter_map(|session| {
+            if matches!(filter, PeriodFilter::Hour { .. }) {
+                let mut filtered = SessionAggregate {
+                    session_id: session.session_id.clone(),
+                    first_timestamp: session.first_timestamp,
+                    analyzer_name: Arc::clone(&session.analyzer_name),
+                    stats: TuiStats::default(),
+                    models: ModelCounts::new(),
+                    project_id: session.project_id.clone(),
+                    project_path: session.project_path.clone(),
+                    session_name: session.session_name.clone(),
+                    date: session.date,
+                    daily: BTreeMap::new(),
+                    hourly: BTreeMap::new(),
+                };
+                let activity = session
+                    .hourly
+                    .iter()
+                    .find(|(hour, _)| filter.matches_hour_key(hour))?;
+                filtered.stats = activity.1.stats;
+                filtered.models = activity.1.models.clone();
+                return Some(filtered);
+            }
+
             if session.daily.is_empty() {
                 return filter
                     .matches_compact_date(session.date)
@@ -277,6 +335,7 @@ fn sessions_for_period(
                 session_name: session.session_name.clone(),
                 date: session.date,
                 daily: BTreeMap::new(),
+                hourly: BTreeMap::new(),
             };
 
             let mut has_activity = false;
@@ -323,6 +382,37 @@ fn tui_stats_from_model_stats(stats: &ModelStats) -> TuiStats {
     tui_stats
 }
 
+fn filter_session_period_by_model(
+    activity: &mut crate::types::SessionPeriodAggregate,
+    filter: &str,
+) -> bool {
+    let original_models = activity.models.clone();
+    let original_stats = activity.stats;
+    let original_ai_messages = activity.ai_message_count;
+    let original_user_messages = activity.message_count.saturating_sub(original_ai_messages);
+    activity.models = filter_model_counts(&activity.models, filter);
+    activity
+        .model_stats
+        .retain(|model, _| model_name_matches(model, filter));
+    activity.ai_message_count = activity.models.iter().map(|(_, count)| count).sum();
+    activity.stats = TuiStats::default();
+    for model_stats in activity.model_stats.values() {
+        activity.stats += tui_stats_from_model_stats(model_stats);
+    }
+
+    let all_models_match = original_models
+        .iter()
+        .all(|(model, _)| model_name_matches(resolve_model(*model), filter));
+    let modeled_messages: u32 = original_models.iter().map(|(_, count)| count).sum();
+    if modeled_messages == original_ai_messages && all_models_match {
+        activity.ai_message_count = original_ai_messages;
+        activity.stats = original_stats;
+    }
+    activity.message_count = original_user_messages.saturating_add(activity.ai_message_count);
+
+    activity.models.iter().next().is_some() || !activity.model_stats.is_empty()
+}
+
 fn filter_analyzer_view_by_model(
     view: &AnalyzerStatsView,
     model_filter: &str,
@@ -343,6 +433,9 @@ fn filter_analyzer_view_by_model(
         })
         .cloned()
         .map(|mut session| {
+            session
+                .hourly
+                .retain(|_, activity| filter_session_period_by_model(activity, &filter));
             if session.daily.is_empty() {
                 session.models = filter_model_counts(&session.models, &filter);
             } else {
@@ -802,6 +895,12 @@ fn format_aggregate_period_for_display(
     aggregate_view_mode: AggregateViewMode,
 ) -> String {
     match aggregate_view_mode {
+        AggregateViewMode::Hourly => {
+            let Some((date, hour)) = period.split_once('T') else {
+                return period.to_string();
+            };
+            format!("{} {hour}:00", format_date_for_display(date))
+        }
         AggregateViewMode::Daily => format_date_for_display(period),
         AggregateViewMode::Weekly => format_week_for_display(period),
         AggregateViewMode::Monthly => format_month_for_display(period),
@@ -913,6 +1012,11 @@ const TOKEN_COL_WIDTH: u16 = 12;
 /// Keeping both count columns at this width prevents right-aligned totals from
 /// being clipped on the left.
 const COUNT_COL_WIDTH: u16 = 7;
+
+const APPS_COL_MIN_WIDTH: usize = 4;
+const APPS_COL_MAX_WIDTH: usize = 32;
+const MODELS_COL_MIN_WIDTH: usize = 6;
+const MODELS_COL_MAX_WIDTH: usize = 48;
 
 pub fn run_tui(
     stats_receiver: watch::Receiver<MultiAnalyzerStatsView>,
@@ -2057,6 +2161,7 @@ fn draw_ui(
             let base_help_text = match ui_state.stats_view_mode {
                 StatsViewMode::Aggregate => {
                     let jump_label = match ui_state.aggregate_view_mode {
+                        AggregateViewMode::Hourly => "hour jump",
                         AggregateViewMode::Daily => "date jump",
                         AggregateViewMode::Weekly => "week jump",
                         AggregateViewMode::Monthly => "month jump",
@@ -2064,11 +2169,11 @@ fn draw_ui(
                     };
 
                     format!(
-                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • p for projects • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q to quit"
+                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • p for projects • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle hour/day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q to quit"
                     )
                 }
                 StatsViewMode::Session => {
-                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • p for projects • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • m to cycle day/week/month/year • Esc or Ctrl+T for aggregate view • q to quit".to_string()
+                    "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • p for projects • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • m to cycle hour/day/week/month/year • Esc or Ctrl+T for aggregate view • q to quit".to_string()
                 }
             };
 
@@ -2396,10 +2501,16 @@ fn draw_aggregate_stats_table(
     color_costs: bool,
 ) -> (usize, bool) {
     let period_header = match aggregate_view_mode {
+        AggregateViewMode::Hourly => "Hour",
         AggregateViewMode::Daily => "Date",
         AggregateViewMode::Weekly => "Week",
         AggregateViewMode::Monthly => "Month",
         AggregateViewMode::Yearly => "Year",
+    };
+    let period_width = if aggregate_view_mode == AggregateViewMode::Hourly {
+        17
+    } else {
+        11
     };
 
     let aggregate_stats = get_aggregate_stats(stats, aggregate_view_mode);
@@ -2519,6 +2630,8 @@ fn draw_aggregate_stats_table(
     let mut total_models = BTreeMap::new();
     let mut total_model_stats = BTreeMap::new();
     let mut all_apps = std::collections::BTreeSet::new();
+    let mut max_apps_width = APPS_COL_MIN_WIDTH;
+    let mut max_models_width = MODELS_COL_MIN_WIDTH;
 
     for (i, period) in visible_periods.iter().enumerate() {
         let period_stats = aggregate_stats
@@ -2547,10 +2660,12 @@ fn draw_aggregate_stats_table(
                 .add_model_stats(stats);
         }
         let models = format_model_usage_shares(&period_stats.models, &period_stats.model_stats);
+        max_models_width = max_models_width.max(models.chars().count());
 
         let mut apps_vec: Vec<String> = period_stats.apps.keys().cloned().collect();
         apps_vec.sort();
         let apps = apps_vec.join(", ");
+        max_apps_width = max_apps_width.max(apps.chars().count());
         all_apps.extend(period_stats.apps.keys().cloned());
 
         // Check if this is an empty row
@@ -2752,6 +2867,49 @@ fn draw_aggregate_stats_table(
         .any(|model| is_model_estimated(model));
     let all_apps_text = all_apps.into_iter().collect::<Vec<_>>().join(", ");
     let all_models_text = format_model_usage_shares(&total_models, &total_model_stats);
+    let mut apps_column_width = max_apps_width
+        .max(all_apps_text.chars().count())
+        .clamp(APPS_COL_MIN_WIDTH, APPS_COL_MAX_WIDTH);
+    let mut models_column_width = max_models_width
+        .max(all_models_text.chars().count())
+        .clamp(MODELS_COL_MIN_WIDTH, MODELS_COL_MAX_WIDTH);
+
+    let mut fixed_width = 1usize + period_width as usize + 10;
+    let mut column_count = 3usize;
+    for (column, width) in [
+        ("cached", TOKEN_COL_WIDTH),
+        ("input", TOKEN_COL_WIDTH),
+        ("output", TOKEN_COL_WIDTH),
+        ("reason", TOKEN_COL_WIDTH),
+        ("convs", COUNT_COL_WIDTH),
+        ("tools", COUNT_COL_WIDTH),
+    ] {
+        if show(column) {
+            fixed_width += width as usize;
+            column_count += 1;
+        }
+    }
+    column_count += usize::from(show("apps")) + usize::from(show("models"));
+    let column_spacing = column_count.saturating_sub(1) * 2;
+    let available_text_width = (area.width as usize)
+        .saturating_sub(fixed_width)
+        .saturating_sub(column_spacing);
+    let desired_text_width = if show("apps") { apps_column_width } else { 0 }
+        + if show("models") {
+            models_column_width
+        } else {
+            0
+        };
+    let mut overflow = desired_text_width.saturating_sub(available_text_width);
+    if show("apps") {
+        let shrink = overflow.min(apps_column_width.saturating_sub(APPS_COL_MIN_WIDTH));
+        apps_column_width -= shrink;
+        overflow -= shrink;
+    }
+    if show("models") && overflow > 0 {
+        let shrink = overflow.min(models_column_width.saturating_sub(MODELS_COL_MIN_WIDTH));
+        models_column_width -= shrink;
+    }
 
     // Add separator row before totals
     let token_sep = "─".repeat(TOKEN_COL_WIDTH as usize);
@@ -2763,7 +2921,7 @@ fn draw_aggregate_stats_table(
     };
     let mut sep_cells = vec![
         dim(String::new()),
-        dim("───────────".into()),
+        dim("─".repeat(period_width as usize)),
         dim("──────────".into()),
     ];
     if show("cached") {
@@ -2786,10 +2944,10 @@ fn draw_aggregate_stats_table(
         sep_cells.push(dim(count_sep));
     }
     if show("apps") {
-        sep_cells.push(dim("─".repeat(all_apps_text.len().max(16))));
+        sep_cells.push(dim("─".repeat(apps_column_width)));
     }
     if show("models") {
-        sep_cells.push(dim("─".repeat(all_models_text.len().max(18))));
+        sep_cells.push(dim("─".repeat(models_column_width)));
     }
     rows.push(Row::new(sep_cells));
 
@@ -2808,6 +2966,7 @@ fn draw_aggregate_stats_table(
         },
         Line::from(Span::styled(
             match aggregate_view_mode {
+                AggregateViewMode::Hourly => format!("Total ({}h)", visible_periods.len()),
                 AggregateViewMode::Daily => format!("Total ({}d)", visible_periods.len()),
                 AggregateViewMode::Weekly => format!("Total ({}w)", visible_periods.len()),
                 AggregateViewMode::Monthly => format!("Total ({}m)", visible_periods.len()),
@@ -2903,8 +3062,8 @@ fn draw_aggregate_stats_table(
     let total_rows = rows.len();
 
     let mut widths = vec![
-        Constraint::Length(1),  // Arrow
-        Constraint::Length(11), // Date/Month
+        Constraint::Length(1), // Arrow
+        Constraint::Length(period_width),
         Constraint::Length(10), // Cost
     ];
     if show("cached") {
@@ -2926,15 +3085,16 @@ fn draw_aggregate_stats_table(
         widths.push(Constraint::Length(COUNT_COL_WIDTH));
     }
     if show("apps") {
-        widths.push(Constraint::Min(16));
+        widths.push(Constraint::Length(apps_column_width as u16));
     }
     if show("models") {
-        widths.push(Constraint::Min(10));
+        widths.push(Constraint::Length(models_column_width as u16));
     }
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().title(""))
         .row_highlight_style(Style::default().fg(accent))
+        .flex(Flex::Start)
         .column_spacing(2);
 
     frame.render_stateful_widget(table, area, table_state);
@@ -3401,12 +3561,25 @@ fn draw_summary_stats(
 
     for stats_arc in filtered_stats {
         let stats = stats_arc.read();
-        // Iterate directly - filter inline if a period filter is set
-        for day_stats in stats.daily_stats.values() {
-            if let Some(filter) = period_filter
-                && !filter.matches_compact_date(day_stats.date)
-            {
-                continue;
+        let period_stats = if matches!(period_filter, Some(PeriodFilter::Hour { .. })) {
+            AggregateStatsData::Owned(aggregate_session_stats_by_hour(
+                &stats.session_aggregates,
+                false,
+            ))
+        } else {
+            AggregateStatsData::Borrowed(&stats.daily_stats)
+        };
+
+        for (period, day_stats) in period_stats.as_map() {
+            if let Some(filter) = period_filter {
+                let matches = if matches!(filter, PeriodFilter::Hour { .. }) {
+                    filter.matches_hour_key(period)
+                } else {
+                    filter.matches_compact_date(day_stats.date)
+                };
+                if !matches {
+                    continue;
+                }
             }
 
             total_cost_cents += day_stats.stats.cost_cents as u64;
