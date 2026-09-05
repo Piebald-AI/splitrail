@@ -103,14 +103,18 @@ enum PiebaldSchema {
 }
 
 impl PiebaldSchema {
-    /// Detect the layout from storage rather than an application version. The migration
-    /// creates and backfills generation rows before dropping the legacy columns, all
-    /// in one transaction, so readers see either complete layout. SQL failures must
-    /// still propagate rather than being mistaken for an older schema.
+    /// Detect finalized storage rather than an application version. Piebald commits
+    /// the additive schema before backfilling tools, so the generation table can
+    /// coexist with authoritative legacy calls and an empty execution-context table.
+    /// Keep legacy reads until finalization drops the old tool table atomically with
+    /// the old message columns. This also covers a failed or in-progress backfill.
+    /// SQL failures still propagate rather than being mistaken for an older schema.
     fn detect(conn: &Connection) -> Result<Self> {
         let typed_parts: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'message_generations')",
+             WHERE type = 'table' AND name = 'message_generations')
+             AND NOT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'message_part_tool_call')",
             [],
             |row| row.get(0),
         )?;

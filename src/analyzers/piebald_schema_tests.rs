@@ -186,3 +186,29 @@ fn broken_typed_schema_is_an_error_not_empty_history_or_legacy_fallback() {
     let error = PiebaldAnalyzer::new().parse_source(&source).unwrap_err();
     assert!(error.to_string().contains("g.model"), "{error}");
 }
+
+#[test]
+fn additive_schema_keeps_legacy_tools_until_finalization() {
+    let (_directory, source) = fixture(PiebaldSchema::Legacy);
+    let analyzer = PiebaldAnalyzer::new();
+    let before = analyzer.parse_source(&source).unwrap();
+    let conn = Connection::open(&source.path).unwrap();
+    // Piebald commits these additions before its separate backfill transaction.
+    // The copied generations exist, but legacy calls remain authoritative until
+    // finalization: the new execution table is still empty if backfill fails.
+    conn.execute_batch(
+        "CREATE TABLE message_generations AS
+             SELECT id AS message_id, model, config_id, input_tokens, output_tokens,
+                    reasoning_tokens, cache_read_tokens, cache_write_tokens
+             FROM messages WHERE role = 'assistant';
+         CREATE TABLE tool_execution_context (message_part_id INTEGER PRIMARY KEY);
+         ALTER TABLE messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'normal';",
+    )
+    .unwrap();
+    let intermediate = analyzer.parse_source(&source).unwrap();
+    assert_history(&intermediate);
+    assert_eq!(
+        simd_json::to_string(&before).unwrap(),
+        simd_json::to_string(&intermediate).unwrap()
+    );
+}
