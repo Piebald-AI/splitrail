@@ -10,7 +10,7 @@ use crate::tui::{
     filter_analyzer_view_by_project, filtered_session_count, format_model_usage_shares,
     format_month_for_display, format_week_for_display, format_year_for_display, parse_accent,
     sessions_for_period, show_upload_error, show_upload_success, update_period_filters,
-    update_table_states, update_window_offsets,
+    update_table_states, update_window_offsets, wrap_model_usage_text,
 };
 use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, Application, CompactDate, ConversationMessage,
@@ -1113,6 +1113,72 @@ fn project_summary_and_filter_merge_tools_by_path() {
     assert_eq!(day.conversations, 2);
     assert_eq!(day.model_stats["gpt-5"].input_tokens, 100);
     assert_eq!(day.model_stats["gpt-5.6"].input_tokens, 200);
+}
+
+#[test]
+fn model_usage_text_wraps_without_dropping_entries() {
+    let wrapped = wrap_model_usage_text("model-a 60.0%, model-b 40.0%", 14, Color::Gray.into());
+
+    assert_eq!(wrapped.height(), 2);
+    assert_eq!(wrapped.lines[0].to_string(), "model-a 60.0%");
+    assert_eq!(wrapped.lines[1].to_string(), "model-b 40.0%");
+}
+
+#[test]
+fn aggregate_table_wraps_model_column_on_narrow_terminal() {
+    let view = AnalyzerStatsView {
+        daily_stats: BTreeMap::from([(
+            "2025-01-01".to_string(),
+            DailyStats {
+                date: CompactDate::from_str("2025-01-01").unwrap(),
+                models: BTreeMap::from([(String::from("a"), 1), (String::from("b"), 1)]),
+                ..DailyStats::default()
+            },
+        )]),
+        session_aggregates: Vec::new(),
+        num_conversations: 1,
+        analyzer_name: Arc::from("test"),
+    };
+    let format_options = crate::utils::NumberFormatOptions {
+        use_comma: false,
+        use_human: false,
+        locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
+        decimal_places: 2,
+    };
+    let backend = TestBackend::new(115, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut table_state = TableState::default();
+
+    terminal
+        .draw(|frame| {
+            draw_aggregate_stats_table(
+                frame,
+                Rect::new(0, 0, 115, 12),
+                &view,
+                &format_options,
+                &mut table_state,
+                AggregateViewMode::Daily,
+                "",
+                false,
+                false,
+                Color::Cyan,
+                &HashSet::new(),
+                false,
+            );
+        })
+        .unwrap();
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("a 50.0%"));
+    assert!(rendered.contains("b 50.0%"));
 }
 
 #[test]
