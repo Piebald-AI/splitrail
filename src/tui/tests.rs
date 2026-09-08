@@ -1122,6 +1122,11 @@ fn model_usage_text_wraps_without_dropping_entries() {
     assert_eq!(wrapped.height(), 2);
     assert_eq!(wrapped.lines[0].to_string(), "model-a 60.0%");
     assert_eq!(wrapped.lines[1].to_string(), "model-b 40.0%");
+
+    let wide_name = wrap_model_usage_text("模型名称 100.0%", 9, Color::Gray.into());
+    assert!(wide_name.lines.iter().all(|line| line.width() <= 9));
+    assert_eq!(wide_name.lines[0].to_string(), "模型名称 ");
+    assert_eq!(wide_name.lines[1].to_string(), "100.0%");
 }
 
 #[test]
@@ -1131,7 +1136,7 @@ fn aggregate_table_wraps_model_column_on_narrow_terminal() {
             "2025-01-01".to_string(),
             DailyStats {
                 date: CompactDate::from_str("2025-01-01").unwrap(),
-                models: BTreeMap::from([(String::from("a"), 1), (String::from("b"), 1)]),
+                models: BTreeMap::from([(String::from("模型名称"), 1), (String::from("b"), 1)]),
                 ..DailyStats::default()
             },
         )]),
@@ -1177,7 +1182,9 @@ fn aggregate_table_wraps_model_column_on_narrow_terminal() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("a 50.0%"));
+    for character in ["模", "型", "名", "称"] {
+        assert!(rendered.contains(character));
+    }
     assert!(rendered.contains("b 50.0%"));
 }
 

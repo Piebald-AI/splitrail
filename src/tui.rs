@@ -2488,6 +2488,32 @@ fn format_model_usage_shares(
 /// Wrap model shares to the available column width without dropping any text.
 /// Model entries stay together when possible and are hard-wrapped only when a
 /// single entry is wider than the column.
+fn terminal_text_width(text: &str) -> usize {
+    Line::from(text).width()
+}
+
+fn split_terminal_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+
+    for character in text.chars() {
+        let character_width = terminal_text_width(&character.to_string());
+        if !current.is_empty() && current_width + character_width > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(character);
+        current_width += character_width;
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn wrap_model_usage_text(text: &str, width: usize, style: Style) -> Text<'static> {
     let width = width.max(1);
     let mut lines = Vec::new();
@@ -2500,7 +2526,7 @@ fn wrap_model_usage_text(text: &str, width: usize, style: Style) -> Text<'static
             format!("{current}, {entry}")
         };
 
-        if candidate.chars().count() <= width {
+        if terminal_text_width(&candidate) <= width {
             current = candidate;
             continue;
         }
@@ -2509,16 +2535,14 @@ fn wrap_model_usage_text(text: &str, width: usize, style: Style) -> Text<'static
             lines.push(std::mem::take(&mut current));
         }
 
-        if entry.chars().count() <= width {
+        if terminal_text_width(entry) <= width {
             current = entry.to_string();
             continue;
         }
 
-        let mut entry_chars = entry.chars();
-        while entry_chars.clone().count() > width {
-            lines.push(entry_chars.by_ref().take(width).collect());
-        }
-        current = entry_chars.collect();
+        let mut entry_lines = split_terminal_text(entry, width);
+        current = entry_lines.pop().unwrap_or_default();
+        lines.extend(entry_lines);
     }
 
     if !current.is_empty() {
@@ -2653,7 +2677,7 @@ fn draw_aggregate_stats_table(
             .get(period)
             .expect("visible period key must exist in aggregate stats");
         let models = format_model_usage_shares(&period_stats.models, &period_stats.model_stats);
-        max_models_width = max_models_width.max(models.chars().count());
+        max_models_width = max_models_width.max(terminal_text_width(&models));
         for (model, count) in &period_stats.models {
             *width_total_models.entry(model.clone()).or_insert(0) += count;
         }
@@ -2666,7 +2690,7 @@ fn draw_aggregate_stats_table(
 
         let mut apps_vec: Vec<String> = period_stats.apps.keys().cloned().collect();
         apps_vec.sort();
-        max_apps_width = max_apps_width.max(apps_vec.join(", ").chars().count());
+        max_apps_width = max_apps_width.max(terminal_text_width(&apps_vec.join(", ")));
         width_all_apps.extend(period_stats.apps.keys().cloned());
     }
 
@@ -2674,10 +2698,10 @@ fn draw_aggregate_stats_table(
     let width_all_models_text =
         format_model_usage_shares(&width_total_models, &width_total_model_stats);
     let mut apps_column_width = max_apps_width
-        .max(width_all_apps_text.chars().count())
+        .max(terminal_text_width(&width_all_apps_text))
         .clamp(APPS_COL_MIN_WIDTH, APPS_COL_MAX_WIDTH);
     let mut models_column_width = max_models_width
-        .max(width_all_models_text.chars().count())
+        .max(terminal_text_width(&width_all_models_text))
         .clamp(MODELS_COL_MIN_WIDTH, MODELS_COL_MAX_WIDTH);
 
     let mut fixed_width = 1usize + period_width as usize + 10;
