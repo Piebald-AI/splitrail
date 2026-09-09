@@ -371,7 +371,8 @@ export class SplitrailDashboardProvider implements vscode.WebviewViewProvider {
                 const input = stats.inputTokens ?? 0;
                 const output = stats.outputTokens ?? 0;
                 const tokens = input + output;
-                const cost = stats.cost ?? 0;
+                // The CLI emits cents, but the dashboard formats dollars.
+                const cost = (stats.costCents ?? 0) / 100;
 
                 totalTokens += tokens;
                 totalCost += cost;
@@ -417,7 +418,8 @@ export class SplitrailDashboardProvider implements vscode.WebviewViewProvider {
               const input = stats.inputTokens ?? 0;
               const output = stats.outputTokens ?? 0;
               tokens += input + output;
-              cost += stats.cost ?? 0;
+              // Match the hero's cents-to-dollars conversion for tool totals.
+              cost += (stats.costCents ?? 0) / 100;
             }
             byTool.push({ name: analyzer.analyzer_name, tokens, cost });
           }
@@ -453,7 +455,8 @@ export class SplitrailDashboardProvider implements vscode.WebviewViewProvider {
           for (const analyzer of scopedAnalyzers) {
             for (const daily of Object.values(analyzer.daily_stats || {})) {
               const models = daily.models || {};
-              const dailyCost = daily.stats?.cost ?? 0;
+              // Allocate dollars, not raw cents, across the existing model shares.
+              const dailyCost = (daily.stats?.costCents ?? 0) / 100;
               const totalModelMessages = Object.values(models).reduce(
                 (a, b) => a + Number(b),
                 0

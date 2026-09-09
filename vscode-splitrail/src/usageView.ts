@@ -20,10 +20,12 @@ export interface JsonDailyStats {
   stats: JsonInnerStats;
 }
 
+/** CLI token and cost fields; omitted metrics are treated as zero by summaries. */
 export interface JsonInnerStats {
   inputTokens?: number;
   outputTokens?: number;
-  cost?: number;
+  /** Cost in integer cents, as serialized by the CLI; divide by 100 for dollars. */
+  costCents?: number;
   // Other fields are allowed but not explicitly modeled
   [key: string]: unknown;
 }
@@ -143,6 +145,11 @@ export class UsageTreeDataProvider
   }
 }
 
+/**
+ * Sum an analyzer's daily token counts and cost for usage-tree consumers.
+ * @param analyzer CLI analyzer data with costs expressed in cents.
+ * @returns Token total and cost in dollars, treating omitted metrics as zero.
+ */
 export function summarizeAnalyzer(analyzer: JsonAnalyzerStats): {
   totalTokens: number;
   totalCost: number;
@@ -155,12 +162,18 @@ export function summarizeAnalyzer(analyzer: JsonAnalyzerStats): {
     const input = stats.inputTokens ?? 0;
     const output = stats.outputTokens ?? 0;
     totalTokens += input + output;
-    totalCost += stats.cost ?? 0;
+    // CLI costs are cents; summary consumers format dollar amounts.
+    totalCost += (stats.costCents ?? 0) / 100;
   }
 
   return { totalTokens, totalCost };
 }
 
+/**
+ * Sum all-time and local-today usage for the status bar and popup.
+ * @param analyzers CLI analyzer data with costs expressed in cents.
+ * @returns Token counts and dollar costs; empty input produces zero totals.
+ */
 export function summarizeAllAnalyzers(
   analyzers: JsonAnalyzerStats[]
 ): {
@@ -182,7 +195,8 @@ export function summarizeAllAnalyzers(
       const input = stats.inputTokens ?? 0;
       const output = stats.outputTokens ?? 0;
       const tokens = input + output;
-      const cost = stats.cost ?? 0;
+      // Convert at the JSON boundary so both total and today remain dollars.
+      const cost = (stats.costCents ?? 0) / 100;
 
       totalTokens += tokens;
       totalCost += cost;
