@@ -5,12 +5,13 @@ use crate::tui::logic::{
     filtered_aggregate_keys,
 };
 use crate::tui::{
-    AggregateViewMode, PeriodFilter, build_display_stats, collect_project_summaries, cost_heat,
-    create_upload_progress_callback, draw_aggregate_stats_table, filter_analyzer_view_by_model,
-    filter_analyzer_view_by_project, filtered_session_count, format_model_usage_shares,
-    format_month_for_display, format_week_for_display, format_year_for_display, parse_accent,
-    sessions_for_period, show_upload_error, show_upload_success, update_period_filters,
-    update_table_states, update_window_offsets, wrap_model_usage_text,
+    AggregateViewMode, ModelUsageShareMetric, PeriodFilter, build_display_stats,
+    collect_project_summaries, cost_heat, create_upload_progress_callback,
+    draw_aggregate_stats_table, filter_analyzer_view_by_model, filter_analyzer_view_by_project,
+    filtered_session_count, format_model_usage_shares, format_month_for_display,
+    format_week_for_display, format_year_for_display, parse_accent, sessions_for_period,
+    show_upload_error, show_upload_success, update_period_filters, update_table_states,
+    update_window_offsets, wrap_model_usage_text,
 };
 use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, Application, CompactDate, ConversationMessage,
@@ -320,6 +321,7 @@ fn aggregate_table_preserves_leading_digit_in_large_tool_total() {
                 Color::Cyan,
                 &HashSet::new(),
                 false,
+                ModelUsageShareMetric::Tokens,
             );
         })
         .unwrap();
@@ -388,6 +390,7 @@ fn aggregate_table_highlights_best_value_when_sort_is_reversed() {
                 Color::Cyan,
                 &HashSet::new(),
                 false,
+                ModelUsageShareMetric::Tokens,
             );
         })
         .unwrap();
@@ -1171,6 +1174,7 @@ fn aggregate_table_wraps_model_column_on_narrow_terminal() {
                 Color::Cyan,
                 &HashSet::new(),
                 false,
+                ModelUsageShareMetric::Tokens,
             );
         })
         .unwrap();
@@ -1346,16 +1350,26 @@ fn model_filter_recalculates_stats_and_sessions() {
     assert_eq!(
         format_model_usage_shares(
             &view.daily_stats["2025-01-01"].models,
-            &view.daily_stats["2025-01-01"].model_stats
+            &view.daily_stats["2025-01-01"].model_stats,
+            ModelUsageShareMetric::Tokens,
         ),
         "gpt-5 85.2%, claude-sonnet-4 14.8%"
     );
     assert_eq!(
         format_model_usage_shares(
             &BTreeMap::from([("model-a".to_string(), 2), ("model-b".to_string(), 1)]),
-            &BTreeMap::new()
+            &BTreeMap::new(),
+            ModelUsageShareMetric::Tokens,
         ),
         "model-a 66.7%, model-b 33.3%"
+    );
+    assert_eq!(
+        format_model_usage_shares(
+            &view.daily_stats["2025-01-01"].models,
+            &view.daily_stats["2025-01-01"].model_stats,
+            ModelUsageShareMetric::Cost,
+        ),
+        "gpt-5 76.2%, claude-sonnet-4 23.8%"
     );
 
     let format_options = crate::utils::NumberFormatOptions {
@@ -1384,6 +1398,7 @@ fn model_filter_recalculates_stats_and_sessions() {
                 Color::Cyan,
                 &HashSet::new(),
                 false,
+                ModelUsageShareMetric::Tokens,
             );
         })
         .unwrap();
@@ -1394,9 +1409,38 @@ fn model_filter_recalculates_stats_and_sessions() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
+    assert!(rendered.contains("Models (% by Tokens)"));
     assert!(rendered.contains("claude-sonnet-4 100.0%"));
     assert!(!rendered.contains("gpt-5"));
     assert!(rendered.contains("$1.25"));
+
+    terminal
+        .draw(|frame| {
+            draw_aggregate_stats_table(
+                frame,
+                Rect::new(0, 0, 160, 8),
+                &filtered,
+                &format_options,
+                &mut table_state,
+                AggregateViewMode::Daily,
+                "",
+                false,
+                false,
+                Color::Cyan,
+                &HashSet::new(),
+                false,
+                ModelUsageShareMetric::Cost,
+            );
+        })
+        .unwrap();
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Models (% by Cost)"));
 
     let unmatched = filter_analyzer_view_by_model(&view, "gemini");
     assert!(unmatched.daily_stats.is_empty());

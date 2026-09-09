@@ -64,6 +64,28 @@ enum AggregateViewMode {
     Yearly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelUsageShareMetric {
+    Tokens,
+    Cost,
+}
+
+impl ModelUsageShareMetric {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Tokens => Self::Cost,
+            Self::Cost => Self::Tokens,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tokens => "Tokens",
+            Self::Cost => "Cost",
+        }
+    }
+}
+
 impl AggregateViewMode {
     /// Parse the configured startup view (tui.default_view).
     fn from_config(s: &str) -> Self {
@@ -920,6 +942,7 @@ struct UiState<'a> {
     date_jump_buffer: &'a str,
     model_filter_active: bool,
     model_filter: &'a str,
+    model_usage_share_metric: ModelUsageShareMetric,
     project_name: Option<&'a str>,
     sort_reversed: bool,
     hide_empty_periods: bool,
@@ -1094,6 +1117,7 @@ async fn run_app(
     let mut model_filter_active = false;
     let mut model_filter = String::new();
     let mut model_filter_before_edit = String::new();
+    let mut model_usage_share_metric = ModelUsageShareMetric::Tokens;
     let mut project_browser_active = false;
     let mut project_filter_active = false;
     let mut project_filter = String::new();
@@ -1275,6 +1299,7 @@ async fn run_app(
                     date_jump_buffer: &date_jump_buffer,
                     model_filter_active,
                     model_filter: &model_filter,
+                    model_usage_share_metric,
                     project_name: selected_project_name,
                     sort_reversed,
                     hide_empty_periods,
@@ -1833,6 +1858,10 @@ async fn run_app(
                     model_filter_active = true;
                     needs_redraw = true;
                 }
+                KeyCode::Char('c') if matches!(*stats_view_mode, StatsViewMode::Aggregate) => {
+                    model_usage_share_metric = model_usage_share_metric.toggle();
+                    needs_redraw = true;
+                }
                 KeyCode::Char('m') => {
                     *aggregate_view_mode = aggregate_view_mode.next();
 
@@ -2105,6 +2134,7 @@ fn draw_ui(
                             ui_state.accent,
                             ui_state.hidden_cols,
                             ui_state.color_costs,
+                            ui_state.model_usage_share_metric,
                         );
                         has_estimated
                     }
@@ -2169,7 +2199,8 @@ fn draw_ui(
                     };
 
                     format!(
-                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • p for projects • f to filter models • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle hour/day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q to quit"
+                        "Use ←/→ or h/l to switch tabs • ↑/↓ or j/k to navigate • p for projects • f to filter models • c for model share ({}) • r to reverse sort • e to toggle empty periods • s to toggle summary • / for {jump_label} • m to cycle hour/day/week/month/year • Enter to drill into period • Ctrl+T for all sessions • q to quit",
+                        ui_state.model_usage_share_metric.label()
                     )
                 }
                 StatsViewMode::Session => {
@@ -2428,6 +2459,7 @@ fn cost_heat(cents: u32, max: u32) -> Color {
 fn format_model_usage_shares(
     models: &BTreeMap<String, u32>,
     model_stats: &BTreeMap<String, ModelStats>,
+    metric: ModelUsageShareMetric,
 ) -> String {
     let mut usage: BTreeMap<&str, u64> = models
         .keys()
@@ -2435,26 +2467,36 @@ fn format_model_usage_shares(
         .chain(model_stats.keys().map(|model| (model.as_str(), 0)))
         .collect();
 
-    for (model, stats) in model_stats {
-        usage.insert(
-            model,
-            stats
-                .input_tokens
-                .saturating_add(stats.output_tokens)
-                .saturating_add(stats.cached_tokens),
-        );
-    }
+    match metric {
+        ModelUsageShareMetric::Tokens => {
+            for (model, stats) in model_stats {
+                usage.insert(
+                    model,
+                    stats
+                        .input_tokens
+                        .saturating_add(stats.output_tokens)
+                        .saturating_add(stats.cached_tokens),
+                );
+            }
 
-    let total_tokens = usage.values().copied().sum::<u64>();
-    let has_complete_token_stats = models.keys().all(|model| model_stats.contains_key(model));
-    if total_tokens == 0 || !has_complete_token_stats {
-        for (model, model_usage) in &mut usage {
-            *model_usage = models
-                .get(*model)
-                .copied()
-                .or_else(|| model_stats.get(*model).map(|stats| stats.message_count))
-                .map(u64::from)
-                .unwrap_or(0);
+            let total_tokens = usage.values().copied().sum::<u64>();
+            let has_complete_token_stats =
+                models.keys().all(|model| model_stats.contains_key(model));
+            if total_tokens == 0 || !has_complete_token_stats {
+                for (model, model_usage) in &mut usage {
+                    *model_usage = models
+                        .get(*model)
+                        .copied()
+                        .or_else(|| model_stats.get(*model).map(|stats| stats.message_count))
+                        .map(u64::from)
+                        .unwrap_or(0);
+                }
+            }
+        }
+        ModelUsageShareMetric::Cost => {
+            for (model, stats) in model_stats {
+                usage.insert(model, TuiStats::cost_micros_from_dollars(stats.cost));
+            }
         }
     }
     let total_usage = usage.values().copied().sum::<u64>();
@@ -2574,6 +2616,7 @@ fn draw_aggregate_stats_table(
     accent: Color,
     hidden: &std::collections::HashSet<String>,
     color_costs: bool,
+    model_usage_share_metric: ModelUsageShareMetric,
 ) -> (usize, bool) {
     let period_header = match aggregate_view_mode {
         AggregateViewMode::Hourly => "Hour",
@@ -2604,6 +2647,7 @@ fn draw_aggregate_stats_table(
         }
         !hidden.contains(c)
     };
+    let model_usage_header = format!("Models (% by {})", model_usage_share_metric.label());
 
     // Find best values for highlighting
     // TODO: Let's refactor this.
@@ -2665,7 +2709,7 @@ fn draw_aggregate_stats_table(
     // wrap to the final width instead of being clipped after the table is laid
     // out.
     let mut max_apps_width = APPS_COL_MIN_WIDTH;
-    let mut max_models_width = MODELS_COL_MIN_WIDTH;
+    let mut max_models_width = MODELS_COL_MIN_WIDTH.max(terminal_text_width(&model_usage_header));
     let mut width_total_models = BTreeMap::new();
     let mut width_total_model_stats = BTreeMap::new();
     let mut width_all_apps = std::collections::BTreeSet::new();
@@ -2676,7 +2720,11 @@ fn draw_aggregate_stats_table(
         let period_stats = aggregate_stats
             .get(period)
             .expect("visible period key must exist in aggregate stats");
-        let models = format_model_usage_shares(&period_stats.models, &period_stats.model_stats);
+        let models = format_model_usage_shares(
+            &period_stats.models,
+            &period_stats.model_stats,
+            model_usage_share_metric,
+        );
         max_models_width = max_models_width.max(terminal_text_width(&models));
         for (model, count) in &period_stats.models {
             *width_total_models.entry(model.clone()).or_insert(0) += count;
@@ -2695,8 +2743,11 @@ fn draw_aggregate_stats_table(
     }
 
     let width_all_apps_text = width_all_apps.into_iter().collect::<Vec<_>>().join(", ");
-    let width_all_models_text =
-        format_model_usage_shares(&width_total_models, &width_total_model_stats);
+    let width_all_models_text = format_model_usage_shares(
+        &width_total_models,
+        &width_total_model_stats,
+        model_usage_share_metric,
+    );
     let mut apps_column_width = max_apps_width
         .max(terminal_text_width(&width_all_apps_text))
         .clamp(APPS_COL_MIN_WIDTH, APPS_COL_MAX_WIDTH);
@@ -2779,7 +2830,11 @@ fn draw_aggregate_stats_table(
                 .or_insert_with(|| ModelStats::new(model.clone()))
                 .add_model_stats(stats);
         }
-        let models = format_model_usage_shares(&period_stats.models, &period_stats.model_stats);
+        let models = format_model_usage_shares(
+            &period_stats.models,
+            &period_stats.model_stats,
+            model_usage_share_metric,
+        );
 
         let mut apps_vec: Vec<String> = period_stats.apps.keys().cloned().collect();
         apps_vec.sort();
@@ -2990,7 +3045,8 @@ fn draw_aggregate_stats_table(
         .chain(total_model_stats.keys())
         .any(|model| is_model_estimated(model));
     let all_apps_text = all_apps.into_iter().collect::<Vec<_>>().join(", ");
-    let all_models_text = format_model_usage_shares(&total_models, &total_model_stats);
+    let all_models_text =
+        format_model_usage_shares(&total_models, &total_model_stats, model_usage_share_metric);
 
     let mut header_cells = vec![
         Cell::new(""),
@@ -3020,13 +3076,13 @@ fn draw_aggregate_stats_table(
     }
     if show("models") {
         header_cells.push(Cell::new(wrap_model_usage_text(
-            "Models",
+            &model_usage_header,
             models_column_width,
             Style::default().add_modifier(Modifier::BOLD),
         )));
     }
     let header_height = if show("models") {
-        wrap_model_usage_text("Models", models_column_width, Style::default()).height()
+        wrap_model_usage_text(&model_usage_header, models_column_width, Style::default()).height()
     } else {
         1
     };
