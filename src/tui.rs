@@ -2527,6 +2527,81 @@ fn format_model_usage_shares(
         .join(", ")
 }
 
+/// Wrap model shares to the available column width without dropping any text.
+/// Model entries stay together when possible and are hard-wrapped only when a
+/// single entry is wider than the column.
+fn terminal_text_width(text: &str) -> usize {
+    Line::from(text).width()
+}
+
+fn split_terminal_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+
+    for character in text.chars() {
+        let character_width = terminal_text_width(&character.to_string());
+        if !current.is_empty() && current_width + character_width > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(character);
+        current_width += character_width;
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn wrap_model_usage_text(text: &str, width: usize, style: Style) -> Text<'static> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for entry in text.split(", ").filter(|entry| !entry.is_empty()) {
+        let candidate = if current.is_empty() {
+            entry.to_string()
+        } else {
+            format!("{current}, {entry}")
+        };
+
+        if terminal_text_width(&candidate) <= width {
+            current = candidate;
+            continue;
+        }
+
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+
+        if terminal_text_width(entry) <= width {
+            current = entry.to_string();
+            continue;
+        }
+
+        let mut entry_lines = split_terminal_text(entry, width);
+        current = entry_lines.pop().unwrap_or_default();
+        lines.extend(entry_lines);
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    Text::from(
+        lines
+            .into_iter()
+            .map(|line| Line::styled(line, style))
+            .collect::<Vec<_>>(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_aggregate_stats_table(
     frame: &mut Frame,
@@ -2573,39 +2648,6 @@ fn draw_aggregate_stats_table(
         !hidden.contains(c)
     };
     let model_usage_header = format!("Models (% by {})", model_usage_share_metric.label());
-
-    let mut header_cells = vec![
-        Cell::new(""),
-        Cell::new(period_header),
-        Cell::new(Text::from("Cost").right_aligned()),
-    ];
-    if show("cached") {
-        header_cells.push(Cell::new(Text::from("Cached Tks").right_aligned()));
-    }
-    if show("input") {
-        header_cells.push(Cell::new(Text::from("Inp Tks").right_aligned()));
-    }
-    if show("output") {
-        header_cells.push(Cell::new(Text::from("Outp Tks").right_aligned()));
-    }
-    if show("reason") {
-        header_cells.push(Cell::new(Text::from("Reason Tks").right_aligned()));
-    }
-    if show("convs") {
-        header_cells.push(Cell::new(Text::from("Convs").right_aligned()));
-    }
-    if show("tools") {
-        header_cells.push(Cell::new(Text::from("Tools").right_aligned()));
-    }
-    if show("apps") {
-        header_cells.push(Cell::new("Apps"));
-    }
-    if show("models") {
-        header_cells.push(Cell::new(model_usage_header.clone()));
-    }
-    let header = Row::new(header_cells)
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .height(1);
 
     // Find best values for highlighting
     // TODO: Let's refactor this.
@@ -2663,6 +2705,93 @@ fn draw_aggregate_stats_table(
         }
     }
 
+    // Resolve text column widths before building rows. This lets model cells
+    // wrap to the final width instead of being clipped after the table is laid
+    // out.
+    let mut max_apps_width = APPS_COL_MIN_WIDTH;
+    let mut max_models_width = MODELS_COL_MIN_WIDTH.max(terminal_text_width(&model_usage_header));
+    let mut width_total_models = BTreeMap::new();
+    let mut width_total_model_stats = BTreeMap::new();
+    let mut width_all_apps = std::collections::BTreeSet::new();
+    for period in &visible_periods {
+        if !date_filter.is_empty() && !date_matches_buffer(period, date_filter) {
+            continue;
+        }
+        let period_stats = aggregate_stats
+            .get(period)
+            .expect("visible period key must exist in aggregate stats");
+        let models = format_model_usage_shares(
+            &period_stats.models,
+            &period_stats.model_stats,
+            model_usage_share_metric,
+        );
+        max_models_width = max_models_width.max(terminal_text_width(&models));
+        for (model, count) in &period_stats.models {
+            *width_total_models.entry(model.clone()).or_insert(0) += count;
+        }
+        for (model, stats) in &period_stats.model_stats {
+            width_total_model_stats
+                .entry(model.clone())
+                .or_insert_with(|| ModelStats::new(model.clone()))
+                .add_model_stats(stats);
+        }
+
+        let mut apps_vec: Vec<String> = period_stats.apps.keys().cloned().collect();
+        apps_vec.sort();
+        max_apps_width = max_apps_width.max(terminal_text_width(&apps_vec.join(", ")));
+        width_all_apps.extend(period_stats.apps.keys().cloned());
+    }
+
+    let width_all_apps_text = width_all_apps.into_iter().collect::<Vec<_>>().join(", ");
+    let width_all_models_text = format_model_usage_shares(
+        &width_total_models,
+        &width_total_model_stats,
+        model_usage_share_metric,
+    );
+    let mut apps_column_width = max_apps_width
+        .max(terminal_text_width(&width_all_apps_text))
+        .clamp(APPS_COL_MIN_WIDTH, APPS_COL_MAX_WIDTH);
+    let mut models_column_width = max_models_width
+        .max(terminal_text_width(&width_all_models_text))
+        .clamp(MODELS_COL_MIN_WIDTH, MODELS_COL_MAX_WIDTH);
+
+    let mut fixed_width = 1usize + period_width as usize + 10;
+    let mut column_count = 3usize;
+    for (column, width) in [
+        ("cached", TOKEN_COL_WIDTH),
+        ("input", TOKEN_COL_WIDTH),
+        ("output", TOKEN_COL_WIDTH),
+        ("reason", TOKEN_COL_WIDTH),
+        ("convs", COUNT_COL_WIDTH),
+        ("tools", COUNT_COL_WIDTH),
+    ] {
+        if show(column) {
+            fixed_width += width as usize;
+            column_count += 1;
+        }
+    }
+    column_count += usize::from(show("apps")) + usize::from(show("models"));
+    let column_spacing = column_count.saturating_sub(1) * 2;
+    let available_text_width = (area.width as usize)
+        .saturating_sub(fixed_width)
+        .saturating_sub(column_spacing);
+    let desired_text_width = if show("apps") { apps_column_width } else { 0 }
+        + if show("models") {
+            models_column_width
+        } else {
+            0
+        };
+    let mut overflow = desired_text_width.saturating_sub(available_text_width);
+    if show("apps") {
+        let shrink = overflow.min(apps_column_width.saturating_sub(APPS_COL_MIN_WIDTH));
+        apps_column_width -= shrink;
+        overflow -= shrink;
+    }
+    if show("models") && overflow > 0 {
+        let shrink = overflow.min(models_column_width.saturating_sub(MODELS_COL_MIN_WIDTH));
+        models_column_width -= shrink;
+    }
+
     let mut rows = Vec::new();
     let mut total_cost_cents: u64 = 0;
     let mut total_cached: u64 = 0;
@@ -2674,8 +2803,6 @@ fn draw_aggregate_stats_table(
     let mut total_models = BTreeMap::new();
     let mut total_model_stats = BTreeMap::new();
     let mut all_apps = std::collections::BTreeSet::new();
-    let mut max_apps_width = APPS_COL_MIN_WIDTH;
-    let mut max_models_width = MODELS_COL_MIN_WIDTH.max(model_usage_header.chars().count());
 
     for (i, period) in visible_periods.iter().enumerate() {
         let period_stats = aggregate_stats
@@ -2708,12 +2835,10 @@ fn draw_aggregate_stats_table(
             &period_stats.model_stats,
             model_usage_share_metric,
         );
-        max_models_width = max_models_width.max(models.chars().count());
 
         let mut apps_vec: Vec<String> = period_stats.apps.keys().cloned().collect();
         apps_vec.sort();
         let apps = apps_vec.join(", ");
-        max_apps_width = max_apps_width.max(apps.chars().count());
         all_apps.extend(period_stats.apps.keys().cloned());
 
         // Check if this is an empty row
@@ -2860,10 +2985,12 @@ fn draw_aggregate_stats_table(
         }
         .right_aligned();
 
-        let models_cell = Line::from(Span::styled(
-            models,
+        let models_cell = wrap_model_usage_text(
+            &models,
+            models_column_width,
             Style::default().add_modifier(Modifier::DIM),
-        ));
+        );
+        let row_height = models_cell.height().clamp(1, u16::MAX as usize) as u16;
 
         let apps_cell = Line::from(Span::styled(
             apps,
@@ -2880,32 +3007,36 @@ fn draw_aggregate_stats_table(
             Line::from(Span::raw(""))
         };
 
-        let mut row_cells = vec![arrow_cell, period_cell, cost_cell];
+        let mut row_cells = vec![
+            Cell::new(arrow_cell),
+            Cell::new(period_cell),
+            Cell::new(cost_cell),
+        ];
         if show("cached") {
-            row_cells.push(cached_cell);
+            row_cells.push(Cell::new(cached_cell));
         }
         if show("input") {
-            row_cells.push(input_cell);
+            row_cells.push(Cell::new(input_cell));
         }
         if show("output") {
-            row_cells.push(output_cell);
+            row_cells.push(Cell::new(output_cell));
         }
         if show("reason") {
-            row_cells.push(reasoning_cell);
+            row_cells.push(Cell::new(reasoning_cell));
         }
         if show("convs") {
-            row_cells.push(conv_cell);
+            row_cells.push(Cell::new(conv_cell));
         }
         if show("tools") {
-            row_cells.push(tool_cell);
+            row_cells.push(Cell::new(tool_cell));
         }
         if show("apps") {
-            row_cells.push(apps_cell);
+            row_cells.push(Cell::new(apps_cell));
         }
         if show("models") {
-            row_cells.push(models_cell);
+            row_cells.push(Cell::new(models_cell));
         }
-        rows.push(Row::new(row_cells));
+        rows.push(Row::new(row_cells).height(row_height));
     }
 
     // Summarize models and apps from the same visible periods as the numeric totals.
@@ -2916,49 +3047,48 @@ fn draw_aggregate_stats_table(
     let all_apps_text = all_apps.into_iter().collect::<Vec<_>>().join(", ");
     let all_models_text =
         format_model_usage_shares(&total_models, &total_model_stats, model_usage_share_metric);
-    let mut apps_column_width = max_apps_width
-        .max(all_apps_text.chars().count())
-        .clamp(APPS_COL_MIN_WIDTH, APPS_COL_MAX_WIDTH);
-    let mut models_column_width = max_models_width
-        .max(all_models_text.chars().count())
-        .clamp(MODELS_COL_MIN_WIDTH, MODELS_COL_MAX_WIDTH);
 
-    let mut fixed_width = 1usize + period_width as usize + 10;
-    let mut column_count = 3usize;
-    for (column, width) in [
-        ("cached", TOKEN_COL_WIDTH),
-        ("input", TOKEN_COL_WIDTH),
-        ("output", TOKEN_COL_WIDTH),
-        ("reason", TOKEN_COL_WIDTH),
-        ("convs", COUNT_COL_WIDTH),
-        ("tools", COUNT_COL_WIDTH),
-    ] {
-        if show(column) {
-            fixed_width += width as usize;
-            column_count += 1;
-        }
+    let mut header_cells = vec![
+        Cell::new(""),
+        Cell::new(period_header),
+        Cell::new(Text::from("Cost").right_aligned()),
+    ];
+    if show("cached") {
+        header_cells.push(Cell::new(Text::from("Cached Tks").right_aligned()));
     }
-    column_count += usize::from(show("apps")) + usize::from(show("models"));
-    let column_spacing = column_count.saturating_sub(1) * 2;
-    let available_text_width = (area.width as usize)
-        .saturating_sub(fixed_width)
-        .saturating_sub(column_spacing);
-    let desired_text_width = if show("apps") { apps_column_width } else { 0 }
-        + if show("models") {
-            models_column_width
-        } else {
-            0
-        };
-    let mut overflow = desired_text_width.saturating_sub(available_text_width);
+    if show("input") {
+        header_cells.push(Cell::new(Text::from("Inp Tks").right_aligned()));
+    }
+    if show("output") {
+        header_cells.push(Cell::new(Text::from("Outp Tks").right_aligned()));
+    }
+    if show("reason") {
+        header_cells.push(Cell::new(Text::from("Reason Tks").right_aligned()));
+    }
+    if show("convs") {
+        header_cells.push(Cell::new(Text::from("Convs").right_aligned()));
+    }
+    if show("tools") {
+        header_cells.push(Cell::new(Text::from("Tools").right_aligned()));
+    }
     if show("apps") {
-        let shrink = overflow.min(apps_column_width.saturating_sub(APPS_COL_MIN_WIDTH));
-        apps_column_width -= shrink;
-        overflow -= shrink;
+        header_cells.push(Cell::new("Apps"));
     }
-    if show("models") && overflow > 0 {
-        let shrink = overflow.min(models_column_width.saturating_sub(MODELS_COL_MIN_WIDTH));
-        models_column_width -= shrink;
+    if show("models") {
+        header_cells.push(Cell::new(wrap_model_usage_text(
+            &model_usage_header,
+            models_column_width,
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
     }
+    let header_height = if show("models") {
+        wrap_model_usage_text(&model_usage_header, models_column_width, Style::default()).height()
+    } else {
+        1
+    };
+    let header = Row::new(header_cells)
+        .style(Style::default().add_modifier(Modifier::BOLD))
+        .height(header_height.clamp(1, u16::MAX as usize) as u16);
 
     // Add separator row before totals
     let token_sep = "─".repeat(TOKEN_COL_WIDTH as usize);
@@ -3005,15 +3135,15 @@ fn draw_aggregate_stats_table(
     let tw = TOKEN_COL_WIDTH as usize;
     let mut totals_cells = vec![
         // Arrow indicator for totals row when selected
-        if table_state.selected() == Some(rows.len()) {
+        Cell::new(if table_state.selected() == Some(rows.len()) {
             Line::from(Span::styled(
                 "→",
                 Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
         } else {
             Line::from(Span::raw(""))
-        },
-        Line::from(Span::styled(
+        }),
+        Cell::new(Line::from(Span::styled(
             match aggregate_view_mode {
                 AggregateViewMode::Hourly => format!("Total ({}h)", visible_periods.len()),
                 AggregateViewMode::Daily => format!("Total ({}d)", visible_periods.len()),
@@ -3022,21 +3152,23 @@ fn draw_aggregate_stats_table(
                 AggregateViewMode::Yearly => format!("Total ({}y)", visible_periods.len()),
             },
             Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "{}{total_cost:.prec$}",
-                format_options.currency_symbol,
-                prec = format_options.cost_decimal_places
-            ),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .right_aligned(),
+        ))),
+        Cell::new(
+            Line::from(Span::styled(
+                format!(
+                    "{}{total_cost:.prec$}",
+                    format_options.currency_symbol,
+                    prec = format_options.cost_decimal_places
+                ),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        ),
     ];
     if show("cached") {
-        totals_cells.push(
+        totals_cells.push(Cell::new(
             Line::from(Span::styled(
                 format_number_fit(total_cached, format_options, tw),
                 Style::default()
@@ -3044,46 +3176,46 @@ fn draw_aggregate_stats_table(
                     .add_modifier(Modifier::BOLD),
             ))
             .right_aligned(),
-        );
+        ));
     }
     if show("input") {
-        totals_cells.push(
+        totals_cells.push(Cell::new(
             Line::from(Span::styled(
                 format_number_fit(total_input, format_options, tw),
                 Style::default().add_modifier(Modifier::BOLD),
             ))
             .right_aligned(),
-        );
+        ));
     }
     if show("output") {
-        totals_cells.push(
+        totals_cells.push(Cell::new(
             Line::from(Span::styled(
                 format_number_fit(total_output, format_options, tw),
                 Style::default().add_modifier(Modifier::BOLD),
             ))
             .right_aligned(),
-        );
+        ));
     }
     if show("reason") {
-        totals_cells.push(
+        totals_cells.push(Cell::new(
             Line::from(Span::styled(
                 format_number_fit(total_reasoning, format_options, tw),
                 Style::default().add_modifier(Modifier::BOLD),
             ))
             .right_aligned(),
-        );
+        ));
     }
     if show("convs") {
-        totals_cells.push(
+        totals_cells.push(Cell::new(
             Line::from(Span::styled(
                 format_number(total_conversations, format_options),
                 Style::default().add_modifier(Modifier::BOLD),
             ))
             .right_aligned(),
-        );
+        ));
     }
     if show("tools") {
-        totals_cells.push(
+        totals_cells.push(Cell::new(
             Line::from(Span::styled(
                 format_number(total_tool_calls, format_options),
                 Style::default()
@@ -3091,21 +3223,27 @@ fn draw_aggregate_stats_table(
                     .add_modifier(Modifier::BOLD),
             ))
             .right_aligned(),
-        );
+        ));
     }
     if show("apps") {
-        totals_cells.push(Line::from(Span::styled(
+        totals_cells.push(Cell::new(Line::from(Span::styled(
             all_apps_text,
             Style::default().add_modifier(Modifier::DIM),
-        )));
+        ))));
     }
     if show("models") {
-        totals_cells.push(Line::from(Span::styled(
-            all_models_text,
+        totals_cells.push(Cell::new(wrap_model_usage_text(
+            &all_models_text,
+            models_column_width,
             Style::default().add_modifier(Modifier::DIM),
         )));
     }
-    rows.push(Row::new(totals_cells));
+    let total_row_height = if show("models") {
+        wrap_model_usage_text(&all_models_text, models_column_width, Style::default()).height()
+    } else {
+        1
+    };
+    rows.push(Row::new(totals_cells).height(total_row_height.clamp(1, u16::MAX as usize) as u16));
 
     // Save the row count before moving rows into the table
     let total_rows = rows.len();
