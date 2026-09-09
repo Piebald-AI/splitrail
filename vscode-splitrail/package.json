@@ -143,7 +143,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "echo \"No lint configured\"",
-    "test": "echo \"No tests configured\""
+    "test": "npm run compile && node --test test/*.test.cjs"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
