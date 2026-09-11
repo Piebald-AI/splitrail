@@ -2388,29 +2388,33 @@ fn populate_defaults(
     );
 
     // DeepSeek Models
-    // Source: https://api-docs.deepseek.com/quick_start/pricing/ (official pricing page;
-    // use the standard rates rather than the temporary promotional discount:
-    // cache hit $0.0145/M, cache miss $1.74/M, output $3.48/M)
+    // Source: https://api-docs.deepseek.com/quick_start/pricing/
+    // The page publishes peak and off-peak rates, where off-peak is half of
+    // peak. Splitrail prices usage without a time-of-day dimension, so the
+    // peak (standard) rates are used.
     add_model!(
         "deepseek-v4-pro",
         PricingStructure::Flat {
-            input_per_1m: 1.74,
-            output_per_1m: 3.48
+            input_per_1m: 1.32,
+            output_per_1m: 3.96
         },
         CachingSupport::OpenAI {
-            cached_input_per_1m: 0.0145
+            cached_input_per_1m: 0.044
         },
         false
     );
-    // Source: https://api-docs.deepseek.com/quick_start/pricing/
+    // DeepSeek now asks callers to use `deepseek-flash`; the legacy
+    // `deepseek-v4-flash` name is still accepted and billed at the same rate.
+    // From September 14, 2026 requests to `deepseek-v4-pro` are routed to
+    // DeepSeek-V4.1-Flash and billed at this price.
     add_model!(
         "deepseek-v4-flash",
         PricingStructure::Flat {
-            input_per_1m: 0.14,
-            output_per_1m: 0.28
+            input_per_1m: 0.30,
+            output_per_1m: 1.20
         },
         CachingSupport::OpenAI {
-            cached_input_per_1m: 0.0028
+            cached_input_per_1m: 0.006
         },
         false
     );
@@ -2960,6 +2964,9 @@ fn populate_defaults(
     add_alias!("minimax-m2.5-20260211", "minimax-m2.5");
     add_alias!("minimax-m2.7", "minimax-m2.7");
     add_alias!("minimax-m3", "minimax-m3");
+
+    // DeepSeek aliases
+    add_alias!("deepseek-flash", "deepseek-v4-flash");
 
     // Moonshot / ByteDance / Qwen / Xiaomi / Meituan aliases
     add_alias!("doubao-seed-code", "doubao-seed-2.0-code");
@@ -4876,9 +4883,20 @@ mod tests {
         let output_cost = calculate_output_cost("deepseek-v4-pro", 1_000_000);
         let cache_cost = calculate_cache_cost("deepseek-v4-pro", 0, 1_000_000);
 
-        approx_eq(input_cost, 1.74);
-        approx_eq(output_cost, 3.48);
-        approx_eq(cache_cost, 0.0145);
+        approx_eq(input_cost, 1.32);
+        approx_eq(output_cost, 3.96);
+        approx_eq(cache_cost, 0.044);
+    }
+
+    #[test]
+    fn deepseek_flash_alias_matches_legacy_v4_flash_pricing() {
+        // The page asks callers to use `deepseek-flash`; `deepseek-v4-flash`
+        // is the legacy name for the same DeepSeek-V4.1-Flash model.
+        for model in ["deepseek-flash", "deepseek-v4-flash"] {
+            approx_eq(calculate_input_cost(model, 1_000_000), 0.30);
+            approx_eq(calculate_output_cost(model, 1_000_000), 1.20);
+            approx_eq(calculate_cache_cost(model, 0, 1_000_000), 0.006);
+        }
     }
 
     #[test]
@@ -4986,11 +5004,11 @@ mod tests {
         approx_eq(calculate_input_cost("deepseek.v3.2", 1_000_000), 0.62);
         approx_eq(calculate_output_cost("deepseek.v3.2", 1_000_000), 1.85);
 
-        approx_eq(calculate_input_cost("deepseek-v4-flash", 1_000_000), 0.14);
-        approx_eq(calculate_output_cost("deepseek-v4-flash", 1_000_000), 0.28);
+        approx_eq(calculate_input_cost("deepseek-v4-flash", 1_000_000), 0.30);
+        approx_eq(calculate_output_cost("deepseek-v4-flash", 1_000_000), 1.20);
         approx_eq(
             calculate_cache_cost("deepseek-v4-flash", 0, 1_000_000),
-            0.0028,
+            0.006,
         );
 
         approx_eq(
