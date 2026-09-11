@@ -1815,6 +1815,7 @@ fn populate_defaults(
     );
 
     // Google Models
+    // Source: https://ai.google.dev/gemini-api/docs/pricing
     add_model!(
         "gemini-3-flash-preview",
         PricingStructure::Flat {
@@ -1903,11 +1904,11 @@ fn populate_defaults(
             tiers: vec![
                 CachingTier {
                     max_tokens: Some(200_000),
-                    cached_input_per_1m: 0.31
+                    cached_input_per_1m: 0.125
                 },
                 CachingTier {
                     max_tokens: None,
-                    cached_input_per_1m: 0.625
+                    cached_input_per_1m: 0.25
                 },
             ],
             bracket_pricing: false,
@@ -1923,7 +1924,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![CachingTier {
                 max_tokens: None,
-                cached_input_per_1m: 0.075
+                cached_input_per_1m: 0.03
             }],
             bracket_pricing: false,
         }),
@@ -1938,7 +1939,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![CachingTier {
                 max_tokens: None,
-                cached_input_per_1m: 0.025
+                cached_input_per_1m: 0.01
             }],
             bracket_pricing: false,
         }),
@@ -2129,6 +2130,134 @@ fn populate_defaults(
     // xAI Models
     // Source: https://docs.x.ai/developers/pricing
     add_model!(
+        "grok-4.3",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 1.25,
+                    output_per_1m: 2.50,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.50,
+                    output_per_1m: 5.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.20,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.40,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+    add_model!(
+        "grok-4.20-0309-reasoning",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 1.25,
+                    output_per_1m: 2.50,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.50,
+                    output_per_1m: 5.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.20,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.40,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+    add_model!(
+        "grok-4.20-0309-non-reasoning",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 1.25,
+                    output_per_1m: 2.50,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.50,
+                    output_per_1m: 5.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.20,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.40,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+    add_model!(
+        "grok-4.20-multi-agent-0309",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 1.25,
+                    output_per_1m: 2.50,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.50,
+                    output_per_1m: 5.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.20,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.40,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+    add_model!(
         "grok-4.5",
         PricingStructure::Tiered(TieredPricing {
             tiers: vec![
@@ -2154,6 +2283,38 @@ fn populate_defaults(
                 CachingTier {
                     max_tokens: None,
                     cached_input_per_1m: 0.60,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+    add_model!(
+        "grok-4.6",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 2.00,
+                    output_per_1m: 6.00,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 4.00,
+                    output_per_1m: 12.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.50,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 1.00,
                 },
             ],
             bracket_pricing: true,
@@ -2338,14 +2499,17 @@ fn populate_defaults(
     );
 
     // MiniMax Models
-    // Source: https://platform.minimax.io/docs/api-reference/anthropic-api-compatible-cache
+    // Source: https://platform.minimax.io/docs/guides/pricing-paygo
     add_model!(
         "minimax-m2.1",
         PricingStructure::Flat {
             input_per_1m: 0.30,
             output_per_1m: 1.20
         },
-        CachingSupport::None,
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 0.375,
+            cache_read_per_1m: 0.03
+        },
         false
     );
     add_model!(
@@ -2364,21 +2528,46 @@ fn populate_defaults(
         "minimax-m2.5",
         PricingStructure::Flat {
             input_per_1m: 0.30,
-            output_per_1m: 1.10
+            output_per_1m: 1.20
         },
-        CachingSupport::None,
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 0.375,
+            cache_read_per_1m: 0.03
+        },
         false
     );
-    // Source: https://platform.minimax.io/docs/api-reference/anthropic-api-compatible-cache
+    // MiniMax-M3 is bracketed on input size: at or below 512k tokens the
+    // permanent 50% discount applies, above it the undiscounted rates apply.
     add_model!(
         "minimax-m3",
-        PricingStructure::Flat {
-            input_per_1m: 0.60,
-            output_per_1m: 2.40
-        },
-        CachingSupport::OpenAI {
-            cached_input_per_1m: 0.12
-        },
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(512_000),
+                    input_per_1m: 0.30,
+                    output_per_1m: 1.20,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 0.60,
+                    output_per_1m: 2.40,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(512_000),
+                    cached_input_per_1m: 0.06,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.12,
+                },
+            ],
+            bracket_pricing: true,
+        }),
         false
     );
 
@@ -3841,6 +4030,35 @@ mod tests {
     }
 
     #[test]
+    fn gemini_2_5_cache_reads_match_published_rates() {
+        // ai.google.dev lists context caching at 10% of input: $0.125/$0.25 for
+        // Pro, $0.03 for Flash, and $0.01 for Flash-Lite.
+        approx_eq(calculate_cache_cost("gemini-2.5-pro", 0, 100_000), 0.0125);
+        // Pro applies the tiers progressively rather than bracketing the whole
+        // request: 200k at $0.125 plus 50k at $0.25.
+        approx_eq(calculate_cache_cost("gemini-2.5-pro", 0, 250_000), 0.0375);
+        approx_eq(calculate_cache_cost("gemini-2.5-flash", 0, 1_000_000), 0.03);
+        approx_eq(
+            calculate_cache_cost("gemini-2.5-flash-lite", 0, 1_000_000),
+            0.01,
+        );
+    }
+
+    #[test]
+    fn minimax_m2_5_pricing_matches_published_rates() {
+        let model_info = get_model_info("minimax-m2.5").expect("model should exist");
+        assert!(!model_info.is_estimated);
+
+        approx_eq(calculate_input_cost("minimax-m2.5", 1_000_000), 0.30);
+        approx_eq(calculate_output_cost("minimax-m2.5", 1_000_000), 1.20);
+        // Pay-as-you-go lists cache reads at $0.03 and cache writes at $0.375
+        // for the legacy M2 era, matching the M2.7 entry.
+        approx_eq(calculate_cache_cost("minimax-m2.5", 0, 1_000_000), 0.03);
+        approx_eq(calculate_cache_cost("minimax-m2.5", 1_000_000, 0), 0.375);
+        approx_eq(calculate_cache_cost("minimax-m2.1", 0, 1_000_000), 0.03);
+    }
+
+    #[test]
     fn gpt_6_astra_aliases_map_to_official_standard_pricing() {
         assert!(get_model_info("gpt-6-astra-2026-09-03").is_none());
 
@@ -4517,12 +4735,53 @@ mod tests {
                 .expect("Grok 4.5 should exist")
                 .is_estimated
         );
+        assert!(
+            !get_model_info("grok-4.6")
+                .expect("Grok 4.6 should exist")
+                .is_estimated
+        );
+        for model in [
+            "grok-4.3",
+            "grok-4.20-0309-reasoning",
+            "grok-4.20-0309-non-reasoning",
+            "grok-4.20-multi-agent-0309",
+        ] {
+            assert!(
+                !get_model_info(model)
+                    .unwrap_or_else(|| panic!("{model} should exist"))
+                    .is_estimated
+            );
+        }
 
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.3", 1_000_000, 1_000_000, 0, 1_000_000, 199_999, None,
+            ),
+            3.95,
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.3", 1_000_000, 1_000_000, 0, 1_000_000, 200_001, None,
+            ),
+            7.9,
+        );
         approx_eq(
             calculate_total_cost_for_context_at(
                 "grok-4.5", 1_000_000, 1_000_000, 0, 1_000_000, 199_999, None,
             ),
             8.3,
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.6", 1_000_000, 1_000_000, 0, 1_000_000, 199_999, None,
+            ),
+            8.5,
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.6", 1_000_000, 1_000_000, 0, 1_000_000, 200_001, None,
+            ),
+            17.0,
         );
         approx_eq(
             calculate_total_cost_for_context_at(
@@ -4542,6 +4801,14 @@ mod tests {
             ),
             calculate_total_cost_for_context_at(
                 "grok-4.5", 1_000_000, 1_000_000, 0, 1_000_000, 2_000_000, None,
+            ),
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.6", 1_000_000, 1_000_000, 999_999, 1_000_000, 2_000_000, None,
+            ),
+            calculate_total_cost_for_context_at(
+                "grok-4.6", 1_000_000, 1_000_000, 0, 1_000_000, 2_000_000, None,
             ),
         );
     }
@@ -4696,6 +4963,10 @@ mod tests {
         approx_eq(calculate_input_cost("minimax-m3", 1_000_000), 0.60);
         approx_eq(calculate_output_cost("minimax-m3", 1_000_000), 2.40);
         approx_eq(calculate_cache_cost("minimax-m3", 0, 1_000_000), 0.12);
+        // At or below 512k input tokens the permanent 50% discount applies.
+        approx_eq(calculate_input_cost("minimax-m3", 512_000), 0.30 * 0.512);
+        approx_eq(calculate_output_cost("minimax-m3", 512_000), 1.20 * 0.512);
+        approx_eq(calculate_cache_cost("minimax-m3", 0, 512_000), 0.06 * 0.512);
 
         approx_eq(calculate_input_cost("glm-5.1", 1_000_000), 1.40);
         approx_eq(calculate_output_cost("glm-5.1", 1_000_000), 4.40);
