@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Timelike, Utc, Weekday};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -117,6 +117,100 @@ pub struct ServiceTierPricing {
     pub caching: CachingSupport,
 }
 
+/// Minutes in a day, the unit peak-window boundaries are expressed in.
+const MINUTES_PER_DAY: u32 = 24 * 60;
+
+/// Convert an `HH:MM` clock time into minutes after local midnight.
+pub const fn clock(hour: u16, minute: u16) -> u16 {
+    hour * 60 + minute
+}
+
+/// A recurring window during which a model is billed at its peak rates.
+///
+/// Boundaries are minutes after local midnight in the timezone of the owning
+/// [`TimeOfDayPricing`]. `end_minute` is exclusive. An `end_minute` that is
+/// less than or equal to `start_minute` describes a window that wraps past
+/// midnight (for example 23:00 to 09:00); such a window is attributed to the
+/// day on which it starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeakWindow {
+    /// Minutes after local midnight at which the window starts (inclusive).
+    pub start_minute: u16,
+    /// Minutes after local midnight at which the window ends (exclusive).
+    pub end_minute: u16,
+    /// Weekdays the window applies to. Empty means every day of the week.
+    #[serde(default)]
+    pub weekdays: Vec<Weekday>,
+}
+
+impl PeakWindow {
+    /// Build a window that applies Monday through Friday.
+    pub fn weekdays(start_minute: u16, end_minute: u16) -> Self {
+        Self {
+            start_minute,
+            end_minute,
+            weekdays: vec![
+                Weekday::Mon,
+                Weekday::Tue,
+                Weekday::Wed,
+                Weekday::Thu,
+                Weekday::Fri,
+            ],
+        }
+    }
+
+    /// Whether `local` falls inside this window, honouring its weekday filter.
+    fn matches<Tz: TimeZone>(&self, local: &DateTime<Tz>) -> bool {
+        let minute = local.hour() * 60 + local.minute();
+        let start = u32::from(self.start_minute);
+        let end = u32::from(self.end_minute);
+
+        let (in_window, day) = if start < end {
+            (minute >= start && minute < end, local.weekday())
+        } else if minute >= start {
+            // Wrapping window, before midnight: it belongs to today.
+            (true, local.weekday())
+        } else if minute < end {
+            // Wrapping window, after midnight: it belongs to yesterday.
+            (true, local.weekday().pred())
+        } else {
+            (false, local.weekday())
+        };
+
+        in_window && (self.weekdays.is_empty() || self.weekdays.contains(&day))
+    }
+}
+
+/// Peak and off-peak (time-of-day) pricing for a model.
+///
+/// The model's base `pricing` and `caching` describe peak rates. Usage that
+/// falls outside every [`PeakWindow`] is billed at `off_peak_multiplier` times
+/// those base rates, uniformly across input, output, and cache categories.
+/// DeepSeek publishes off-peak rates at half of peak, so its multiplier is
+/// `0.5`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimeOfDayPricing {
+    /// IANA timezone the peak windows are expressed in, for example `UTC` or
+    /// `Asia/Shanghai`. Unknown names fall back to UTC.
+    #[serde(default = "default_pricing_timezone")]
+    pub timezone: String,
+    /// Windows billed at the model's base (peak) rates. An empty list means
+    /// every hour is off-peak.
+    #[serde(default)]
+    pub peak_windows: Vec<PeakWindow>,
+    /// Multiplier applied to base rates outside every peak window.
+    #[serde(default = "default_off_peak_multiplier")]
+    pub off_peak_multiplier: f64,
+}
+
+fn default_pricing_timezone() -> String {
+    "UTC".to_string()
+}
+
+fn default_off_peak_multiplier() -> f64 {
+    0.5
+}
+
 /// Pricing and caching that apply for usage before an exclusive end date.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatedPricing {
@@ -126,6 +220,10 @@ pub struct DatedPricing {
     /// Optional service-tier rates for the same historical window.
     #[serde(default)]
     pub service_tiers: HashMap<ServiceTier, ServiceTierPricing>,
+    /// Optional peak/off-peak schedule for the same historical window. Falls
+    /// back to the model-level schedule when absent.
+    #[serde(default)]
+    pub time_of_day_pricing: Option<TimeOfDayPricing>,
 }
 
 /// How a provider reports input tokens relative to cache reads.
@@ -152,6 +250,11 @@ pub struct ModelInfo {
     /// A dated override applies when the usage date is earlier than `valid_until`.
     #[serde(default)]
     pub dated_pricing: Vec<DatedPricing>,
+    /// Optional peak/off-peak schedule. `pricing` and `caching` above are the
+    /// peak rates; usage outside every peak window is discounted by
+    /// [`TimeOfDayPricing::off_peak_multiplier`].
+    #[serde(default)]
+    pub time_of_day_pricing: Option<TimeOfDayPricing>,
     /// How provider usage reports input tokens relative to cache reads.
     #[serde(default)]
     pub input_token_semantics: InputTokenSemantics,
@@ -179,9 +282,9 @@ impl Registry {
         external_aliases: HashMap<String, String>,
     ) {
         for (name, info) in external_models {
-            if !Self::validate_model_info(&info) {
+            if let Err(reason) = Self::validate_model_info(&info) {
                 warn_once(format!(
-                    "WARNING: init_external_models ignoring invalid tier config for model `{name}`."
+                    "WARNING: init_external_models ignoring model `{name}`: {reason}"
                 ));
                 continue;
             }
@@ -192,17 +295,81 @@ impl Registry {
         }
     }
 
-    fn validate_model_info(info: &ModelInfo) -> bool {
-        Self::validate_pricing_and_caching(&info.pricing, &info.caching)
-            && info
+    /// Validate a model definition, reporting the first problem found.
+    ///
+    /// Two periods ending on the same date are rejected outright. The resolver
+    /// picks the period with the smallest `valid_until` among those still in
+    /// force, so entries sharing a date would make the winner depend on vector
+    /// order instead of on the data — a silent, order-dependent mispricing.
+    fn validate_model_info(info: &ModelInfo) -> Result<(), String> {
+        if !Self::validate_pricing_and_caching(&info.pricing, &info.caching) {
+            return Err("invalid base pricing or caching tiers".to_string());
+        }
+        if !Self::validate_time_of_day(&info.time_of_day_pricing) {
+            return Err("invalid time-of-day schedule".to_string());
+        }
+        if let Some((tier, _)) = info
+            .service_tiers
+            .iter()
+            .find(|(_, tier)| !Self::validate_pricing_and_caching(&tier.pricing, &tier.caching))
+        {
+            return Err(format!(
+                "invalid pricing or caching for service tier {tier:?}"
+            ));
+        }
+
+        let mut seen: Vec<NaiveDate> = Vec::new();
+        for dated in &info.dated_pricing {
+            if seen.contains(&dated.valid_until) {
+                return Err(format!(
+                    "duplicate dated_pricing `valid_until` {}; each period must end on a \
+                     distinct date",
+                    dated.valid_until
+                ));
+            }
+            seen.push(dated.valid_until);
+
+            if !Self::validate_pricing_and_caching(&dated.pricing, &dated.caching) {
+                return Err(format!(
+                    "invalid pricing or caching for the period ending {}",
+                    dated.valid_until
+                ));
+            }
+            if !Self::validate_time_of_day(&dated.time_of_day_pricing) {
+                return Err(format!(
+                    "invalid time-of-day schedule for the period ending {}",
+                    dated.valid_until
+                ));
+            }
+            if let Some((tier, _)) = dated
                 .service_tiers
-                .values()
-                .all(|tier| Self::validate_pricing_and_caching(&tier.pricing, &tier.caching))
-            && info.dated_pricing.iter().all(|dated| {
-                Self::validate_pricing_and_caching(&dated.pricing, &dated.caching)
-                    && dated.service_tiers.values().all(|tier| {
-                        Self::validate_pricing_and_caching(&tier.pricing, &tier.caching)
-                    })
+                .iter()
+                .find(|(_, tier)| !Self::validate_pricing_and_caching(&tier.pricing, &tier.caching))
+            {
+                return Err(format!(
+                    "invalid pricing or caching for service tier {tier:?} in the period \
+                     ending {}",
+                    dated.valid_until
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// A schedule is usable when its multiplier is a positive finite number and
+    /// every window covers at least one minute of the day.
+    fn validate_time_of_day(schedule: &Option<TimeOfDayPricing>) -> bool {
+        let Some(schedule) = schedule else {
+            return true;
+        };
+
+        schedule.off_peak_multiplier.is_finite()
+            && schedule.off_peak_multiplier > 0.0
+            && schedule.peak_windows.iter().all(|window| {
+                u32::from(window.start_minute) < MINUTES_PER_DAY
+                    && u32::from(window.end_minute) <= MINUTES_PER_DAY
+                    && window.start_minute != window.end_minute
             })
     }
 
@@ -288,6 +455,84 @@ fn input_token_semantics_for_model(model_name: &str) -> InputTokenSemantics {
     }
 }
 
+/// Append a dated period, keeping `dated_pricing` sorted by `valid_until`.
+///
+/// Two periods may not end on the same date. The resolver picks the period with
+/// the smallest `valid_until` among those still in force, so a duplicate would
+/// make the winner depend on vector order rather than on the data. A silent
+/// winner is a mispricing that no test would notice, so this is a hard error.
+fn push_dated_pricing(model_info: &mut ModelInfo, name: &str, dated: DatedPricing) {
+    assert!(
+        !model_info
+            .dated_pricing
+            .iter()
+            .any(|existing| existing.valid_until == dated.valid_until),
+        "duplicate `add_dated_pricing!` for `{name}` ending {}: each period must end on a \
+         distinct date",
+        dated.valid_until
+    );
+    model_info.dated_pricing.push(dated);
+    model_info
+        .dated_pricing
+        .sort_by_key(|dated| dated.valid_until);
+}
+
+/// Borrow the period ending at `valid_until`, or panic naming the caller.
+///
+/// Period-scoped overrides (a peak/off-peak schedule, a service-tier rate) must
+/// be declared after the period they belong to. Without this check a typo in the
+/// date would be a silent no-op, leaving the override quietly unapplied.
+fn dated_period_mut<'a>(
+    model_info: &'a mut ModelInfo,
+    name: &str,
+    valid_until: NaiveDate,
+    macro_name: &str,
+) -> &'a mut DatedPricing {
+    model_info
+        .dated_pricing
+        .iter_mut()
+        .find(|dated| dated.valid_until == valid_until)
+        .unwrap_or_else(|| {
+            panic!(
+                "`{macro_name}!` for `{name}` found no period ending {valid_until}; call \
+                 `add_dated_pricing!` with that date first"
+            )
+        })
+}
+
+/// Registers every built-in model and its published rates.
+///
+/// # Price provenance
+///
+/// Every rate below is transcribed from the vendor's own pricing page. The
+/// `// Source:` comment immediately above a section header (for example
+/// `// OpenAI Models`) is that vendor's canonical price list and covers **every**
+/// entry in the section, including dated overrides (`add_dated_pricing!`) and
+/// service-tier rates (`add_*_service_tier_pricing!`), which reuse the same
+/// page.
+///
+/// An entry carries its own `// Source:` line only when its price comes from a
+/// different page than the section default — typically a retired model that
+/// keeps a per-model page after being dropped from the main table, or a model
+/// served by a different provider (for example OpenAI weights on Amazon
+/// Bedrock). Where the vendor no longer publishes a price at all, the marker
+/// reads `unavailable (<reason>)` so the absence is explicit rather than
+/// silently attributed to the wrong page.
+///
+/// # Periods and schedules
+///
+/// A model's rates change over time. `add_dated_pricing!` appends a period that
+/// ends at an exclusive `valid_until`; the model's own `pricing` is the final
+/// period and covers every date after the last one. Periods may be declared in
+/// any order (they are kept sorted), but no two may end on the same date, and
+/// the earliest period covers all of history before it.
+///
+/// A peak/off-peak schedule can be set for the model as a whole with
+/// `add_time_of_day_pricing!(model, schedule)`, or for a single period with
+/// `add_time_of_day_pricing!(model, valid_until, schedule)`. The model-level
+/// schedule is the fallback for periods that carry none. Period-scoped
+/// overrides — a schedule or a service-tier rate — must be declared after the
+/// period they belong to; pointing at a date with no period is an error.
 fn populate_defaults(
     index: &mut HashMap<String, Arc<ModelInfo>>,
     aliases: &mut HashMap<String, String>,
@@ -301,6 +546,7 @@ fn populate_defaults(
                     caching: $caching,
                     service_tiers: HashMap::new(),
                     dated_pricing: Vec::new(),
+                    time_of_day_pricing: None,
                     input_token_semantics: input_token_semantics_for_model($name),
                     is_estimated: $est,
                 }),
@@ -308,34 +554,75 @@ fn populate_defaults(
         };
     }
 
+    /// Add one dated price period, ending at the exclusive `valid_until`.
+    ///
+    /// Panics when the model already has a period ending on the same date; see
+    /// [`push_dated_pricing`].
     macro_rules! add_dated_pricing {
         ($name:expr, $valid_until:expr, $pricing:expr, $caching:expr) => {
             if let Some(model_info) = index.get_mut($name)
                 && let Some(model_info) = Arc::get_mut(model_info)
             {
-                model_info.dated_pricing.push(DatedPricing {
-                    valid_until: $valid_until,
-                    pricing: $pricing,
-                    caching: $caching,
-                    service_tiers: HashMap::new(),
-                });
-                model_info
-                    .dated_pricing
-                    .sort_by_key(|dated| dated.valid_until);
+                push_dated_pricing(
+                    model_info,
+                    $name,
+                    DatedPricing {
+                        valid_until: $valid_until,
+                        pricing: $pricing,
+                        caching: $caching,
+                        service_tiers: HashMap::new(),
+                        time_of_day_pricing: None,
+                    },
+                );
             }
         };
     }
 
+    /// Attach a peak/off-peak schedule.
+    ///
+    /// Two forms:
+    ///
+    /// - `add_time_of_day_pricing!(model, schedule)` sets the model-level
+    ///   schedule. It is the fallback, and applies to every period that carries
+    ///   no schedule of its own.
+    /// - `add_time_of_day_pricing!(model, valid_until, schedule)` sets the
+    ///   schedule for one dated period, so several periods of the same model can
+    ///   each run a different peak/off-peak rule. The period must already exist;
+    ///   call `add_dated_pricing!` with the same date first.
+    macro_rules! add_time_of_day_pricing {
+        ($name:expr, $schedule:expr) => {
+            if let Some(model_info) = index.get_mut($name)
+                && let Some(model_info) = Arc::get_mut(model_info)
+            {
+                model_info.time_of_day_pricing = Some($schedule);
+            }
+        };
+        ($name:expr, $valid_until:expr, $schedule:expr) => {
+            if let Some(model_info) = index.get_mut($name)
+                && let Some(model_info) = Arc::get_mut(model_info)
+            {
+                dated_period_mut(model_info, $name, $valid_until, "add_time_of_day_pricing")
+                    .time_of_day_pricing = Some($schedule);
+            }
+        };
+    }
+
+    /// Attach a service-tier rate to one dated period. Like the period form of
+    /// `add_time_of_day_pricing!`, the period must already exist; a missing
+    /// period is a configuration error rather than a silent no-op.
     macro_rules! add_dated_service_tier_pricing {
         ($name:expr, $valid_until:expr, $service_tier:expr, $pricing:expr, $caching:expr) => {
             if let Some(model_info) = index.get_mut($name)
                 && let Some(model_info) = Arc::get_mut(model_info)
-                && let Some(dated) = model_info
-                    .dated_pricing
-                    .iter_mut()
-                    .find(|dated| dated.valid_until == $valid_until)
             {
-                dated.service_tiers.insert(
+                dated_period_mut(
+                    model_info,
+                    $name,
+                    $valid_until,
+                    "add_dated_service_tier_pricing",
+                )
+                .service_tiers
+                .insert(
                     $service_tier,
                     ServiceTierPricing {
                         pricing: $pricing,
@@ -515,6 +802,7 @@ fn populate_defaults(
     }
 
     // OpenAI Models
+    // Source: https://developers.openai.com/api/docs/pricing
     add_model!(
         "o4-mini",
         PricingStructure::Flat {
@@ -568,6 +856,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: https://developers.openai.com/api/docs/models/o1-preview
     add_model!(
         "o1-preview",
         PricingStructure::Flat {
@@ -579,6 +868,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: https://developers.openai.com/api/docs/models/o1-mini
     add_model!(
         "o1-mini",
         PricingStructure::Flat {
@@ -625,7 +915,7 @@ fn populate_defaults(
         "gpt-4o-2024-05-13",
         PricingStructure::Flat {
             input_per_1m: 5.0,
-            output_per_1m: 10.0
+            output_per_1m: 15.0
         },
         CachingSupport::None,
         false
@@ -663,6 +953,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: https://developers.openai.com/api/docs/models/codex-mini-latest
     add_model!(
         "codex-mini-latest",
         PricingStructure::Flat {
@@ -683,6 +974,7 @@ fn populate_defaults(
         CachingSupport::None,
         false
     );
+    // Source: unavailable (OpenAI no longer publishes this model)
     add_model!(
         "gpt-4.5",
         PricingStructure::Flat {
@@ -738,6 +1030,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: unavailable (OpenAI no longer publishes this model)
     add_model!(
         "gpt-5-codex-mini",
         PricingStructure::Flat {
@@ -749,6 +1042,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: https://developers.openai.com/api/docs/models/gpt-5.1-codex
     add_model!(
         "gpt-5.1-codex",
         PricingStructure::Flat {
@@ -760,6 +1054,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: https://developers.openai.com/api/docs/models/gpt-5.1-codex-mini
     add_model!(
         "gpt-5.1-codex-mini",
         PricingStructure::Flat {
@@ -771,6 +1066,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: https://developers.openai.com/api/docs/models/gpt-5.1-codex-max
     add_model!(
         "gpt-5.1-codex-max",
         PricingStructure::Flat {
@@ -802,6 +1098,7 @@ fn populate_defaults(
         CachingSupport::None,
         false
     );
+    // Source: https://developers.openai.com/api/docs/models/gpt-5.2-codex
     add_model!(
         "gpt-5.2-codex",
         PricingStructure::Flat {
@@ -913,7 +1210,7 @@ fn populate_defaults(
                 },
                 CachingTier {
                     max_tokens: None,
-                    cached_input_per_1m: 1.25
+                    cached_input_per_1m: 1.00
                 },
             ],
             bracket_pricing: true,
@@ -937,7 +1234,6 @@ fn populate_defaults(
     // long-context rate. Keeping matching tier boundaries across pricing and
     // caching lets the shared calculator make that decision once for the whole
     // request rather than accidentally pricing each token category separately.
-    // Source: https://developers.openai.com/api/docs/models/gpt-6-astra
     add_model!(
         "gpt-6-astra",
         PricingStructure::Tiered(TieredPricing {
@@ -1213,6 +1509,9 @@ fn populate_defaults(
         false
     );
 
+    // OpenAI service tiers and dated overrides. All rates below come from the
+    // OpenAI pricing page cited at the top of this section.
+    //
     // OpenAI publishes Fast mode at 2x Standard and Flex/Batch at 0.5x.
     // Splitrail's existing `Priority` tier represents that premium low-latency
     // class, so map Fast pricing there while preserving the provider-neutral
@@ -1566,6 +1865,7 @@ fn populate_defaults(
     }
 
     // Anthropic Models
+    // Source: https://docs.claude.com/en/docs/about-claude/pricing
     add_model!(
         "claude-fable-5-1",
         PricingStructure::Flat {
@@ -1741,6 +2041,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: unavailable (retired from the Anthropic pricing page)
     add_model!(
         "claude-3-7-sonnet",
         PricingStructure::Flat {
@@ -1753,6 +2054,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: unavailable (retired from the Anthropic pricing page)
     add_model!(
         "claude-3-5-sonnet",
         PricingStructure::Flat {
@@ -1789,6 +2091,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: unavailable (retired from the Anthropic pricing page)
     add_model!(
         "claude-3-opus",
         PricingStructure::Flat {
@@ -1801,6 +2104,7 @@ fn populate_defaults(
         },
         false
     );
+    // Source: unavailable (retired from the Anthropic pricing page)
     add_model!(
         "claude-3-haiku",
         PricingStructure::Flat {
@@ -1830,6 +2134,39 @@ fn populate_defaults(
             bracket_pricing: false,
         }),
         false
+    );
+    // Gemini 3.8 Flash ships on promotional rates that revert to the standard
+    // rates on 2027-01-01, so the base entry carries the standard rates and the
+    // dated override covers the promotional window.
+    add_model!(
+        "gemini-3.8-flash",
+        PricingStructure::Flat {
+            input_per_1m: 1.50,
+            output_per_1m: 7.50
+        },
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![CachingTier {
+                max_tokens: None,
+                cached_input_per_1m: 0.15
+            }],
+            bracket_pricing: false,
+        }),
+        false
+    );
+    add_dated_pricing!(
+        "gemini-3.8-flash",
+        NaiveDate::from_ymd_opt(2027, 1, 1).expect("valid date"),
+        PricingStructure::Flat {
+            input_per_1m: 0.75,
+            output_per_1m: 3.75
+        },
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![CachingTier {
+                max_tokens: None,
+                cached_input_per_1m: 0.075
+            }],
+            bracket_pricing: false,
+        })
     );
     add_model!(
         "gemini-3.1-pro-preview",
@@ -1863,6 +2200,7 @@ fn populate_defaults(
         }),
         false
     );
+    // Source: unavailable (retired from the Gemini API pricing page)
     add_model!(
         "gemini-3-pro-preview-11-2025",
         PricingStructure::Tiered(TieredPricing {
@@ -1945,6 +2283,7 @@ fn populate_defaults(
         }),
         false
     );
+    // Source: unavailable (retired from the Gemini API pricing page)
     add_model!(
         "gemini-2.0-pro-exp-02-05",
         PricingStructure::Flat {
@@ -1960,6 +2299,7 @@ fn populate_defaults(
         }),
         false
     );
+    // Source: unavailable (retired from the Gemini API pricing page)
     add_model!(
         "gemini-2.0-flash",
         PricingStructure::Flat {
@@ -1975,6 +2315,7 @@ fn populate_defaults(
         }),
         false
     );
+    // Source: unavailable (retired from the Gemini API pricing page)
     add_model!(
         "gemini-2.0-flash-lite",
         PricingStructure::Flat {
@@ -1984,6 +2325,7 @@ fn populate_defaults(
         CachingSupport::None,
         false
     );
+    // Source: unavailable (retired from the Gemini API pricing page)
     add_model!(
         "gemini-1.5-flash",
         PricingStructure::Tiered(TieredPricing {
@@ -2016,6 +2358,7 @@ fn populate_defaults(
         }),
         false
     );
+    // Source: unavailable (retired from the Gemini API pricing page)
     add_model!(
         "gemini-1.5-flash-8b",
         PricingStructure::Tiered(TieredPricing {
@@ -2048,6 +2391,7 @@ fn populate_defaults(
         }),
         false
     );
+    // Source: unavailable (retired from the Gemini API pricing page)
     add_model!(
         "gemini-1.5-pro",
         PricingStructure::Tiered(TieredPricing {
@@ -2082,6 +2426,7 @@ fn populate_defaults(
     );
 
     // Z.AI (Zhipu AI) Models
+    // Source: https://docs.z.ai/guides/overview/pricing
     add_model!(
         "glm-4.6",
         PricingStructure::Flat {
@@ -2355,6 +2700,10 @@ fn populate_defaults(
     );
 
     // Synthetic.new Models
+    // Synthetic.new bills a flat subscription ($1/day or $30/month) with no
+    // per-token billing, so it publishes no per-token price to cite. The
+    // figures below are carried over from the upstream model vendors.
+    // Source: unavailable (subscription-only vendor; no per-token price published)
     add_model!(
         "hf:zai-org/GLM-4.6",
         PricingStructure::Flat {
@@ -2375,23 +2724,58 @@ fn populate_defaults(
     );
 
     // ByteDance / Doubao Models
+    // Volcano Ark publishes CNY rates bracketed on input length
+    // (3.20 / 0.64 / 16.00, then 4.80 / 0.96 / 24.00, then 9.60 / 1.92 / 48.00
+    // per 1M tokens) and bills every token in a request at its bracket's rate.
+    // The USD figures below apply the same 7 CNY-per-USD conversion as the
+    // other CNY-only providers in this file, so they remain an estimate.
+    // Source: https://www.volcengine.com/docs/82379/1544106
     add_model!(
         "doubao-seed-2.0-code",
-        PricingStructure::Flat {
-            input_per_1m: 0.67,
-            output_per_1m: 3.36
-        },
-        CachingSupport::OpenAI {
-            cached_input_per_1m: 0.14
-        },
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(32_000),
+                    input_per_1m: 0.457,
+                    output_per_1m: 2.286,
+                },
+                PricingTier {
+                    max_tokens: Some(128_000),
+                    input_per_1m: 0.686,
+                    output_per_1m: 3.429,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 1.371,
+                    output_per_1m: 6.857,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(32_000),
+                    cached_input_per_1m: 0.091,
+                },
+                CachingTier {
+                    max_tokens: Some(128_000),
+                    cached_input_per_1m: 0.137,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 0.274,
+                },
+            ],
+            bracket_pricing: true,
+        }),
         true
     );
 
     // DeepSeek Models
     // Source: https://api-docs.deepseek.com/quick_start/pricing/
-    // The page publishes peak and off-peak rates, where off-peak is half of
-    // peak. Splitrail prices usage without a time-of-day dimension, so the
-    // peak (standard) rates are used.
+    // The rates below are the published peak rates; off-peak rates are half of
+    // peak and apply outside the peak windows (see below).
     add_model!(
         "deepseek-v4-pro",
         PricingStructure::Flat {
@@ -2405,8 +2789,7 @@ fn populate_defaults(
     );
     // DeepSeek now asks callers to use `deepseek-flash`; the legacy
     // `deepseek-v4-flash` name is still accepted and billed at the same rate.
-    // From September 14, 2026 requests to `deepseek-v4-pro` are routed to
-    // DeepSeek-V4.1-Flash and billed at this price.
+    // Requests to `deepseek-v4-pro` keep being served by DeepSeek-V4-Pro.
     add_model!(
         "deepseek-v4-flash",
         PricingStructure::Flat {
@@ -2418,7 +2801,23 @@ fn populate_defaults(
         },
         false
     );
-    // Amazon Bedrock model ID. Source: https://aws.amazon.com/bedrock/pricing/
+    // Peak hours are 01:00-04:00 and 06:00-10:00 UTC, Monday through Friday;
+    // every other hour, including all weekend hours, is billed at half rate.
+    for model in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+        add_time_of_day_pricing!(
+            model,
+            TimeOfDayPricing {
+                timezone: "UTC".to_string(),
+                peak_windows: vec![
+                    PeakWindow::weekdays(clock(1, 0), clock(4, 0)),
+                    PeakWindow::weekdays(clock(6, 0), clock(10, 0)),
+                ],
+                off_peak_multiplier: 0.5,
+            }
+        );
+    }
+    // Amazon Bedrock model ID. DeepSeek's own pricing page does not cover it.
+    // Source: unavailable (third-party model id; DeepSeek publishes no price for it)
     add_model!(
         "deepseek.v3.2",
         PricingStructure::Flat {
@@ -2475,9 +2874,119 @@ fn populate_defaults(
         },
         false
     );
+    // Z.AI's current flagship line and the remaining text/vision tiers.
+    add_model!(
+        "glm-5.3",
+        PricingStructure::Flat {
+            input_per_1m: 1.4,
+            output_per_1m: 4.4
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.26
+        },
+        false
+    );
+    add_model!(
+        "glm-5.3-flash",
+        PricingStructure::Flat {
+            input_per_1m: 0.15,
+            output_per_1m: 0.50
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.03
+        },
+        false
+    );
+    add_model!(
+        "glm-5.2",
+        PricingStructure::Flat {
+            input_per_1m: 1.4,
+            output_per_1m: 4.4
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.26
+        },
+        false
+    );
+    add_model!(
+        "glm-4.7-flashx",
+        PricingStructure::Flat {
+            input_per_1m: 0.07,
+            output_per_1m: 0.40
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.01
+        },
+        false
+    );
+    add_model!(
+        "glm-4.5",
+        PricingStructure::Flat {
+            input_per_1m: 0.60,
+            output_per_1m: 2.20
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.11
+        },
+        false
+    );
+    add_model!(
+        "glm-4.5-x",
+        PricingStructure::Flat {
+            input_per_1m: 2.20,
+            output_per_1m: 8.90
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.45
+        },
+        false
+    );
+    add_model!(
+        "glm-4.5-airx",
+        PricingStructure::Flat {
+            input_per_1m: 1.10,
+            output_per_1m: 4.50
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.22
+        },
+        false
+    );
+    add_model!(
+        "glm-4.5v",
+        PricingStructure::Flat {
+            input_per_1m: 0.60,
+            output_per_1m: 1.80
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.11
+        },
+        false
+    );
+    add_model!(
+        "glm-4.6v-flashx",
+        PricingStructure::Flat {
+            input_per_1m: 0.04,
+            output_per_1m: 0.40
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.004
+        },
+        false
+    );
+    // GLM-OCR is priced per token on both directions and has no cache tier.
+    add_model!(
+        "glm-ocr",
+        PricingStructure::Flat {
+            input_per_1m: 0.03,
+            output_per_1m: 0.03
+        },
+        CachingSupport::None,
+        false
+    );
 
     // Xiaomi Models
-    // Source: https://openrouter.ai/xiaomi/mimo-v2.5-pro
+    // Source: https://mimo.mi.com/docs/zh-CN/pricing
     add_model!(
         "mimo-v2.5-pro",
         PricingStructure::Flat {
@@ -2489,7 +2998,7 @@ fn populate_defaults(
         },
         true
     );
-    // Source: https://openrouter.ai/xiaomi/mimo-v2-omni
+    // Source: unavailable (Xiaomi publishes only mimo-v2.5-pro and mimo-v2.5)
     add_model!(
         "mimo-v2-omni",
         PricingStructure::Flat {
@@ -2576,7 +3085,40 @@ fn populate_defaults(
     );
 
     // Moonshot AI Models
-    // Source: https://platform.kimi.ai/docs/pricing/chat-k26.md
+    // Source: https://platform.kimi.ai/docs/pricing/chat
+    add_model!(
+        "kimi-k3",
+        PricingStructure::Flat {
+            input_per_1m: 3.0,
+            output_per_1m: 15.0
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.30
+        },
+        false
+    );
+    add_model!(
+        "kimi-k2.7-code",
+        PricingStructure::Flat {
+            input_per_1m: 0.95,
+            output_per_1m: 4.0
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.19
+        },
+        false
+    );
+    add_model!(
+        "kimi-k2.7-code-highspeed",
+        PricingStructure::Flat {
+            input_per_1m: 1.90,
+            output_per_1m: 8.0
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.38
+        },
+        false
+    );
     add_model!(
         "kimi-k2.6",
         PricingStructure::Flat {
@@ -2588,7 +3130,7 @@ fn populate_defaults(
         },
         false
     );
-    // Source: https://platform.kimi.ai/docs/pricing/chat-k25.md
+    // Source: unavailable (retired 2026-08-31; Moonshot no longer publishes a price)
     add_model!(
         "kimi-k2.5",
         PricingStructure::Flat {
@@ -2602,8 +3144,7 @@ fn populate_defaults(
     );
 
     // Qwen Models
-    // Source: https://docs.qwencloud.com/developer-guides/getting-started/pricing
-    // Context cache pricing: https://www.qwencloud.com/models/qwen3.6-plus
+    // Source: https://www.alibabacloud.com/help/en/model-studio/model-pricing
     add_model!(
         "qwen3.6-plus",
         PricingStructure::Tiered(TieredPricing {
@@ -2627,7 +3168,7 @@ fn populate_defaults(
         },
         false
     );
-    // Source: https://openrouter.ai/qwen/qwen3.5-35b-a3b
+    // Source: unavailable (absent from the Model Studio pricing table)
     add_model!(
         "qwen3.5-35b-a3b",
         PricingStructure::Flat {
@@ -2637,7 +3178,6 @@ fn populate_defaults(
         CachingSupport::None,
         true
     );
-    // Source: https://openrouter.ai/qwen/qwen3.7-plus
     add_model!(
         "qwen3.7-plus",
         PricingStructure::Tiered(TieredPricing {
@@ -2661,7 +3201,7 @@ fn populate_defaults(
         },
         true
     );
-    // Source: https://openrouter.ai/qwen/qwen3.7-flash
+    // Source: unavailable (absent from the Model Studio pricing table)
     add_model!(
         "qwen3.7-flash",
         PricingStructure::Tiered(TieredPricing {
@@ -2691,8 +3231,35 @@ fn populate_defaults(
         true
     );
 
+    // International-scope list prices. Explicit cache creation bills at 125% of
+    // the input rate and cache hits at 10%, matching the Qwen3.6/3.7 entries.
+    add_model!(
+        "qwen3.8-max",
+        PricingStructure::Flat {
+            input_per_1m: 2.0,
+            output_per_1m: 6.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 2.5,
+            cache_read_per_1m: 0.20
+        },
+        false
+    );
+    add_model!(
+        "qwen3.7-max",
+        PricingStructure::Flat {
+            input_per_1m: 2.5,
+            output_per_1m: 7.5
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 3.125,
+            cache_read_per_1m: 0.25
+        },
+        false
+    );
+
     // Meituan Models
-    // Source: https://anotherwrapper.com/tools/llm-pricing/longcat-flash-lite
+    // Source: unavailable (Meituan publishes no public per-token price)
     add_model!(
         "longcat-flash-lite",
         PricingStructure::Flat {
@@ -2704,28 +3271,50 @@ fn populate_defaults(
     );
 
     // StepFun Models
+    // StepFun publishes CNY rates only (0.70 / 0.14 / 2.10 per 1M tokens), so
+    // these use the 7 CNY-per-USD conversion established for this provider.
+    // Source: https://platform.stepfun.com/docs/zh/guides/pricing/details
     add_model!(
         "step-3.5-flash",
         PricingStructure::Flat {
             input_per_1m: 0.10,
             output_per_1m: 0.30
         },
-        CachingSupport::None,
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.02
+        },
+        false
+    );
+    // StepFun publishes CNY rates only (1.35 / 0.27 / 8.10 per 1M tokens), so
+    // these follow the same 7 CNY-per-USD conversion as `step-3.5-flash`.
+    add_model!(
+        "step-3.7-flash",
+        PricingStructure::Flat {
+            input_per_1m: 0.193,
+            output_per_1m: 1.157
+        },
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.039
+        },
         false
     );
 
     // Upstage Models
+    // Source: https://www.upstage.ai/pricing/api
     add_model!(
         "solar-pro-3",
         PricingStructure::Flat {
             input_per_1m: 0.15,
             output_per_1m: 0.60
         },
-        CachingSupport::None,
+        CachingSupport::OpenAI {
+            cached_input_per_1m: 0.015
+        },
         false
     );
 
     // OpenRouter Models
+    // Source: unavailable (cloaked model; OpenRouter publishes no price)
     add_model!(
         "aurora-alpha",
         PricingStructure::Flat {
@@ -2736,9 +3325,9 @@ fn populate_defaults(
         false
     );
     // OpenRouter router labels
-    // Source: https://openrouter.ai/docs/guides/routing/routers/auto-router
     // Auto Router has no standalone per-token price; usage is billed at the routed model's rate.
     // Keep a zero-cost estimated placeholder so historical logs with only `auto` do not warn.
+    // Source: https://openrouter.ai/docs/guides/routing/routers/auto-router
     add_model!(
         "auto",
         PricingStructure::Flat {
@@ -2893,6 +3482,7 @@ fn populate_defaults(
     add_alias!("gemini-3-flash-preview-12-2025", "gemini-3-flash-preview");
     add_alias!("gemini-3-flash", "gemini-3-flash-preview");
     add_alias!("gemini-3-flash-a", "gemini-3-flash-preview");
+    add_alias!("gemini-3.8-flash", "gemini-3.8-flash");
     add_alias!("gemini-3.1-pro-preview", "gemini-3.1-pro-preview");
     add_alias!(
         "gemini-3.1-pro-preview-customtools",
@@ -2949,6 +3539,12 @@ fn populate_defaults(
     add_alias!("glm-5-code", "glm-5-code");
     add_alias!("glm-5-code-20260211", "glm-5-code");
     add_alias!("glm-4.5-air-20260211", "glm-4.5-air");
+    add_alias!("zai.glm-5.3", "glm-5.3");
+    add_alias!("zai-glm-5.3", "glm-5.3");
+    add_alias!("zai.glm-5.3-flash", "glm-5.3-flash");
+    add_alias!("zai-glm-5.3-flash", "glm-5.3-flash");
+    add_alias!("zai.glm-5.2", "glm-5.2");
+    add_alias!("zai-glm-5.2", "glm-5.2");
 
     // OpenAI aliases (continued)
     add_alias!("gpt-5.4", "gpt-5.4");
@@ -2970,6 +3566,15 @@ fn populate_defaults(
 
     // Moonshot / ByteDance / Qwen / Xiaomi / Meituan aliases
     add_alias!("doubao-seed-code", "doubao-seed-2.0-code");
+    add_alias!("kimi-k3", "kimi-k3");
+    add_alias!("moonshotai.kimi-k3", "kimi-k3");
+    add_alias!("kimi-k2.7-code", "kimi-k2.7-code");
+    add_alias!("moonshotai.kimi-k2.7-code", "kimi-k2.7-code");
+    add_alias!("kimi-k2.7-code-highspeed", "kimi-k2.7-code-highspeed");
+    add_alias!(
+        "moonshotai.kimi-k2.7-code-highspeed",
+        "kimi-k2.7-code-highspeed"
+    );
     add_alias!("kimi-k2.6", "kimi-k2.6");
     add_alias!("moonshotai.kimi-k2.6", "kimi-k2.6");
     add_alias!("kimi-k2.5", "kimi-k2.5");
@@ -2980,6 +3585,10 @@ fn populate_defaults(
     add_alias!("qwen.qwen3.7-plus", "qwen3.7-plus");
     add_alias!("qwen3.7-flash", "qwen3.7-flash");
     add_alias!("qwen.qwen3.7-flash", "qwen3.7-flash");
+    add_alias!("qwen3.8-max", "qwen3.8-max");
+    add_alias!("qwen.qwen3.8-max", "qwen3.8-max");
+    add_alias!("qwen3.7-max", "qwen3.7-max");
+    add_alias!("qwen.qwen3.7-max", "qwen3.7-max");
     add_alias!("mimo-v2.5-pro", "mimo-v2.5-pro");
     add_alias!("xiaomi.mimo-v2.5-pro", "mimo-v2.5-pro");
     add_alias!("mimo-v2-omni", "mimo-v2-omni");
@@ -2987,6 +3596,8 @@ fn populate_defaults(
 
     // StepFun aliases
     add_alias!("step-3.5-flash", "step-3.5-flash");
+    add_alias!("step-3.7-flash", "step-3.7-flash");
+    add_alias!("stepfun.step-3.7-flash", "step-3.7-flash");
 
     // Upstage aliases
     add_alias!("solar-pro-3", "solar-pro-3");
@@ -3012,6 +3623,7 @@ fn get_free_model_info() -> Arc<ModelInfo> {
             caching: CachingSupport::None,
             service_tiers: HashMap::new(),
             dated_pricing: Vec::new(),
+            time_of_day_pricing: None,
             input_token_semantics: InputTokenSemantics::ExcludesCache,
             is_estimated: false,
         })
@@ -3100,30 +3712,94 @@ fn dated_pricing_for_date(
         .min_by_key(|dated| dated.valid_until)
 }
 
+/// Pricing and caching selected for a specific usage instant.
+///
+/// `pricing` and `caching` are borrowed from whichever dated or service-tier
+/// override applies; `multiplier` carries the peak/off-peak adjustment that
+/// applies at that instant and scales every token category.
+struct ResolvedPricing<'a> {
+    pricing: &'a PricingStructure,
+    caching: &'a CachingSupport,
+    multiplier: f64,
+}
+
+/// Resolve the timezone a schedule's windows are expressed in.
+fn pricing_timezone(schedule: &TimeOfDayPricing) -> chrono_tz::Tz {
+    schedule.timezone.parse().unwrap_or_else(|_| {
+        warn_once(format!(
+            "WARNING: unknown pricing timezone `{}`. Defaulting to UTC.",
+            schedule.timezone
+        ));
+        chrono_tz::UTC
+    })
+}
+
+/// Multiplier applied to a model's base rates at `effective_at`.
+///
+/// Returns `1.0` (peak rates) when no schedule is configured or the usage
+/// instant is unknown, so time-of-day pricing stays strictly opt-in and never
+/// silently discounts usage whose timestamp was not recovered.
+fn off_peak_multiplier(
+    schedule: Option<&TimeOfDayPricing>,
+    effective_at: Option<DateTime<Utc>>,
+) -> f64 {
+    let (Some(schedule), Some(effective_at)) = (schedule, effective_at) else {
+        return 1.0;
+    };
+
+    let local = effective_at.with_timezone(&pricing_timezone(schedule));
+
+    if schedule
+        .peak_windows
+        .iter()
+        .any(|window| window.matches(&local))
+    {
+        1.0
+    } else {
+        schedule.off_peak_multiplier
+    }
+}
+
 fn standard_pricing_for_date(
     model_info: &ModelInfo,
     effective_at: Option<DateTime<Utc>>,
-) -> (&PricingStructure, &CachingSupport) {
-    dated_pricing_for_date(model_info, effective_at)
+) -> ResolvedPricing<'_> {
+    let dated = dated_pricing_for_date(model_info, effective_at);
+    let (pricing, caching) = dated
         .map(|dated| (&dated.pricing, &dated.caching))
-        .unwrap_or((&model_info.pricing, &model_info.caching))
+        .unwrap_or((&model_info.pricing, &model_info.caching));
+    let schedule = dated
+        .and_then(|dated| dated.time_of_day_pricing.as_ref())
+        .or(model_info.time_of_day_pricing.as_ref());
+
+    ResolvedPricing {
+        pricing,
+        caching,
+        multiplier: off_peak_multiplier(schedule, effective_at),
+    }
 }
 
 fn pricing_for_service_tier(
     model_info: &ModelInfo,
     service_tier: ServiceTier,
     effective_at: Option<DateTime<Utc>>,
-) -> (&PricingStructure, &CachingSupport) {
+) -> ResolvedPricing<'_> {
     let standard = standard_pricing_for_date(model_info, effective_at);
 
     if service_tier == ServiceTier::Standard {
         return standard;
     }
 
+    // Service tiers change the rate card, not the time-of-day discount, so the
+    // standard multiplier carries over to the override.
     dated_pricing_for_date(model_info, effective_at)
         .and_then(|dated| dated.service_tiers.get(&service_tier))
         .or_else(|| model_info.service_tiers.get(&service_tier))
-        .map(|tier| (&tier.pricing, &tier.caching))
+        .map(|tier| ResolvedPricing {
+            pricing: &tier.pricing,
+            caching: &tier.caching,
+            multiplier: standard.multiplier,
+        })
         .unwrap_or(standard)
 }
 
@@ -3163,8 +3839,8 @@ pub fn calculate_input_cost_for_service_tier_at(
 ) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            let (pricing, _) = pricing_for_service_tier(&model_info, service_tier, effective_at);
-            input_cost_for_pricing(pricing, input_tokens)
+            let resolved = pricing_for_service_tier(&model_info, service_tier, effective_at);
+            input_cost_for_pricing(resolved.pricing, input_tokens) * resolved.multiplier
         }
         None => {
             warn_once(format!(
@@ -3211,8 +3887,8 @@ pub fn calculate_output_cost_for_service_tier_at(
 ) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            let (pricing, _) = pricing_for_service_tier(&model_info, service_tier, effective_at);
-            output_cost_for_pricing(pricing, output_tokens)
+            let resolved = pricing_for_service_tier(&model_info, service_tier, effective_at);
+            output_cost_for_pricing(resolved.pricing, output_tokens) * resolved.multiplier
         }
         None => {
             warn_once(format!(
@@ -3304,8 +3980,9 @@ pub fn calculate_cache_cost_for_service_tier_at(
 ) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            let (_, caching) = pricing_for_service_tier(&model_info, service_tier, effective_at);
-            cache_cost_for_caching(caching, cache_creation_tokens, cache_read_tokens)
+            let resolved = pricing_for_service_tier(&model_info, service_tier, effective_at);
+            cache_cost_for_caching(resolved.caching, cache_creation_tokens, cache_read_tokens)
+                * resolved.multiplier
         }
         None => {
             warn_once(format!(
@@ -3368,8 +4045,7 @@ pub fn calculate_total_cost_for_service_tier_at(
 ) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            let (pricing, caching) =
-                pricing_for_service_tier(&model_info, service_tier, effective_at);
+            let resolved = pricing_for_service_tier(&model_info, service_tier, effective_at);
             // Token sources report disjoint billable categories here: ordinary
             // input excludes cached reads and writes. Reads and writes can
             // overlap, so their maximum reconstructs the cached portion without
@@ -3378,14 +4054,14 @@ pub fn calculate_total_cost_for_service_tier_at(
             let context_tokens =
                 input_tokens.saturating_add(cache_creation_tokens.max(cache_read_tokens));
             calculate_context_cost(
-                pricing,
-                caching,
+                resolved.pricing,
+                resolved.caching,
                 input_tokens,
                 output_tokens,
                 cache_creation_tokens,
                 cache_read_tokens,
                 context_tokens,
-            )
+            ) * resolved.multiplier
         }
         None => {
             warn_once(format!(
@@ -3409,16 +4085,16 @@ pub fn calculate_total_cost_for_context_at(
 ) -> f64 {
     match get_model_info(model_name) {
         Some(model_info) => {
-            let (pricing, caching) = standard_pricing_for_date(&model_info, effective_at);
+            let resolved = standard_pricing_for_date(&model_info, effective_at);
             calculate_context_cost(
-                pricing,
-                caching,
+                resolved.pricing,
+                resolved.caching,
                 input_tokens,
                 output_tokens,
                 cache_creation_tokens,
                 cache_read_tokens,
                 context_tokens,
-            )
+            ) * resolved.multiplier
         }
         None => {
             warn_once(format!(
@@ -3591,18 +4267,20 @@ fn calculate_context_cost(
 #[cfg(test)]
 mod tests {
     use super::{
-        CachingSupport, CachingTier, CachingTierWithWrites, InputTokenSemantics, ModelInfo,
-        PricingStructure, PricingTier, Registry, ServiceTier, TieredCaching,
-        TieredCachingWithWrites, TieredPricing, calculate_cache_cost,
-        calculate_cache_cost_for_service_tier, calculate_cache_cost_for_service_tier_at,
-        calculate_input_cost, calculate_input_cost_for_service_tier,
-        calculate_input_cost_for_service_tier_at, calculate_output_cost,
-        calculate_output_cost_for_service_tier, calculate_output_cost_for_service_tier_at,
-        calculate_total_cost_for_context_at, calculate_total_cost_for_service_tier_at,
-        get_model_info, get_registry_lock, init_external_models,
+        CachingSupport, CachingTier, CachingTierWithWrites, DatedPricing, InputTokenSemantics,
+        ModelInfo, PeakWindow, PricingStructure, PricingTier, Registry, ServiceTier,
+        ServiceTierPricing, TieredCaching, TieredCachingWithWrites, TieredPricing,
+        TimeOfDayPricing, calculate_cache_cost, calculate_cache_cost_for_service_tier,
+        calculate_cache_cost_for_service_tier_at, calculate_input_cost,
+        calculate_input_cost_for_service_tier, calculate_input_cost_for_service_tier_at,
+        calculate_output_cost, calculate_output_cost_for_service_tier,
+        calculate_output_cost_for_service_tier_at, calculate_total_cost_for_context_at,
+        calculate_total_cost_for_service_tier, calculate_total_cost_for_service_tier_at, clock,
+        dated_period_mut, get_model_info, get_registry_lock, init_external_models,
+        push_dated_pricing,
     };
 
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, NaiveDate, TimeZone, Utc};
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
@@ -3637,6 +4315,7 @@ mod tests {
                 caching: CachingSupport::None,
                 service_tiers: HashMap::new(),
                 dated_pricing: Vec::new(),
+                time_of_day_pricing: None,
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -3679,6 +4358,7 @@ mod tests {
                 caching: CachingSupport::None,
                 service_tiers: HashMap::new(),
                 dated_pricing: Vec::new(),
+                time_of_day_pricing: None,
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -3703,6 +4383,7 @@ mod tests {
                 caching: CachingSupport::None,
                 service_tiers: HashMap::new(),
                 dated_pricing: Vec::new(),
+                time_of_day_pricing: None,
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -3736,6 +4417,7 @@ mod tests {
                 caching: CachingSupport::None,
                 service_tiers: HashMap::new(),
                 dated_pricing: Vec::new(),
+                time_of_day_pricing: None,
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -3798,6 +4480,7 @@ mod tests {
                 }),
                 service_tiers: HashMap::new(),
                 dated_pricing: Vec::new(),
+                time_of_day_pricing: None,
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -3858,6 +4541,7 @@ mod tests {
                 }),
                 service_tiers: HashMap::new(),
                 dated_pricing: Vec::new(),
+                time_of_day_pricing: None,
                 input_token_semantics: InputTokenSemantics::default(),
                 is_estimated: false,
             },
@@ -4162,7 +4846,7 @@ mod tests {
 
         approx_eq(input_cost, 10.0);
         approx_eq(output_cost, 45.0);
-        approx_eq(cache_cost, 1.25);
+        approx_eq(cache_cost, 1.0);
     }
 
     #[test]
@@ -4825,13 +5509,30 @@ mod tests {
         let model_info = get_model_info("doubao-seed-code").expect("alias should resolve");
         assert!(model_info.is_estimated);
 
-        let input_cost = calculate_input_cost("doubao-seed-code", 1_000_000);
-        let output_cost = calculate_output_cost("doubao-seed-code", 1_000_000);
-        let cache_cost = calculate_cache_cost("doubao-seed-code", 0, 1_000_000);
+        // Volcano Ark brackets on input length and bills every token in a
+        // request at its bracket's rate, so a 1M-token request uses the top
+        // bracket (9.60 / 1.92 / 48.00 CNY, converted at 7 CNY per USD).
+        approx_eq(calculate_input_cost("doubao-seed-code", 1_000_000), 1.371);
+        approx_eq(calculate_output_cost("doubao-seed-code", 1_000_000), 6.857);
+        approx_eq(
+            calculate_cache_cost("doubao-seed-code", 0, 1_000_000),
+            0.274,
+        );
 
-        approx_eq(input_cost, 0.67);
-        approx_eq(output_cost, 3.36);
-        approx_eq(cache_cost, 0.14);
+        // A request that stays inside the first bracket uses
+        // 3.20 / 0.64 / 16.00 CNY.
+        approx_eq(
+            calculate_input_cost("doubao-seed-code", 32_000),
+            0.032 * 0.457,
+        );
+        approx_eq(
+            calculate_output_cost("doubao-seed-code", 32_000),
+            0.032 * 2.286,
+        );
+        approx_eq(
+            calculate_cache_cost("doubao-seed-code", 0, 32_000),
+            0.032 * 0.091,
+        );
     }
 
     #[test]
@@ -5019,6 +5720,128 @@ mod tests {
             calculate_output_cost("openai.gpt-oss-safeguard-120b", 1_000_000),
             0.60,
         );
+
+        approx_eq(calculate_input_cost("glm-5.3", 1_000_000), 1.40);
+        approx_eq(calculate_output_cost("glm-5.3", 1_000_000), 4.40);
+        approx_eq(calculate_cache_cost("glm-5.3", 0, 1_000_000), 0.26);
+
+        approx_eq(calculate_input_cost("glm-5.3-flash", 1_000_000), 0.15);
+        approx_eq(calculate_output_cost("glm-5.3-flash", 1_000_000), 0.50);
+        approx_eq(calculate_cache_cost("glm-5.3-flash", 0, 1_000_000), 0.03);
+
+        approx_eq(calculate_input_cost("glm-5.2", 1_000_000), 1.40);
+        approx_eq(calculate_output_cost("glm-5.2", 1_000_000), 4.40);
+        approx_eq(calculate_cache_cost("glm-5.2", 0, 1_000_000), 0.26);
+
+        approx_eq(calculate_input_cost("glm-4.7-flashx", 1_000_000), 0.07);
+        approx_eq(calculate_output_cost("glm-4.7-flashx", 1_000_000), 0.40);
+        approx_eq(calculate_cache_cost("glm-4.7-flashx", 0, 1_000_000), 0.01);
+
+        approx_eq(calculate_input_cost("glm-4.6v-flashx", 1_000_000), 0.04);
+        approx_eq(calculate_output_cost("glm-4.6v-flashx", 1_000_000), 0.40);
+        approx_eq(calculate_cache_cost("glm-4.6v-flashx", 0, 1_000_000), 0.004);
+
+        // GLM-OCR has no cache tier, so cache reads must cost nothing.
+        approx_eq(calculate_input_cost("glm-ocr", 1_000_000), 0.03);
+        approx_eq(calculate_output_cost("glm-ocr", 1_000_000), 0.03);
+        approx_eq(calculate_cache_cost("glm-ocr", 0, 1_000_000), 0.0);
+
+        approx_eq(calculate_input_cost("kimi-k3", 1_000_000), 3.0);
+        approx_eq(calculate_output_cost("kimi-k3", 1_000_000), 15.0);
+        approx_eq(calculate_cache_cost("kimi-k3", 0, 1_000_000), 0.30);
+
+        approx_eq(calculate_input_cost("kimi-k2.7-code", 1_000_000), 0.95);
+        approx_eq(calculate_output_cost("kimi-k2.7-code", 1_000_000), 4.0);
+        approx_eq(calculate_cache_cost("kimi-k2.7-code", 0, 1_000_000), 0.19);
+
+        approx_eq(
+            calculate_input_cost("kimi-k2.7-code-highspeed", 1_000_000),
+            1.90,
+        );
+        approx_eq(
+            calculate_output_cost("kimi-k2.7-code-highspeed", 1_000_000),
+            8.0,
+        );
+        approx_eq(
+            calculate_cache_cost("kimi-k2.7-code-highspeed", 0, 1_000_000),
+            0.38,
+        );
+
+        approx_eq(calculate_input_cost("qwen3.8-max", 1_000_000), 2.0);
+        approx_eq(calculate_output_cost("qwen3.8-max", 1_000_000), 6.0);
+        approx_eq(
+            calculate_cache_cost("qwen3.8-max", 1_000_000, 1_000_000),
+            2.70,
+        );
+
+        approx_eq(calculate_input_cost("qwen3.7-max", 1_000_000), 2.5);
+        approx_eq(calculate_output_cost("qwen3.7-max", 1_000_000), 7.5);
+        approx_eq(
+            calculate_cache_cost("qwen3.7-max", 1_000_000, 1_000_000),
+            3.375,
+        );
+
+        approx_eq(calculate_input_cost("step-3.7-flash", 1_000_000), 0.193);
+        approx_eq(calculate_output_cost("step-3.7-flash", 1_000_000), 1.157);
+        approx_eq(calculate_cache_cost("step-3.7-flash", 0, 1_000_000), 0.039);
+    }
+
+    #[test]
+    fn gemini_3_8_flash_switches_from_promotional_to_standard_rates() {
+        let promo = utc(2026, 12, 31, 23, 0);
+        let standard = utc(2027, 1, 1, 0, 0);
+
+        for (instant, input, output, cached) in
+            [(promo, 0.75, 3.75, 0.075), (standard, 1.50, 7.50, 0.15)]
+        {
+            approx_eq(
+                calculate_input_cost_for_service_tier_at(
+                    "gemini-3.8-flash",
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(instant),
+                ),
+                input,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier_at(
+                    "gemini-3.8-flash",
+                    ServiceTier::Standard,
+                    1_000_000,
+                    Some(instant),
+                ),
+                output,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier_at(
+                    "gemini-3.8-flash",
+                    ServiceTier::Standard,
+                    0,
+                    1_000_000,
+                    Some(instant),
+                ),
+                cached,
+            );
+        }
+    }
+
+    #[test]
+    fn provider_prefixed_aliases_resolve_for_new_models() {
+        for name in [
+            "zai.glm-5.3",
+            "zai-glm-5.3",
+            "zai.glm-5.3-flash",
+            "zai-glm-5.3-flash",
+            "zai.glm-5.2",
+            "moonshotai.kimi-k3",
+            "moonshotai.kimi-k2.7-code",
+            "qwen.qwen3.8-max",
+            "qwen.qwen3.7-max",
+            "stepfun.step-3.7-flash",
+            "z-ai/glm-5.3",
+        ] {
+            assert!(get_model_info(name).is_some(), "`{name}` should resolve");
+        }
     }
 
     #[test]
@@ -5113,5 +5936,484 @@ mod tests {
         approx_eq(input_cost, 0.0);
         approx_eq(output_cost, 0.0);
         approx_eq(cache_cost, 0.0);
+    }
+
+    /// Build a UTC instant, panicking on an invalid literal.
+    fn utc(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("valid UTC instant")
+    }
+
+    fn deepseek_total_at(model: &str, effective_at: DateTime<Utc>) -> f64 {
+        calculate_total_cost_for_service_tier_at(
+            model,
+            ServiceTier::Standard,
+            1_000_000,
+            1_000_000,
+            0,
+            1_000_000,
+            Some(effective_at),
+        )
+    }
+
+    #[test]
+    fn deepseek_peak_windows_bill_at_full_rate() {
+        // 2026-09-07 is a Monday. Peak hours are 01:00-04:00 and 06:00-10:00 UTC.
+        for instant in [
+            utc(2026, 9, 7, 1, 0),   // inclusive start of the first window
+            utc(2026, 9, 7, 2, 30),  // inside the first window
+            utc(2026, 9, 7, 8, 0),   // inside the second window
+            utc(2026, 9, 11, 9, 59), // Friday, inside the second window
+        ] {
+            // 1M input at $1.32 + 1M output at $3.96 + 1M cache reads at $0.044
+            approx_eq(deepseek_total_at("deepseek-v4-pro", instant), 5.324);
+        }
+    }
+
+    #[test]
+    fn deepseek_off_peak_halves_every_token_category() {
+        // 2026-09-07 is a Monday.
+        for instant in [
+            utc(2026, 9, 7, 0, 59), // before the first window
+            utc(2026, 9, 7, 4, 0),  // exclusive end of the first window
+            utc(2026, 9, 7, 5, 0),  // between the two windows
+            utc(2026, 9, 7, 10, 0), // exclusive end of the second window
+            utc(2026, 9, 7, 23, 0), // after both windows
+        ] {
+            approx_eq(deepseek_total_at("deepseek-v4-pro", instant), 2.662);
+        }
+    }
+
+    #[test]
+    fn deepseek_weekends_are_entirely_off_peak() {
+        // 2026-09-12 is a Saturday and 2026-09-13 a Sunday, so the weekday-only
+        // peak windows never apply even at hours that are peak on a weekday.
+        for instant in [
+            utc(2026, 9, 12, 2, 0),
+            utc(2026, 9, 12, 8, 0),
+            utc(2026, 9, 13, 2, 0),
+            utc(2026, 9, 13, 8, 0),
+        ] {
+            approx_eq(deepseek_total_at("deepseek-v4-pro", instant), 2.662);
+        }
+    }
+
+    #[test]
+    fn deepseek_flash_family_shares_the_peak_schedule() {
+        // The legacy name and the current `deepseek-flash` alias resolve to the
+        // same model, so both must price identically at the same instant.
+        let peak = utc(2026, 9, 7, 2, 0);
+        let off_peak = utc(2026, 9, 7, 12, 0);
+
+        for model in ["deepseek-flash", "deepseek-v4-flash"] {
+            approx_eq(deepseek_total_at(model, peak), 1.506);
+            approx_eq(deepseek_total_at(model, off_peak), 0.753);
+        }
+    }
+
+    #[test]
+    fn unknown_usage_instant_keeps_peak_rates() {
+        // Without a timestamp there is no time-of-day dimension to apply, so
+        // pricing must stay at the published peak rates.
+        approx_eq(
+            calculate_total_cost_for_service_tier(
+                "deepseek-v4-pro",
+                ServiceTier::Standard,
+                1_000_000,
+                1_000_000,
+                0,
+                1_000_000,
+            ),
+            5.324,
+        );
+    }
+
+    #[test]
+    fn models_without_a_schedule_ignore_the_usage_instant() {
+        let peak = utc(2026, 9, 7, 2, 0);
+        let off_peak = utc(2026, 9, 7, 12, 0);
+
+        for instant in [peak, off_peak] {
+            approx_eq(
+                calculate_total_cost_for_service_tier_at(
+                    "glm-5.1",
+                    ServiceTier::Standard,
+                    1_000_000,
+                    1_000_000,
+                    0,
+                    0,
+                    Some(instant),
+                ),
+                5.80,
+            );
+        }
+    }
+
+    #[test]
+    fn off_peak_multiplier_carries_over_to_service_tier_overrides() {
+        let _guard = registry_test_guard();
+        reset_global_registry();
+
+        let mut models = HashMap::new();
+        models.insert(
+            "review-peak-tiered".to_string(),
+            ModelInfo {
+                pricing: PricingStructure::Flat {
+                    input_per_1m: 10.0,
+                    output_per_1m: 20.0,
+                },
+                caching: CachingSupport::None,
+                service_tiers: HashMap::from([(
+                    ServiceTier::Priority,
+                    ServiceTierPricing {
+                        pricing: PricingStructure::Flat {
+                            input_per_1m: 20.0,
+                            output_per_1m: 40.0,
+                        },
+                        caching: CachingSupport::None,
+                    },
+                )]),
+                dated_pricing: Vec::new(),
+                time_of_day_pricing: Some(TimeOfDayPricing {
+                    timezone: "UTC".to_string(),
+                    peak_windows: vec![PeakWindow::weekdays(clock(1, 0), clock(4, 0))],
+                    off_peak_multiplier: 0.5,
+                }),
+                input_token_semantics: InputTokenSemantics::default(),
+                is_estimated: false,
+            },
+        );
+        init_external_models(models, HashMap::new());
+
+        let peak = utc(2026, 9, 7, 2, 0);
+        let off_peak = utc(2026, 9, 7, 12, 0);
+
+        // Priority keeps its premium rates, but the time-of-day discount still
+        // applies because it is a property of the clock, not of the rate card.
+        approx_eq(
+            calculate_input_cost_for_service_tier_at(
+                "review-peak-tiered",
+                ServiceTier::Priority,
+                1_000_000,
+                Some(peak),
+            ),
+            20.0,
+        );
+        approx_eq(
+            calculate_input_cost_for_service_tier_at(
+                "review-peak-tiered",
+                ServiceTier::Priority,
+                1_000_000,
+                Some(off_peak),
+            ),
+            10.0,
+        );
+        approx_eq(
+            calculate_input_cost_for_service_tier_at(
+                "review-peak-tiered",
+                ServiceTier::Standard,
+                1_000_000,
+                Some(off_peak),
+            ),
+            5.0,
+        );
+    }
+
+    #[test]
+    fn wrapping_peak_windows_use_the_configured_timezone() {
+        let _guard = registry_test_guard();
+        reset_global_registry();
+
+        // A 23:00-09:00 window in Beijing time: 23:00 CST is 15:00 UTC, and
+        // 08:30 CST the next day is 00:30 UTC, so the window straddles the UTC
+        // date boundary as well as local midnight.
+        let mut models = HashMap::new();
+        models.insert(
+            "review-wrapping-window".to_string(),
+            ModelInfo {
+                pricing: PricingStructure::Flat {
+                    input_per_1m: 4.0,
+                    output_per_1m: 4.0,
+                },
+                caching: CachingSupport::None,
+                service_tiers: HashMap::new(),
+                dated_pricing: Vec::new(),
+                time_of_day_pricing: Some(TimeOfDayPricing {
+                    timezone: "Asia/Shanghai".to_string(),
+                    peak_windows: vec![PeakWindow::weekdays(clock(23, 0), clock(9, 0))],
+                    off_peak_multiplier: 0.5,
+                }),
+                input_token_semantics: InputTokenSemantics::default(),
+                is_estimated: false,
+            },
+        );
+        init_external_models(models, HashMap::new());
+
+        let cost_at = |instant| {
+            calculate_input_cost_for_service_tier_at(
+                "review-wrapping-window",
+                ServiceTier::Standard,
+                1_000_000,
+                Some(instant),
+            )
+        };
+
+        // Monday 23:30 CST, the window's own day.
+        approx_eq(cost_at(utc(2026, 9, 7, 15, 30)), 4.0);
+        // Tuesday 08:30 CST: still inside the window that started Monday.
+        approx_eq(cost_at(utc(2026, 9, 8, 0, 30)), 4.0);
+        // Tuesday 09:00 CST: the exclusive end of the Monday window.
+        approx_eq(cost_at(utc(2026, 9, 8, 1, 0)), 2.0);
+        // Saturday 23:30 CST: the weekday filter excludes the weekend.
+        approx_eq(cost_at(utc(2026, 9, 12, 15, 30)), 2.0);
+    }
+
+    #[test]
+    fn invalid_time_of_day_schedules_are_skipped() {
+        let _guard = registry_test_guard();
+        reset_global_registry();
+
+        let schedule = |schedule: TimeOfDayPricing| ModelInfo {
+            pricing: PricingStructure::Flat {
+                input_per_1m: 1.0,
+                output_per_1m: 1.0,
+            },
+            caching: CachingSupport::None,
+            service_tiers: HashMap::new(),
+            dated_pricing: Vec::new(),
+            time_of_day_pricing: Some(schedule),
+            input_token_semantics: InputTokenSemantics::default(),
+            is_estimated: false,
+        };
+
+        let mut models = HashMap::new();
+        models.insert(
+            "review-zero-multiplier".to_string(),
+            schedule(TimeOfDayPricing {
+                timezone: "UTC".to_string(),
+                peak_windows: Vec::new(),
+                off_peak_multiplier: 0.0,
+            }),
+        );
+        models.insert(
+            "review-empty-window".to_string(),
+            schedule(TimeOfDayPricing {
+                timezone: "UTC".to_string(),
+                peak_windows: vec![PeakWindow::weekdays(clock(9, 0), clock(9, 0))],
+                off_peak_multiplier: 0.5,
+            }),
+        );
+        models.insert(
+            "review-out-of-range-window".to_string(),
+            schedule(TimeOfDayPricing {
+                timezone: "UTC".to_string(),
+                peak_windows: vec![PeakWindow::weekdays(clock(9, 0), 24 * 60 + 1)],
+                off_peak_multiplier: 0.5,
+            }),
+        );
+        init_external_models(models, HashMap::new());
+
+        for model in [
+            "review-zero-multiplier",
+            "review-empty-window",
+            "review-out-of-range-window",
+        ] {
+            assert!(
+                get_model_info(model).is_none(),
+                "`{model}` should be rejected"
+            );
+        }
+    }
+
+    fn flat_rate(input: f64) -> PricingStructure {
+        PricingStructure::Flat {
+            input_per_1m: input,
+            output_per_1m: input,
+        }
+    }
+
+    fn period_ending(
+        until: NaiveDate,
+        input: f64,
+        schedule: Option<TimeOfDayPricing>,
+    ) -> DatedPricing {
+        DatedPricing {
+            valid_until: until,
+            pricing: flat_rate(input),
+            caching: CachingSupport::None,
+            service_tiers: HashMap::new(),
+            time_of_day_pricing: schedule,
+        }
+    }
+
+    fn model_with(
+        base_input: f64,
+        dated_pricing: Vec<DatedPricing>,
+        schedule: Option<TimeOfDayPricing>,
+    ) -> ModelInfo {
+        ModelInfo {
+            pricing: flat_rate(base_input),
+            caching: CachingSupport::None,
+            service_tiers: HashMap::new(),
+            dated_pricing,
+            time_of_day_pricing: schedule,
+            input_token_semantics: InputTokenSemantics::default(),
+            is_estimated: false,
+        }
+    }
+
+    fn input_cost_at(model: &str, y: i32, m: u32, d: u32, hour: u32) -> f64 {
+        calculate_input_cost_for_service_tier_at(
+            model,
+            ServiceTier::Standard,
+            1_000_000,
+            Some(utc(y, m, d, hour, 0)),
+        )
+    }
+
+    /// Several configured periods must each take effect, regardless of the order
+    /// they were supplied in, and `valid_until` must behave as an exclusive
+    /// upper bound (the boundary date belongs to the newer period).
+    #[test]
+    fn each_configured_period_takes_effect() {
+        let _guard = registry_test_guard();
+        reset_global_registry();
+
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).expect("valid date");
+        let mut models = HashMap::new();
+        models.insert(
+            "review-periods".to_string(),
+            model_with(
+                40.0,
+                vec![
+                    period_ending(day(2026, 12, 1), 30.0, None),
+                    period_ending(day(2026, 6, 1), 10.0, None),
+                    period_ending(day(2026, 9, 1), 20.0, None),
+                ],
+                None,
+            ),
+        );
+        init_external_models(models, HashMap::new());
+
+        for (y, m, d, expected) in [
+            (2020, 1, 1, 10.0),
+            (2026, 5, 31, 10.0),
+            (2026, 6, 1, 20.0),
+            (2026, 8, 31, 20.0),
+            (2026, 9, 1, 30.0),
+            (2026, 11, 30, 30.0),
+            (2026, 12, 1, 40.0),
+            (2030, 1, 1, 40.0),
+        ] {
+            approx_eq(input_cost_at("review-periods", y, m, d, 12), expected);
+        }
+    }
+
+    /// Each period may run its own peak/off-peak rule; a period without one
+    /// falls back to the model-level schedule.
+    #[test]
+    fn each_period_can_carry_its_own_peak_schedule() {
+        let _guard = registry_test_guard();
+        reset_global_registry();
+
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).expect("valid date");
+        let model_schedule = TimeOfDayPricing {
+            timezone: "UTC".to_string(),
+            peak_windows: vec![PeakWindow::weekdays(clock(1, 0), clock(4, 0))],
+            off_peak_multiplier: 0.5,
+        };
+        let period_schedule = TimeOfDayPricing {
+            timezone: "UTC".to_string(),
+            peak_windows: vec![PeakWindow::weekdays(clock(12, 0), clock(13, 0))],
+            off_peak_multiplier: 0.25,
+        };
+
+        let mut models = HashMap::new();
+        models.insert(
+            "review-per-period-schedule".to_string(),
+            model_with(
+                100.0,
+                vec![
+                    period_ending(day(2026, 9, 1), 100.0, None),
+                    period_ending(day(2026, 12, 1), 100.0, Some(period_schedule)),
+                ],
+                Some(model_schedule),
+            ),
+        );
+        init_external_models(models, HashMap::new());
+
+        // First period has no schedule of its own, so the model-level one applies.
+        approx_eq(
+            input_cost_at("review-per-period-schedule", 2026, 6, 15, 2),
+            100.0,
+        );
+        approx_eq(
+            input_cost_at("review-per-period-schedule", 2026, 6, 15, 12),
+            50.0,
+        );
+
+        // Second period replaces it outright.
+        approx_eq(
+            input_cost_at("review-per-period-schedule", 2026, 11, 16, 12),
+            100.0,
+        );
+        approx_eq(
+            input_cost_at("review-per-period-schedule", 2026, 11, 16, 14),
+            25.0,
+        );
+
+        // Past every period the base rates use the model-level schedule again.
+        approx_eq(
+            input_cost_at("review-per-period-schedule", 2026, 12, 15, 12),
+            50.0,
+        );
+    }
+
+    /// Two periods ending on the same date are rejected rather than resolved by
+    /// vector order.
+    #[test]
+    fn duplicate_period_end_dates_are_rejected() {
+        let _guard = registry_test_guard();
+        reset_global_registry();
+
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).expect("valid date");
+        let mut models = HashMap::new();
+        models.insert(
+            "review-duplicate-periods".to_string(),
+            model_with(
+                90.0,
+                vec![
+                    period_ending(day(2026, 9, 1), 20.0, None),
+                    period_ending(day(2026, 9, 1), 25.0, None),
+                ],
+                None,
+            ),
+        );
+        init_external_models(models, HashMap::new());
+
+        assert!(
+            get_model_info("review-duplicate-periods").is_none(),
+            "a model with two periods ending on the same date must be rejected"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "each period must end on a distinct date")]
+    fn push_dated_pricing_rejects_a_duplicate_end_date() {
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).expect("valid date");
+        let mut info = model_with(90.0, Vec::new(), None);
+        push_dated_pricing(&mut info, "m", period_ending(day(2026, 9, 1), 20.0, None));
+        push_dated_pricing(&mut info, "m", period_ending(day(2026, 9, 1), 25.0, None));
+    }
+
+    /// A period-scoped override pointing at a date that has no period is a hard
+    /// error, not a silent no-op.
+    #[test]
+    #[should_panic(expected = "found no period ending")]
+    fn dated_period_mut_panics_for_an_unknown_end_date() {
+        let day = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).expect("valid date");
+        let mut info = model_with(90.0, vec![period_ending(day(2026, 9, 1), 20.0, None)], None);
+        dated_period_mut(&mut info, "m", day(2026, 10, 1), "add_time_of_day_pricing");
     }
 }
