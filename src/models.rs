@@ -1228,8 +1228,8 @@ fn populate_defaults(
         false
     );
 
-    // GPT-6 Astra uses OpenAI's whole-request long-context bracket: once the
-    // prompt (uncached input plus cache reads) exceeds 272K tokens, every input,
+    // GPT-6 models use OpenAI's whole-request long-context bracket: once the
+    // prompt (uncached input plus cached tokens) exceeds 272K tokens, every input,
     // output, cache-write, and cache-read token in the request is billed at the
     // long-context rate. Keeping matching tier boundaries across pricing and
     // caching lets the shared calculator make that decision once for the whole
@@ -1262,6 +1262,76 @@ fn populate_defaults(
                     max_tokens: None,
                     cache_write_per_1m: 25.0,
                     cache_read_per_1m: 2.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+
+    add_model!(
+        "gpt-6-sol",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 2.0,
+                    output_per_1m: 10.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 4.0,
+                    output_per_1m: 15.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+            tiers: vec![
+                CachingTierWithWrites {
+                    max_tokens: Some(272_000),
+                    cache_write_per_1m: 2.50,
+                    cache_read_per_1m: 0.20
+                },
+                CachingTierWithWrites {
+                    max_tokens: None,
+                    cache_write_per_1m: 5.0,
+                    cache_read_per_1m: 0.40
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+
+    add_model!(
+        "gpt-6-luna",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 0.10,
+                    output_per_1m: 0.50
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 0.20,
+                    output_per_1m: 0.75
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+            tiers: vec![
+                CachingTierWithWrites {
+                    max_tokens: Some(272_000),
+                    cache_write_per_1m: 0.125,
+                    cache_read_per_1m: 0.01
+                },
+                CachingTierWithWrites {
+                    max_tokens: None,
+                    cache_write_per_1m: 0.25,
+                    cache_read_per_1m: 0.02
                 },
             ],
             bracket_pricing: true,
@@ -1540,6 +1610,57 @@ fn populate_defaults(
             12.50,
             1.0,
             37.50
+        );
+    }
+
+    add_tiered_service_tier_pricing_with_cache_writes!(
+        "gpt-6-sol",
+        ServiceTier::Priority,
+        4.0,
+        5.0,
+        0.40,
+        20.0,
+        8.0,
+        10.0,
+        0.80,
+        30.0
+    );
+    add_tiered_service_tier_pricing_with_cache_writes!(
+        "gpt-6-luna",
+        ServiceTier::Priority,
+        0.20,
+        0.25,
+        0.02,
+        1.0,
+        0.40,
+        0.50,
+        0.04,
+        1.50
+    );
+    for service_tier in [ServiceTier::Flex, ServiceTier::Batch] {
+        add_tiered_service_tier_pricing_with_cache_writes!(
+            "gpt-6-sol",
+            service_tier,
+            1.0,
+            1.25,
+            0.10,
+            5.0,
+            2.0,
+            2.50,
+            0.20,
+            7.50
+        );
+        add_tiered_service_tier_pricing_with_cache_writes!(
+            "gpt-6-luna",
+            service_tier,
+            0.05,
+            0.0625,
+            0.005,
+            0.25,
+            0.10,
+            0.125,
+            0.01,
+            0.375
         );
     }
 
@@ -3557,6 +3678,8 @@ fn populate_defaults(
     add_alias!("gpt-5.5-pro", "gpt-5.5-pro");
     add_alias!("gpt-6", "gpt-6-astra");
     add_alias!("gpt-6-astra", "gpt-6-astra");
+    add_alias!("gpt-6-sol", "gpt-6-sol");
+    add_alias!("gpt-6-luna", "gpt-6-luna");
     add_alias!("gpt-5.6", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol-ultra", "gpt-5.6-sol");
@@ -5092,6 +5215,36 @@ mod tests {
 
             approx_eq(short, expected_short);
             approx_eq(long, expected_long);
+        }
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_use_published_rates_across_contexts_and_service_tiers() {
+        for (model, short_standard, long_standard) in
+            [("gpt-6-sol", 1.47, 2.84), ("gpt-6-luna", 0.0735, 0.142)]
+        {
+            assert!(
+                !get_model_info(model)
+                    .expect("model should exist")
+                    .is_estimated
+            );
+
+            for (tier, multiplier) in [
+                (ServiceTier::Standard, 1.0),
+                (ServiceTier::Priority, 2.0),
+                (ServiceTier::Flex, 0.5),
+                (ServiceTier::Batch, 0.5),
+            ] {
+                let short = calculate_total_cost_for_service_tier_at(
+                    model, tier, 100_000, 100_000, 100_000, 100_000, None,
+                );
+                let long = calculate_total_cost_for_service_tier_at(
+                    model, tier, 200_000, 100_000, 100_000, 100_000, None,
+                );
+
+                approx_eq(short, short_standard * multiplier);
+                approx_eq(long, long_standard * multiplier);
+            }
         }
     }
 
