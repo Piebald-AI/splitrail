@@ -1921,6 +1921,58 @@ fn populate_defaults(
         },
         false
     );
+    // Source: the model catalog shipped inside Claude Code 2.1.280, which
+    // prices `claude-opus-5-5` as `tier_4_20_cache_read_0_20` and defines that
+    // tier as `{input: 4, output: 20, cache_write_5m: 5, cache_write_1h: 8,
+    // cache_read: 0.2}`. Opus 5.5 is not on the Anthropic pricing page yet, so
+    // the section source above does not cover it; move this entry under the
+    // section source once the public page lists it.
+    //
+    // Note the cache-read rate is 1/20th of input rather than Anthropic's usual
+    // 1/10th. That is exactly why the vendor tier carries its own name instead
+    // of reusing a plain `tier_4_20`; do not "correct" it to 0.4 by
+    // pattern-matching the other Claude entries in this file.
+    add_model!(
+        "claude-opus-5-5",
+        PricingStructure::Flat {
+            input_per_1m: 4.0,
+            output_per_1m: 20.0
+        },
+        // Splitrail receives one undifferentiated cache-creation count, so use
+        // Anthropic's default 5-minute write rate here. The one-hour write
+        // ($8/MTok) cannot be selected without TTL information the token
+        // source has already discarded by the time pricing runs.
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 5.0,
+            cache_read_per_1m: 0.2
+        },
+        false
+    );
+    // Source: the same Claude Code 2.1.280 catalog, which carries a separate
+    // rate card per model for Anthropic's `speed: "fast"` request option.
+    // Splitrail models that option as `ServiceTier::Priority` because that is
+    // what the Piebald analyzer resolves a `"fast"` service-tier label to.
+    //
+    // The multiplier over standard is NOT uniform across the family: Opus 5.5
+    // and Opus 5/4.8 are exactly 2x, while Opus 4.6/4.7 are exactly 6x. Every
+    // component of each card scales by that model's single factor, so these are
+    // deliberate vendor rate cards rather than transcription noise. Do not
+    // "normalize" 4.6/4.7 down to 2x on the assumption the family shares one
+    // ratio. These five models are the complete set Claude Code prices for fast
+    // mode; every other model falls back to standard pricing, which is the
+    // correct behavior rather than a gap to fill in.
+    add_service_tier_pricing!(
+        "claude-opus-5-5",
+        ServiceTier::Priority,
+        PricingStructure::Flat {
+            input_per_1m: 8.0,
+            output_per_1m: 40.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 10.0,
+            cache_read_per_1m: 0.4
+        }
+    );
     add_model!(
         "claude-opus-5",
         PricingStructure::Flat {
@@ -1932,6 +1984,19 @@ fn populate_defaults(
             cache_read_per_1m: 0.5
         },
         false
+    );
+    // Fast mode at 2x standard. See the family note above.
+    add_service_tier_pricing!(
+        "claude-opus-5",
+        ServiceTier::Priority,
+        PricingStructure::Flat {
+            input_per_1m: 10.0,
+            output_per_1m: 50.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 12.5,
+            cache_read_per_1m: 1.0
+        }
     );
     add_model!(
         "claude-opus-4-8",
@@ -1945,6 +2010,19 @@ fn populate_defaults(
         },
         false
     );
+    // Fast mode at 2x standard. See the family note above.
+    add_service_tier_pricing!(
+        "claude-opus-4-8",
+        ServiceTier::Priority,
+        PricingStructure::Flat {
+            input_per_1m: 10.0,
+            output_per_1m: 50.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 12.5,
+            cache_read_per_1m: 1.0
+        }
+    );
     add_model!(
         "claude-opus-4-7",
         PricingStructure::Flat {
@@ -1957,6 +2035,19 @@ fn populate_defaults(
         },
         false
     );
+    // Fast mode at 6x standard, not 2x. See the family note above.
+    add_service_tier_pricing!(
+        "claude-opus-4-7",
+        ServiceTier::Priority,
+        PricingStructure::Flat {
+            input_per_1m: 30.0,
+            output_per_1m: 150.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 37.5,
+            cache_read_per_1m: 3.0
+        }
+    );
     add_model!(
         "claude-opus-4-6",
         PricingStructure::Flat {
@@ -1968,6 +2059,19 @@ fn populate_defaults(
             cache_read_per_1m: 0.5
         },
         false
+    );
+    // Fast mode at 6x standard, not 2x. See the family note above.
+    add_service_tier_pricing!(
+        "claude-opus-4-6",
+        ServiceTier::Priority,
+        PricingStructure::Flat {
+            input_per_1m: 30.0,
+            output_per_1m: 150.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 37.5,
+            cache_read_per_1m: 3.0
+        }
     );
     add_model!(
         "claude-opus-4-5",
@@ -3428,6 +3532,25 @@ fn populate_defaults(
     add_alias!("claude-5-sonnet", "claude-sonnet-5");
     add_alias!("claude-5.0-sonnet", "claude-sonnet-5");
     add_alias!("global.anthropic.claude-sonnet-5", "claude-sonnet-5");
+    // Opus 5.5 ships without a date suffix on any provider, matching the
+    // recent Opus 5 / Sonnet 5 / Opus 4.8 convention rather than the dated
+    // `claude-haiku-4-5-20251001` style, so no `-2026...` alias is listed
+    // here. The `anthropic.`-prefixed forms are Bedrock/mantle IDs; Claude
+    // Code builds the Bedrock variants by prepending each of its seven
+    // cross-region prefixes (us, eu, apac, jp, au, us-gov, global) to the bare
+    // `anthropic.` ID, and all seven are enumerated because model lookup is
+    // exact-match on this table with no prefix stripping beyond `/`.
+    add_alias!("claude-opus-5-5", "claude-opus-5-5");
+    add_alias!("claude-opus-5.5", "claude-opus-5-5");
+    add_alias!("claude-5.5-opus", "claude-opus-5-5");
+    add_alias!("anthropic.claude-opus-5-5", "claude-opus-5-5");
+    add_alias!("us.anthropic.claude-opus-5-5", "claude-opus-5-5");
+    add_alias!("eu.anthropic.claude-opus-5-5", "claude-opus-5-5");
+    add_alias!("apac.anthropic.claude-opus-5-5", "claude-opus-5-5");
+    add_alias!("jp.anthropic.claude-opus-5-5", "claude-opus-5-5");
+    add_alias!("au.anthropic.claude-opus-5-5", "claude-opus-5-5");
+    add_alias!("us-gov.anthropic.claude-opus-5-5", "claude-opus-5-5");
+    add_alias!("global.anthropic.claude-opus-5-5", "claude-opus-5-5");
     add_alias!("claude-opus-5", "claude-opus-5");
     add_alias!("claude-opus-5.0", "claude-opus-5");
     add_alias!("claude-5-opus", "claude-opus-5");
@@ -4552,6 +4675,114 @@ mod tests {
         assert!(get_model_info("review-progressive-tiered-writes").is_none());
 
         reset_global_registry();
+    }
+
+    /// Anthropic's `speed: "fast"` rate cards for the Opus family. The table is
+    /// written out per model rather than derived from a multiplier precisely
+    /// because the multiplier is not shared: 5.5 and 5/4.8 are 2x standard,
+    /// 4.6/4.7 are 6x. A refactor that "simplifies" this into one factor would
+    /// silently misprice fast usage on some of these models by 3x.
+    #[test]
+    fn claude_opus_fast_mode_priority_rates_match_published_cards() {
+        // model, input, output, cache write, cache read
+        let cards = [
+            ("claude-opus-5-5", 8.0, 40.0, 10.0, 0.4),
+            ("claude-opus-5", 10.0, 50.0, 12.5, 1.0),
+            ("claude-opus-4-8", 10.0, 50.0, 12.5, 1.0),
+            ("claude-opus-4-7", 30.0, 150.0, 37.5, 3.0),
+            ("claude-opus-4-6", 30.0, 150.0, 37.5, 3.0),
+        ];
+
+        for (model, input, output, cache_write, cache_read) in cards {
+            approx_eq(
+                calculate_input_cost_for_service_tier(model, ServiceTier::Priority, 1_000_000),
+                input,
+            );
+            approx_eq(
+                calculate_output_cost_for_service_tier(model, ServiceTier::Priority, 1_000_000),
+                output,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier(model, ServiceTier::Priority, 1_000_000, 0),
+                cache_write,
+            );
+            approx_eq(
+                calculate_cache_cost_for_service_tier(model, ServiceTier::Priority, 0, 1_000_000),
+                cache_read,
+            );
+        }
+    }
+
+    /// Adding Priority rates must not disturb the default path. Standard
+    /// pricing for the same models has to stay exactly where it was, and an
+    /// Opus model with no fast rate card (4.5) must still fall back to standard
+    /// instead of inheriting a sibling's Priority card.
+    #[test]
+    fn claude_opus_priority_rates_do_not_leak_into_standard_pricing() {
+        for model in [
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+        ] {
+            approx_eq(calculate_input_cost(model, 1_000_000), 5.0);
+            approx_eq(calculate_output_cost(model, 1_000_000), 25.0);
+        }
+        approx_eq(calculate_input_cost("claude-opus-5-5", 1_000_000), 4.0);
+
+        // Opus 4.5 has no fast rate card, so Priority resolves to standard.
+        approx_eq(
+            calculate_input_cost_for_service_tier(
+                "claude-opus-4-5",
+                ServiceTier::Priority,
+                1_000_000,
+            ),
+            5.0,
+        );
+        approx_eq(
+            calculate_output_cost_for_service_tier(
+                "claude-opus-4-5",
+                ServiceTier::Priority,
+                1_000_000,
+            ),
+            25.0,
+        );
+    }
+
+    /// Opus 5.5 is the first Claude entry whose cache-read rate is 1/20th of
+    /// input instead of 1/10th, so the cache assertion is the load-bearing one:
+    /// a regression that re-derives cache read from input would land on $0.40
+    /// and produce $5.40 here instead of $5.20.
+    #[test]
+    fn claude_opus_5_5_aliases_map_to_pricing() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-5.5",
+            "claude-5.5-opus",
+            "anthropic.claude-opus-5-5",
+            "us.anthropic.claude-opus-5-5",
+            "global.anthropic.claude-opus-5-5",
+        ] {
+            let model_info = get_model_info(model).expect("model should exist");
+            assert!(!model_info.is_estimated, "{model} should not be estimated");
+
+            approx_eq(calculate_input_cost(model, 1_000_000), 4.0);
+            approx_eq(calculate_output_cost(model, 1_000_000), 20.0);
+            approx_eq(calculate_cache_cost(model, 1_000_000, 1_000_000), 5.2);
+        }
+    }
+
+    /// Opus 5.5 and Opus 5 differ only by a trailing `-5`, and lookup is exact
+    /// match, so a malformed alias entry would silently collapse one into the
+    /// other and misprice every Opus row by 25%. Pin them as distinct objects.
+    #[test]
+    fn claude_opus_5_5_is_distinct_from_claude_opus_5() {
+        let opus_5 = get_model_info("claude-opus-5").expect("Opus 5 should exist");
+        let opus_5_5 = get_model_info("claude-opus-5-5").expect("Opus 5.5 should exist");
+
+        assert!(!std::sync::Arc::ptr_eq(&opus_5, &opus_5_5));
+        approx_eq(calculate_input_cost("claude-opus-5", 1_000_000), 5.0);
+        approx_eq(calculate_input_cost("claude-opus-5-5", 1_000_000), 4.0);
     }
 
     #[test]
