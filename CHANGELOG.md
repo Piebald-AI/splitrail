@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.0] - 2026-09-22
+- feat(models): add peak/off-peak pricing and cite an official source per model (#258) - @jimyag
+- feat(tui): toggle model shares by cost (#253) - @jimyag
+- feat(models): add Grok 4.6 pricing and sync Gemini/MiniMax/DeepSeek rates (#257) - @jimyag
+- feat(tui): wrap model usage columns (#254) - @jimyag
+- Add Claude Opus 5.5 pricing and Opus fast-mode rates (#260) - @mike1858
+- Bump rustls to 0.23.45 for RUSTSEC-2026-0285 (#262) - @mike1858
+- Add Grok 4.7 pricing and bill 200K-token xAI prompts at long rates (#261) - @mike1858
+- fix(vscode): Display CLI cost cents as dollars (#256) - @mike1858
+
 ## [3.9.1] - 2026-09-05
 - Support old and new Piebald database schemas (#251) - @mike1858
 
