@@ -2764,13 +2764,12 @@ fn draw_aggregate_stats_table(
         .max(terminal_text_width(&width_all_models_text))
         .clamp(MODELS_COL_MIN_WIDTH, MODELS_COL_MAX_WIDTH);
 
-    let mut fixed_width = 1usize + period_width as usize + 10;
-    let mut column_count = 3usize;
+    let mut fixed_width = 1usize + period_width as usize + 10 + TOKEN_COL_WIDTH as usize;
+    let mut column_count = 4usize;
     for (column, width) in [
         ("cached", TOKEN_COL_WIDTH),
         ("input", TOKEN_COL_WIDTH),
         ("output", TOKEN_COL_WIDTH),
-        ("total", TOKEN_COL_WIDTH),
         ("reason", TOKEN_COL_WIDTH),
         ("convs", COUNT_COL_WIDTH),
         ("tools", COUNT_COL_WIDTH),
