@@ -2666,6 +2666,43 @@ fn populate_defaults(
         }),
         false
     );
+    // Grok 4.7 repeats Grok 4.6's schedule exactly: $2/$6 with $0.50 cached
+    // input below the 200K prompt boundary, doubling to $4/$12 with $1.00
+    // cached above it. xAI held the price flat across the capability bump
+    // rather than raising it, so the duplicated literals below are the real
+    // published rates and not a copy-paste that needs deduplicating.
+    add_model!(
+        "grok-4.7",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(200_000),
+                    input_per_1m: 2.00,
+                    output_per_1m: 6.00,
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 4.00,
+                    output_per_1m: 12.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![
+                CachingTier {
+                    max_tokens: Some(200_000),
+                    cached_input_per_1m: 0.50,
+                },
+                CachingTier {
+                    max_tokens: None,
+                    cached_input_per_1m: 1.00,
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
     add_model!(
         "grok-build-0.1",
         PricingStructure::Tiered(TieredPricing {
@@ -5431,6 +5468,11 @@ mod tests {
                 .expect("Grok 4.6 should exist")
                 .is_estimated
         );
+        assert!(
+            !get_model_info("grok-4.7")
+                .expect("Grok 4.7 should exist")
+                .is_estimated
+        );
         for model in [
             "grok-4.3",
             "grok-4.20-0309-reasoning",
@@ -5474,6 +5516,23 @@ mod tests {
             ),
             17.0,
         );
+        // Grok 4.7 must price identically to 4.6 on both sides of the 200K
+        // boundary. Asserting the same literals rather than comparing the two
+        // models keeps the test honest if xAI ever diverges them: a future
+        // 4.7-only price change fails here instead of silently agreeing with
+        // whatever 4.6 happens to be.
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.7", 1_000_000, 1_000_000, 0, 1_000_000, 199_999, None,
+            ),
+            8.5,
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.7", 1_000_000, 1_000_000, 0, 1_000_000, 200_001, None,
+            ),
+            17.0,
+        );
         approx_eq(
             calculate_total_cost_for_context_at(
                 "grok-code-fast-1",
@@ -5500,6 +5559,14 @@ mod tests {
             ),
             calculate_total_cost_for_context_at(
                 "grok-4.6", 1_000_000, 1_000_000, 0, 1_000_000, 2_000_000, None,
+            ),
+        );
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "grok-4.7", 1_000_000, 1_000_000, 999_999, 1_000_000, 2_000_000, None,
+            ),
+            calculate_total_cost_for_context_at(
+                "grok-4.7", 1_000_000, 1_000_000, 0, 1_000_000, 2_000_000, None,
             ),
         );
     }
