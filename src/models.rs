@@ -2474,12 +2474,21 @@ fn populate_defaults(
 
     // xAI Models
     // Source: https://docs.x.ai/developers/pricing
+    //
+    // Every xAI tier boundary below is written as `Some(199_999)`, not
+    // `Some(200_000)`. xAI labels each long-context tier "≥ 200k tokens" and
+    // says the long rates apply once a prompt *reaches* the threshold, so a
+    // prompt of exactly 200,000 tokens must bill long. `find_tier` treats a
+    // limit as inclusive (`tokens <= limit` selects that tier), so the short
+    // tier has to stop one token earlier. Other vendors in this file publish
+    // "> 200K" boundaries and correctly keep `Some(200_000)`; do not unify the
+    // two spellings without re-reading each vendor's wording.
     add_model!(
         "grok-4.3",
         PricingStructure::Tiered(TieredPricing {
             tiers: vec![
                 PricingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     input_per_1m: 1.25,
                     output_per_1m: 2.50,
                 },
@@ -2494,7 +2503,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     cached_input_per_1m: 0.20,
                 },
                 CachingTier {
@@ -2511,7 +2520,7 @@ fn populate_defaults(
         PricingStructure::Tiered(TieredPricing {
             tiers: vec![
                 PricingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     input_per_1m: 1.25,
                     output_per_1m: 2.50,
                 },
@@ -2526,7 +2535,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     cached_input_per_1m: 0.20,
                 },
                 CachingTier {
@@ -2543,7 +2552,7 @@ fn populate_defaults(
         PricingStructure::Tiered(TieredPricing {
             tiers: vec![
                 PricingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     input_per_1m: 1.25,
                     output_per_1m: 2.50,
                 },
@@ -2558,7 +2567,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     cached_input_per_1m: 0.20,
                 },
                 CachingTier {
@@ -2575,7 +2584,7 @@ fn populate_defaults(
         PricingStructure::Tiered(TieredPricing {
             tiers: vec![
                 PricingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     input_per_1m: 1.25,
                     output_per_1m: 2.50,
                 },
@@ -2590,7 +2599,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     cached_input_per_1m: 0.20,
                 },
                 CachingTier {
@@ -2607,7 +2616,7 @@ fn populate_defaults(
         PricingStructure::Tiered(TieredPricing {
             tiers: vec![
                 PricingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     input_per_1m: 2.00,
                     output_per_1m: 6.00,
                 },
@@ -2622,7 +2631,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     cached_input_per_1m: 0.30,
                 },
                 CachingTier {
@@ -2639,7 +2648,7 @@ fn populate_defaults(
         PricingStructure::Tiered(TieredPricing {
             tiers: vec![
                 PricingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     input_per_1m: 2.00,
                     output_per_1m: 6.00,
                 },
@@ -2654,7 +2663,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     cached_input_per_1m: 0.50,
                 },
                 CachingTier {
@@ -2676,7 +2685,7 @@ fn populate_defaults(
         PricingStructure::Tiered(TieredPricing {
             tiers: vec![
                 PricingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     input_per_1m: 2.00,
                     output_per_1m: 6.00,
                 },
@@ -2691,7 +2700,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     cached_input_per_1m: 0.50,
                 },
                 CachingTier {
@@ -2708,7 +2717,7 @@ fn populate_defaults(
         PricingStructure::Tiered(TieredPricing {
             tiers: vec![
                 PricingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     input_per_1m: 1.00,
                     output_per_1m: 2.00,
                 },
@@ -2723,7 +2732,7 @@ fn populate_defaults(
         CachingSupport::Tiered(TieredCaching {
             tiers: vec![
                 CachingTier {
-                    max_tokens: Some(200_000),
+                    max_tokens: Some(199_999),
                     cached_input_per_1m: 0.20,
                 },
                 CachingTier {
@@ -5533,6 +5542,30 @@ mod tests {
             ),
             17.0,
         );
+        // Exactly 200,000 context tokens is the case the section comment is
+        // about: xAI's "≥ 200k" wording puts it in the long tier. The 199,999
+        // and 200,001 probes above both pass whether the boundary is inclusive
+        // or exclusive, so only this probe can tell the two apart. It runs for
+        // every tiered xAI model because they all share the one boundary rule,
+        // and a single model reverted to `Some(200_000)` would halve its
+        // exact-boundary bill without any other assertion noticing.
+        for (model, long_total) in [
+            ("grok-4.3", 7.9),
+            ("grok-4.20-0309-reasoning", 7.9),
+            ("grok-4.20-0309-non-reasoning", 7.9),
+            ("grok-4.20-multi-agent-0309", 7.9),
+            ("grok-4.5", 16.6),
+            ("grok-4.6", 17.0),
+            ("grok-4.7", 17.0),
+            ("grok-build-0.1", 6.4),
+        ] {
+            approx_eq(
+                calculate_total_cost_for_context_at(
+                    model, 1_000_000, 1_000_000, 0, 1_000_000, 200_000, None,
+                ),
+                long_total,
+            );
+        }
         approx_eq(
             calculate_total_cost_for_context_at(
                 "grok-code-fast-1",
