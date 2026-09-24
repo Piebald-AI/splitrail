@@ -1018,7 +1018,7 @@ pub(crate) fn build_display_stats(
     display_stats
 }
 
-/// Column width for all token count columns (Cached, Input, Output, Reasoning).
+/// Column width for all token count columns (Cached, Input, Output, Total, Reasoning).
 ///
 /// Width of 12 accommodates:
 /// - All u32 per-day values without commas (max 10 digits: "4294967295")
@@ -2660,6 +2660,8 @@ fn draw_aggregate_stats_table(
     let mut best_input_tokens_period = None;
     let mut best_output_tokens: u64 = 0;
     let mut best_output_tokens_period = None;
+    let mut best_total_tokens: u64 = 0;
+    let mut best_total_tokens_period = None;
     let mut best_reasoning_tokens: u64 = 0;
     let mut best_reasoning_tokens_period = None;
     let mut best_conversations = 0;
@@ -2688,6 +2690,13 @@ fn draw_aggregate_stats_table(
         {
             best_output_tokens = period_stats.stats.output_tokens;
             best_output_tokens_period = Some(period.as_str());
+        }
+        let total_tokens = period_stats.stats.cached_tokens
+            + period_stats.stats.input_tokens
+            + period_stats.stats.output_tokens;
+        if best_total_tokens_period.is_none() || total_tokens > best_total_tokens {
+            best_total_tokens = total_tokens;
+            best_total_tokens_period = Some(period.as_str());
         }
         if best_reasoning_tokens_period.is_none()
             || period_stats.stats.reasoning_tokens > best_reasoning_tokens
@@ -2755,8 +2764,8 @@ fn draw_aggregate_stats_table(
         .max(terminal_text_width(&width_all_models_text))
         .clamp(MODELS_COL_MIN_WIDTH, MODELS_COL_MAX_WIDTH);
 
-    let mut fixed_width = 1usize + period_width as usize + 10;
-    let mut column_count = 3usize;
+    let mut fixed_width = 1usize + period_width as usize + 10 + TOKEN_COL_WIDTH as usize;
+    let mut column_count = 4usize;
     for (column, width) in [
         ("cached", TOKEN_COL_WIDTH),
         ("input", TOKEN_COL_WIDTH),
@@ -2930,6 +2939,28 @@ fn draw_aggregate_stats_table(
         }
         .right_aligned();
 
+        let total_tokens = period_stats.stats.cached_tokens
+            + period_stats.stats.input_tokens
+            + period_stats.stats.output_tokens;
+        let total_cell = if is_empty_row {
+            Line::from(Span::styled(
+                format_number_fit(total_tokens, format_options, tw),
+                Style::default().add_modifier(Modifier::DIM),
+            ))
+        } else if best_total_tokens_period == Some(period.as_str()) {
+            Line::from(Span::styled(
+                format_number_fit(total_tokens, format_options, tw),
+                Style::default().fg(Color::Red),
+            ))
+        } else {
+            Line::from(Span::raw(format_number_fit(
+                total_tokens,
+                format_options,
+                tw,
+            )))
+        }
+        .right_aligned();
+
         let reasoning_cell = if is_empty_row {
             Line::from(Span::styled(
                 format_number_fit(period_stats.stats.reasoning_tokens, format_options, tw),
@@ -3021,6 +3052,7 @@ fn draw_aggregate_stats_table(
         if show("output") {
             row_cells.push(Cell::new(output_cell));
         }
+        row_cells.push(Cell::new(total_cell));
         if show("reason") {
             row_cells.push(Cell::new(reasoning_cell));
         }
@@ -3062,6 +3094,7 @@ fn draw_aggregate_stats_table(
     if show("output") {
         header_cells.push(Cell::new(Text::from("Outp Tks").right_aligned()));
     }
+    header_cells.push(Cell::new(Text::from("Total Tks").right_aligned()));
     if show("reason") {
         header_cells.push(Cell::new(Text::from("Reason Tks").right_aligned()));
     }
@@ -3112,6 +3145,7 @@ fn draw_aggregate_stats_table(
     if show("output") {
         sep_cells.push(dim(token_sep.clone()));
     }
+    sep_cells.push(dim(token_sep.clone()));
     if show("reason") {
         sep_cells.push(dim(token_sep.clone()));
     }
@@ -3196,6 +3230,17 @@ fn draw_aggregate_stats_table(
             .right_aligned(),
         ));
     }
+    totals_cells.push(Cell::new(
+        Line::from(Span::styled(
+            format_number_fit(
+                total_cached + total_input + total_output,
+                format_options,
+                tw,
+            ),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .right_aligned(),
+    ));
     if show("reason") {
         totals_cells.push(Cell::new(
             Line::from(Span::styled(
@@ -3262,6 +3307,7 @@ fn draw_aggregate_stats_table(
     if show("output") {
         widths.push(Constraint::Length(TOKEN_COL_WIDTH));
     }
+    widths.push(Constraint::Length(TOKEN_COL_WIDTH));
     if show("reason") {
         widths.push(Constraint::Length(TOKEN_COL_WIDTH));
     }
