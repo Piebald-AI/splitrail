@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.1] - 2026-09-23
+- feat(models): add GPT-6 Sol and Luna API pricing (#264) - @jimyag
+
 ## [3.10.0] - 2026-09-22
 - feat(models): add peak/off-peak pricing and cite an official source per model (#258) - @jimyag
 - feat(tui): toggle model shares by cost (#253) - @jimyag
