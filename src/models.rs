@@ -2042,6 +2042,40 @@ fn populate_defaults(
         },
         false
     );
+    // Source: the model catalog shipped inside Claude Code 2.1.284, which
+    // prices `claude-sonnet-5-5` as `tier_2_10` and defines that tier as
+    // `{input: 2, output: 10, cache_write_5m: 2.5, cache_write_1h: 4,
+    // cache_read: 0.2}` -- the same named tier, and therefore the same rates,
+    // Claude Code assigns to Sonnet 5. Sonnet 5.5 is not on the Anthropic
+    // pricing page yet, so the section source above does not cover it; move
+    // this entry under the section source once the public page lists it.
+    //
+    // It is deliberately a separate model rather than an alias of Sonnet 5:
+    // the two share a rate card today, but they are distinct vendor models
+    // whose prices can diverge independently (Sonnet 5 has already had a
+    // scheduled price change cancelled), and usage reports should keep them
+    // apart.
+    //
+    // No fast-mode (`ServiceTier::Priority`) card is added. Claude Code's
+    // `speed: "fast"` price switch only names Opus 5.5, Opus 5/4.8, and Opus
+    // 4.6/4.7, and the Sonnet 5.5 catalog entry lacks the `fast_mode`
+    // capability, so Priority correctly falls back to these standard rates.
+    add_model!(
+        "claude-sonnet-5-5",
+        PricingStructure::Flat {
+            input_per_1m: 2.0,
+            output_per_1m: 10.0
+        },
+        // Splitrail receives one undifferentiated cache-creation count, so use
+        // Anthropic's default 5-minute write rate here. The one-hour write
+        // ($4/MTok) cannot be selected without TTL information the token
+        // source has already discarded by the time pricing runs.
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 2.5,
+            cache_read_per_1m: 0.2
+        },
+        false
+    );
     // Source: the model catalog shipped inside Claude Code 2.1.280, which
     // prices `claude-opus-5-5` as `tier_4_20_cache_read_0_20` and defines that
     // tier as `{input: 4, output: 20, cache_write_5m: 5, cache_write_1h: 8,
@@ -3701,6 +3735,21 @@ fn populate_defaults(
     add_alias!("claude-5-sonnet", "claude-sonnet-5");
     add_alias!("claude-5.0-sonnet", "claude-sonnet-5");
     add_alias!("global.anthropic.claude-sonnet-5", "claude-sonnet-5");
+    // Sonnet 5.5 follows the same undated ID convention and Bedrock
+    // cross-region prefix set as Opus 5.5; see the Opus 5.5 note below. Claude
+    // Code 2.1.284 lists `us.anthropic.claude-sonnet-5-5` as its default
+    // Bedrock ID and `anthropic.claude-sonnet-5-5` as the mantle ID.
+    add_alias!("claude-sonnet-5-5", "claude-sonnet-5-5");
+    add_alias!("claude-sonnet-5.5", "claude-sonnet-5-5");
+    add_alias!("claude-5.5-sonnet", "claude-sonnet-5-5");
+    add_alias!("anthropic.claude-sonnet-5-5", "claude-sonnet-5-5");
+    add_alias!("us.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5");
+    add_alias!("eu.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5");
+    add_alias!("apac.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5");
+    add_alias!("jp.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5");
+    add_alias!("au.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5");
+    add_alias!("us-gov.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5");
+    add_alias!("global.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5");
     // Opus 5.5 ships without a date suffix on any provider, matching the
     // recent Opus 5 / Sonnet 5 / Opus 4.8 convention rather than the dated
     // `claude-haiku-4-5-20251001` style, so no `-2026...` alias is listed
@@ -4952,6 +5001,59 @@ mod tests {
         assert!(!std::sync::Arc::ptr_eq(&opus_5, &opus_5_5));
         approx_eq(calculate_input_cost("claude-opus-5", 1_000_000), 5.0);
         approx_eq(calculate_input_cost("claude-opus-5-5", 1_000_000), 4.0);
+    }
+
+    /// Sonnet 5.5 uses Claude Code's `tier_2_10` card, including the $0.20
+    /// cache read. The Bedrock regional and mantle forms are covered because
+    /// lookup is exact-match, so each one is a separate alias row that could
+    /// silently fall through to "unknown model".
+    #[test]
+    fn claude_sonnet_5_5_aliases_map_to_pricing() {
+        for model in [
+            "claude-sonnet-5-5",
+            "claude-sonnet-5.5",
+            "claude-5.5-sonnet",
+            "anthropic.claude-sonnet-5-5",
+            "us.anthropic.claude-sonnet-5-5",
+            "us-gov.anthropic.claude-sonnet-5-5",
+            "global.anthropic.claude-sonnet-5-5",
+            "anthropic/claude-sonnet-5-5",
+        ] {
+            let model_info = get_model_info(model).expect("model should exist");
+            assert!(!model_info.is_estimated, "{model} should not be estimated");
+
+            approx_eq(calculate_input_cost(model, 1_000_000), 2.0);
+            approx_eq(calculate_output_cost(model, 1_000_000), 10.0);
+            approx_eq(calculate_cache_cost(model, 1_000_000, 1_000_000), 2.7);
+        }
+    }
+
+    /// Sonnet 5.5 and Sonnet 5 share a rate card today, which is exactly the
+    /// situation where a mis-keyed alias would go unnoticed by price checks.
+    /// Pin them as distinct registry objects, and pin that Sonnet 5.5 has no
+    /// fast-mode card of its own: Priority must resolve to standard rates.
+    #[test]
+    fn claude_sonnet_5_5_is_distinct_and_has_no_fast_card() {
+        let sonnet_5 = get_model_info("claude-sonnet-5").expect("Sonnet 5 should exist");
+        let sonnet_5_5 = get_model_info("claude-sonnet-5-5").expect("Sonnet 5.5 should exist");
+        assert!(!std::sync::Arc::ptr_eq(&sonnet_5, &sonnet_5_5));
+
+        approx_eq(
+            calculate_input_cost_for_service_tier(
+                "claude-sonnet-5-5",
+                ServiceTier::Priority,
+                1_000_000,
+            ),
+            2.0,
+        );
+        approx_eq(
+            calculate_output_cost_for_service_tier(
+                "claude-sonnet-5-5",
+                ServiceTier::Priority,
+                1_000_000,
+            ),
+            10.0,
+        );
     }
 
     #[test]
