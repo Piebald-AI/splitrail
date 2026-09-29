@@ -1304,6 +1304,46 @@ fn populate_defaults(
         false
     );
 
+    // GPT-6.1 Sol keeps GPT-6 Sol's input, cache-write, and output rates (and
+    // the same whole-request 272K bracket), but OpenAI prices its cached input
+    // at 5% of uncached input instead of GPT-6 Sol's 10%. The cache-read column
+    // is therefore the only standard-rate difference between the two Sols.
+    // Source: https://developers.openai.com/api/docs/models/gpt-6.1-sol
+    add_model!(
+        "gpt-6.1-sol",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 2.0,
+                    output_per_1m: 10.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 4.0,
+                    output_per_1m: 15.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+            tiers: vec![
+                CachingTierWithWrites {
+                    max_tokens: Some(272_000),
+                    cache_write_per_1m: 2.50,
+                    cache_read_per_1m: 0.10
+                },
+                CachingTierWithWrites {
+                    max_tokens: None,
+                    cache_write_per_1m: 5.0,
+                    cache_read_per_1m: 0.20
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+
     add_model!(
         "gpt-6-luna",
         PricingStructure::Tiered(TieredPricing {
@@ -1626,6 +1666,18 @@ fn populate_defaults(
         30.0
     );
     add_tiered_service_tier_pricing_with_cache_writes!(
+        "gpt-6.1-sol",
+        ServiceTier::Priority,
+        4.0,
+        5.0,
+        0.20,
+        20.0,
+        8.0,
+        10.0,
+        0.40,
+        30.0
+    );
+    add_tiered_service_tier_pricing_with_cache_writes!(
         "gpt-6-luna",
         ServiceTier::Priority,
         0.20,
@@ -1648,6 +1700,18 @@ fn populate_defaults(
             2.0,
             2.50,
             0.20,
+            7.50
+        );
+        add_tiered_service_tier_pricing_with_cache_writes!(
+            "gpt-6.1-sol",
+            service_tier,
+            1.0,
+            1.25,
+            0.05,
+            5.0,
+            2.0,
+            2.50,
+            0.10,
             7.50
         );
         add_tiered_service_tier_pricing_with_cache_writes!(
@@ -3713,6 +3777,7 @@ fn populate_defaults(
     add_alias!("gpt-6", "gpt-6-astra");
     add_alias!("gpt-6-astra", "gpt-6-astra");
     add_alias!("gpt-6-sol", "gpt-6-sol");
+    add_alias!("gpt-6.1-sol", "gpt-6.1-sol");
     add_alias!("gpt-6-luna", "gpt-6-luna");
     add_alias!("gpt-5.6", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol", "gpt-5.6-sol");
@@ -5322,9 +5387,16 @@ mod tests {
 
     #[test]
     fn gpt_6_sol_and_luna_use_published_rates_across_contexts_and_service_tiers() {
-        for (model, short_standard, long_standard) in
-            [("gpt-6-sol", 1.47, 2.84), ("gpt-6-luna", 0.0735, 0.142)]
-        {
+        // Each fixture bills 100K output, 100K cache writes, and 100K cache
+        // reads. GPT-6.1 Sol's totals sit exactly $0.01/$0.02 below GPT-6
+        // Sol's: that gap is the 100K cache reads at its halved cached-input
+        // rate ($0.10 vs $0.20 short, $0.20 vs $0.40 long), so these rows fail
+        // if 6.1 is ever priced as a plain alias of 6.
+        for (model, short_standard, long_standard) in [
+            ("gpt-6-sol", 1.47, 2.84),
+            ("gpt-6.1-sol", 1.46, 2.82),
+            ("gpt-6-luna", 0.0735, 0.142),
+        ] {
             assert!(
                 !get_model_info(model)
                     .expect("model should exist")
