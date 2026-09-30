@@ -2491,17 +2491,18 @@ fn populate_defaults(
             bracket_pricing: false,
         })
     );
-    // Gemini 4 Argon launched on 2026-09-30 at introductory rates of $2/$10 per
-    // 1M tokens, with cached input at 95% off input ($0.10). Google says the
-    // standard $4/$20 rates (cached $0.20) apply "after the introductory period
-    // expires" but has not published when that is. This entry deliberately
+    // Gemini 4 Argon was announced on 2026-09-30 with introductory rates of
+    // $2/$10 per 1M tokens and cached input at 95% off input ($0.10). Google says
+    // the standard $4/$20 rates (cached $0.20) apply "after the introductory
+    // period expires" but has not published when that is. This entry deliberately
     // breaks the usual rule of keeping durable rates in the base entry and
     // promos in `add_dated_pricing!`: a dated override needs a real exclusive end
     // date, and inventing one would silently misprice usage on whichever side of
-    // the guess turns out wrong. The introductory rate is what every Argon token
-    // is billed at today, so it lives here for now. Once Google announces the end
-    // date, move $4/$20 + $0.20 into this entry and add the introductory rate as
-    // a dated override ending on that date, following `gemini-3.8-flash` above.
+    // the guess turns out wrong. The introductory rate is the only one Google has
+    // tied to Argon's availability, so it lives here for now. Once Google
+    // announces the end date, move $4/$20 + $0.20 into this entry and add the
+    // introductory rate as a dated override ending on that date, following
+    // `gemini-3.8-flash` above.
     //
     // Google has announced no long-context (>200K) tier for Argon, unlike
     // `gemini-3.1-pro-preview`, so the pricing is flat. Its API model ID is also
@@ -6521,8 +6522,9 @@ mod tests {
     /// instant guards against someone adding a dated override with a guessed end
     /// date; when Google publishes the real one, replace this test with a
     /// boundary test like the Gemini 3.8 Flash one above. Every check bills a
-    /// 1M-token request (Argon's full window), which also pins the pricing as
-    /// flat: no >200K long-context rate has been announced.
+    /// 1M-token request, well past the 200K threshold where
+    /// `gemini-3.1-pro-preview` switches to long-context rates, which also pins
+    /// the pricing as flat: no >200K long-context rate has been announced.
     #[test]
     fn gemini_4_argon_bills_introductory_rates_until_end_date_is_announced() {
         for model in ["gemini-4-argon", "google/gemini-4-argon"] {
