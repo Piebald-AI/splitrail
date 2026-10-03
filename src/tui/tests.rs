@@ -279,6 +279,89 @@ fn test_update_window_offsets_and_period_filters_resize() {
 }
 
 #[test]
+fn aggregate_table_shows_total_tokens_for_each_period_and_footer() {
+    let date = "2025-01-01";
+    let view = AnalyzerStatsView {
+        daily_stats: BTreeMap::from([(
+            date.to_string(),
+            DailyStats {
+                date: CompactDate::from_str(date).unwrap(),
+                stats: TuiStats {
+                    cached_tokens: 100,
+                    input_tokens: 200,
+                    output_tokens: 30,
+                    reasoning_tokens: 10,
+                    ..TuiStats::default()
+                },
+                ..DailyStats::default()
+            },
+        )]),
+        session_aggregates: Vec::new(),
+        num_conversations: 0,
+        analyzer_name: Arc::from("Test"),
+    };
+    let format_options = crate::utils::NumberFormatOptions {
+        use_comma: false,
+        use_human: false,
+        locale: "en".to_string(),
+        currency_symbol: "$".to_string(),
+        cost_decimal_places: 2,
+        decimal_places: 2,
+    };
+    let width = 160;
+    let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+    let mut table_state = TableState::default();
+
+    terminal
+        .draw(|frame| {
+            draw_aggregate_stats_table(
+                frame,
+                Rect::new(0, 0, width, 8),
+                &view,
+                &format_options,
+                &mut table_state,
+                AggregateViewMode::Daily,
+                "",
+                false,
+                false,
+                Color::Cyan,
+                &HashSet::new(),
+                false,
+                ModelUsageShareMetric::Tokens,
+            );
+        })
+        .unwrap();
+
+    let rows: Vec<String> = terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect();
+    let header = rows.iter().find(|row| row.contains("Total Tks")).unwrap();
+    let total_column = header.find("Total Tks").unwrap();
+    let period = rows.iter().find(|row| row.contains("1/1/2025")).unwrap();
+    let footer = rows.iter().find(|row| row.contains("Total (1d)")).unwrap();
+    assert!(
+        period
+            .chars()
+            .skip(total_column)
+            .take(9)
+            .collect::<String>()
+            .contains("330")
+    );
+    assert!(
+        footer
+            .chars()
+            .skip(total_column)
+            .take(9)
+            .collect::<String>()
+            .contains("330")
+    );
+}
+
+#[test]
 fn aggregate_table_preserves_leading_digit_in_large_tool_total() {
     let mut daily_stats = BTreeMap::new();
     for day in 1..=20 {
@@ -369,7 +452,7 @@ fn aggregate_table_highlights_best_value_when_sort_is_reversed() {
         cost_decimal_places: 2,
         decimal_places: 2,
     };
-    let width = 120;
+    let width = 150;
     let backend = TestBackend::new(width, 8);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut table_state = TableState::default();
@@ -1155,7 +1238,7 @@ fn aggregate_table_wraps_model_column_on_narrow_terminal() {
         cost_decimal_places: 2,
         decimal_places: 2,
     };
-    let backend = TestBackend::new(115, 12);
+    let backend = TestBackend::new(145, 12);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut table_state = TableState::default();
 
@@ -1163,7 +1246,7 @@ fn aggregate_table_wraps_model_column_on_narrow_terminal() {
         .draw(|frame| {
             draw_aggregate_stats_table(
                 frame,
-                Rect::new(0, 0, 115, 12),
+                Rect::new(0, 0, 145, 12),
                 &view,
                 &format_options,
                 &mut table_state,
