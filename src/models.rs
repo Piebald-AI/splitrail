@@ -2491,6 +2491,39 @@ fn populate_defaults(
             bracket_pricing: false,
         })
     );
+    // Gemini 4 Argon was announced on 2026-09-30 with introductory rates of
+    // $2/$10 per 1M tokens and cached input at 95% off input ($0.10). Google says
+    // the standard $4/$20 rates (cached $0.20) apply "after the introductory
+    // period expires" but has not published when that is. This entry deliberately
+    // breaks the usual rule of keeping durable rates in the base entry and
+    // promos in `add_dated_pricing!`: a dated override needs a real exclusive end
+    // date, and inventing one would silently misprice usage on whichever side of
+    // the guess turns out wrong. The introductory rate is the only one Google has
+    // tied to Argon's availability, so it lives here for now. Once Google
+    // announces the end date, move $4/$20 + $0.20 into this entry and add the
+    // introductory rate as a dated override ending on that date, following
+    // `gemini-3.8-flash` above.
+    //
+    // Google has announced no long-context (>200K) tier for Argon, unlike
+    // `gemini-3.1-pro-preview`, so the pricing is flat. Its API model ID is also
+    // unpublished while access is limited to the Fairwind Program;
+    // `gemini-4-argon` follows the stable-ID convention of `gemini-3.8-flash`.
+    // Source: https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-argon/
+    add_model!(
+        "gemini-4-argon",
+        PricingStructure::Flat {
+            input_per_1m: 2.0,
+            output_per_1m: 10.0
+        },
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![CachingTier {
+                max_tokens: None,
+                cached_input_per_1m: 0.10
+            }],
+            bracket_pricing: false,
+        }),
+        false
+    );
     add_model!(
         "gemini-3.1-pro-preview",
         PricingStructure::Tiered(TieredPricing {
@@ -3889,6 +3922,7 @@ fn populate_defaults(
     add_alias!("gemini-3-flash", "gemini-3-flash-preview");
     add_alias!("gemini-3-flash-a", "gemini-3-flash-preview");
     add_alias!("gemini-3.8-flash", "gemini-3.8-flash");
+    add_alias!("gemini-4-argon", "gemini-4-argon");
     add_alias!("gemini-3.1-pro-preview", "gemini-3.1-pro-preview");
     add_alias!(
         "gemini-3.1-pro-preview-customtools",
@@ -6480,6 +6514,53 @@ mod tests {
                 ),
                 cached,
             );
+        }
+    }
+
+    /// Gemini 4 Argon has no announced end to its introductory rates, so they
+    /// must apply on launch day and on any later date alike. The far-future
+    /// instant guards against someone adding a dated override with a guessed end
+    /// date; when Google publishes the real one, replace this test with a
+    /// boundary test like the Gemini 3.8 Flash one above. Every check bills a
+    /// 1M-token request, well past the 200K threshold where
+    /// `gemini-3.1-pro-preview` switches to long-context rates, which also pins
+    /// the pricing as flat: no >200K long-context rate has been announced.
+    #[test]
+    fn gemini_4_argon_bills_introductory_rates_until_end_date_is_announced() {
+        for model in ["gemini-4-argon", "google/gemini-4-argon"] {
+            let info = get_model_info(model).expect("Gemini 4 Argon should resolve");
+            assert!(!info.is_estimated);
+
+            for instant in [utc(2026, 9, 30, 20, 0), utc(2030, 1, 1, 0, 0)] {
+                approx_eq(
+                    calculate_input_cost_for_service_tier_at(
+                        model,
+                        ServiceTier::Standard,
+                        1_000_000,
+                        Some(instant),
+                    ),
+                    2.0,
+                );
+                approx_eq(
+                    calculate_output_cost_for_service_tier_at(
+                        model,
+                        ServiceTier::Standard,
+                        1_000_000,
+                        Some(instant),
+                    ),
+                    10.0,
+                );
+                approx_eq(
+                    calculate_cache_cost_for_service_tier_at(
+                        model,
+                        ServiceTier::Standard,
+                        0,
+                        1_000_000,
+                        Some(instant),
+                    ),
+                    0.10,
+                );
+            }
         }
     }
 
