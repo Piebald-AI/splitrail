@@ -343,22 +343,18 @@ fn aggregate_table_shows_total_tokens_for_each_period_and_footer() {
     let total_column = header.find("Total Tks").unwrap();
     let period = rows.iter().find(|row| row.contains("1/1/2025")).unwrap();
     let footer = rows.iter().find(|row| row.contains("Total (1d)")).unwrap();
-    assert!(
-        period
-            .chars()
-            .skip(total_column)
-            .take(9)
-            .collect::<String>()
-            .contains("330")
-    );
-    assert!(
-        footer
-            .chars()
-            .skip(total_column)
-            .take(9)
-            .collect::<String>()
-            .contains("330")
-    );
+    let period_total = period
+        .chars()
+        .skip(total_column)
+        .take(9)
+        .collect::<String>();
+    let footer_total = footer
+        .chars()
+        .skip(total_column)
+        .take(9)
+        .collect::<String>();
+    assert_eq!(period_total.trim(), "330");
+    assert_eq!(footer_total.trim(), "330");
 }
 
 #[test]
