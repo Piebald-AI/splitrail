@@ -639,6 +639,33 @@ fn test_calculate_cost_from_tokens() {
     );
 }
 
+/// Haiku 5.5's long-prompt bracket is chosen from the whole Anthropic prompt
+/// (input + cache writes + cache reads). This request is 111K tokens in total
+/// but only 61K under a `max(write, read)` reconstruction, so it pins that the
+/// analyzer sums the disjoint usage counts the way Claude Code does.
+#[test]
+fn test_calculate_cost_from_tokens_sums_cache_counts_for_haiku_5_5_bracket() {
+    use crate::analyzers::claude_code::Usage;
+
+    let usage = Usage {
+        input_tokens: 1_000,
+        output_tokens: 1_000,
+        cache_creation_input_tokens: 50_000,
+        cache_read_input_tokens: 60_000,
+    };
+
+    let cost = calculate_cost_from_tokens(&usage, "claude-haiku-5-5");
+
+    // Long-prompt card: $0.50 input, $2.50 output, $0.625 write, $0.05 read.
+    let expected_cost =
+        (1_000.0 * 0.50 + 1_000.0 * 2.50 + 50_000.0 * 0.625 + 60_000.0 * 0.05) / 1_000_000.0;
+
+    assert!(
+        (cost - expected_cost).abs() < 1e-12,
+        "Expected cost {expected_cost}, got {cost}"
+    );
+}
+
 #[test]
 fn test_parse_jsonl_file_uses_sonnet_5_permanent_pricing() {
     let jsonl_data = r#"{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/code/test","sessionId":"sonnet-5","version":"2.0.0","message":{"id":"msg_before","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"before"}],"usage":{"input_tokens":1000000,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":1000000,"output_tokens":1000000}},"requestId":"req_before","type":"assistant","uuid":"before-uuid","timestamp":"2026-08-31T23:59:59Z"}

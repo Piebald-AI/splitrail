@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::calculate_total_cost_for_service_tier_at;
+use crate::models::calculate_total_cost_for_context_at;
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{fast_hash, hash_text};
 use walkdir::WalkDir;
@@ -635,15 +635,31 @@ pub fn extract_tool_stats(
 
 #[cfg(test)]
 pub fn calculate_cost_from_tokens(usage: &Usage, model_name: &str) -> f64 {
-    calculate_total_cost_for_service_tier_at(
+    calculate_total_cost_for_context_at(
         model_name,
-        crate::models::ServiceTier::Standard,
         usage.input_tokens,
         usage.output_tokens,
         usage.cache_creation_input_tokens,
         usage.cache_read_input_tokens,
+        anthropic_prompt_tokens(usage),
         None,
     )
+}
+
+/// Total prompt size of one Anthropic Messages API request.
+///
+/// Anthropic reports `input_tokens`, `cache_creation_input_tokens`, and
+/// `cache_read_input_tokens` as disjoint slices of the prompt, so their sum is
+/// the whole prompt. Claude Code selects long-prompt rate cards (Haiku 5.5's
+/// above-100K bracket) from exactly this sum. The shared calculator's default
+/// reconstruction, `input + max(write, read)`, exists for sources whose read
+/// and write counts can overlap; using it here would undercount a request such
+/// as 1K input + 60K read + 50K write and price it at the short-prompt rate.
+fn anthropic_prompt_tokens(usage: &Usage) -> u64 {
+    usage
+        .input_tokens
+        .saturating_add(usage.cache_creation_input_tokens)
+        .saturating_add(usage.cache_read_input_tokens)
 }
 
 pub fn calculate_cost_from_tokens_at(
@@ -651,13 +667,16 @@ pub fn calculate_cost_from_tokens_at(
     model_name: &str,
     effective_at: DateTime<Utc>,
 ) -> f64 {
-    calculate_total_cost_for_service_tier_at(
+    // Claude Code transcripts carry no service tier, so standard pricing is
+    // the only applicable rate card; the context-aware entry point is the
+    // standard-tier calculator that accepts an explicit prompt size.
+    calculate_total_cost_for_context_at(
         model_name,
-        crate::models::ServiceTier::Standard,
         usage.input_tokens,
         usage.output_tokens,
         usage.cache_creation_input_tokens,
         usage.cache_read_input_tokens,
+        anthropic_prompt_tokens(usage),
         Some(effective_at),
     )
 }
