@@ -2415,9 +2415,10 @@ fn populate_defaults(
     // note does not describe it. Claude Code picks the bracket once per request:
     // when `input + cache_read + cache_creation` exceeds 100K, every token
     // category in that request (output included) is billed at the 5x rate.
-    // That is exactly the whole-request `bracket_pricing` model used for
-    // GPT-6, with the 100K boundary inclusive on the cheap side (`<=` here
-    // matches Claude Code's strict `>` for the long side).
+    // That is the same whole-request tier selection used for GPT-6 (one
+    // `find_tier` on the prompt size drives every category), with the 100K
+    // boundary inclusive on the cheap side (`<=` here matches Claude Code's
+    // strict `>` for the long side).
     //
     // As with the other Claude entries, cache writes use the 5-minute rate
     // because the token sources merge 5-minute and 1-hour writes into one
@@ -5235,6 +5236,11 @@ mod tests {
             "claude-5.5-haiku",
             "anthropic.claude-haiku-5-5",
             "us.anthropic.claude-haiku-5-5",
+            "eu.anthropic.claude-haiku-5-5",
+            "apac.anthropic.claude-haiku-5-5",
+            "jp.anthropic.claude-haiku-5-5",
+            "au.anthropic.claude-haiku-5-5",
+            "us-gov.anthropic.claude-haiku-5-5",
             "global.anthropic.claude-haiku-5-5",
         ] {
             let model_info = get_model_info(model).expect("model should exist");

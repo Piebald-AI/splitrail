@@ -666,6 +666,39 @@ fn test_calculate_cost_from_tokens_sums_cache_counts_for_haiku_5_5_bracket() {
     );
 }
 
+/// The summed prompt size and the inclusive 100K boundary must work together:
+/// a prompt of exactly 100,000 tokens split across all three usage counts stays
+/// on the short card, and one more cache-read token moves the whole request to
+/// the long card. A `max(write, read)` reconstruction would see only ~50K here.
+#[test]
+fn test_calculate_cost_from_tokens_haiku_5_5_boundary_uses_summed_prompt() {
+    use crate::analyzers::claude_code::Usage;
+
+    let usage_at = |cache_read_input_tokens| Usage {
+        input_tokens: 1,
+        output_tokens: 1_000,
+        cache_creation_input_tokens: 50_000,
+        cache_read_input_tokens,
+    };
+
+    let short = calculate_cost_from_tokens(&usage_at(49_999), "claude-haiku-5-5");
+    let long = calculate_cost_from_tokens(&usage_at(50_000), "claude-haiku-5-5");
+
+    let short_expected =
+        (1.0 * 0.10 + 1_000.0 * 0.50 + 50_000.0 * 0.125 + 49_999.0 * 0.01) / 1_000_000.0;
+    let long_expected =
+        (1.0 * 0.50 + 1_000.0 * 2.50 + 50_000.0 * 0.625 + 50_000.0 * 0.05) / 1_000_000.0;
+
+    assert!(
+        (short - short_expected).abs() < 1e-12,
+        "Expected short-card cost {short_expected}, got {short}"
+    );
+    assert!(
+        (long - long_expected).abs() < 1e-12,
+        "Expected long-card cost {long_expected}, got {long}"
+    );
+}
+
 #[test]
 fn test_parse_jsonl_file_uses_sonnet_5_permanent_pricing() {
     let jsonl_data = r#"{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/code/test","sessionId":"sonnet-5","version":"2.0.0","message":{"id":"msg_before","type":"message","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"before"}],"usage":{"input_tokens":1000000,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":1000000,"output_tokens":1000000}},"requestId":"req_before","type":"assistant","uuid":"before-uuid","timestamp":"2026-08-31T23:59:59Z"}
