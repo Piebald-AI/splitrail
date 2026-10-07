@@ -2402,6 +2402,62 @@ fn populate_defaults(
         },
         false
     );
+    // Source: the model catalog shipped inside Claude Code 2.1.293, which
+    // prices `claude-haiku-5-5` as `haiku_55`: `{input: 0.1, output: 0.5,
+    // cache_write_5m: 0.125, cache_write_1h: 0.2, cache_read: 0.01,
+    // long_prompt: {above_prompt_tokens: 100000, input: 0.5, output: 2.5,
+    // cache_write_5m: 0.625, cache_write_1h: 1, cache_read: 0.05}}`. Haiku 5.5
+    // is not on the Anthropic pricing page yet, so the section source above
+    // does not cover it; move this entry under it once the page lists it.
+    //
+    // Haiku 5.5 is the first Claude model with a long-prompt bracket, and the
+    // public page's "4.6 and later bill the full 1M context at standard rates"
+    // note does not describe it. Claude Code picks the bracket once per request:
+    // when `input + cache_read + cache_creation` exceeds 100K, every token
+    // category in that request (output included) is billed at the 5x rate.
+    // That is the same whole-request tier selection used for GPT-6 (one
+    // `find_tier` on the prompt size drives every category), with the 100K
+    // boundary inclusive on the cheap side (`<=` here matches Claude Code's
+    // strict `>` for the long side).
+    //
+    // As with the other Claude entries, cache writes use the 5-minute rate
+    // because the token sources merge 5-minute and 1-hour writes into one
+    // count before pricing runs. Claude Code has no fast-mode card for Haiku
+    // 5.5 (it falls back to standard), so no Priority tier is registered.
+    add_model!(
+        "claude-haiku-5-5",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(100_000),
+                    input_per_1m: 0.10,
+                    output_per_1m: 0.50
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 0.50,
+                    output_per_1m: 2.50
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+            tiers: vec![
+                CachingTierWithWrites {
+                    max_tokens: Some(100_000),
+                    cache_write_per_1m: 0.125,
+                    cache_read_per_1m: 0.01
+                },
+                CachingTierWithWrites {
+                    max_tokens: None,
+                    cache_write_per_1m: 0.625,
+                    cache_read_per_1m: 0.05
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
     add_model!(
         "claude-haiku-4-5",
         PricingStructure::Flat {
@@ -3908,6 +3964,19 @@ fn populate_defaults(
     add_alias!("claude-3-5-haiku", "claude-3-5-haiku");
     add_alias!("claude-3-5-haiku-20241022", "claude-3-5-haiku");
     add_alias!("claude-3-5-haiku-latest", "claude-3-5-haiku");
+    // Haiku 5.5 follows the same undated, cross-region ID scheme as Opus 5.5
+    // above; see that block for why every Bedrock prefix is listed explicitly.
+    add_alias!("claude-haiku-5-5", "claude-haiku-5-5");
+    add_alias!("claude-haiku-5.5", "claude-haiku-5-5");
+    add_alias!("claude-5.5-haiku", "claude-haiku-5-5");
+    add_alias!("anthropic.claude-haiku-5-5", "claude-haiku-5-5");
+    add_alias!("us.anthropic.claude-haiku-5-5", "claude-haiku-5-5");
+    add_alias!("eu.anthropic.claude-haiku-5-5", "claude-haiku-5-5");
+    add_alias!("apac.anthropic.claude-haiku-5-5", "claude-haiku-5-5");
+    add_alias!("jp.anthropic.claude-haiku-5-5", "claude-haiku-5-5");
+    add_alias!("au.anthropic.claude-haiku-5-5", "claude-haiku-5-5");
+    add_alias!("us-gov.anthropic.claude-haiku-5-5", "claude-haiku-5-5");
+    add_alias!("global.anthropic.claude-haiku-5-5", "claude-haiku-5-5");
     add_alias!("claude-haiku-4-5", "claude-haiku-4-5");
     add_alias!("claude-haiku-4.5", "claude-haiku-4-5");
     add_alias!("claude-haiku-4-5-20251001", "claude-haiku-4-5");
@@ -5152,6 +5221,88 @@ mod tests {
                 1_000_000,
             ),
             10.0,
+        );
+    }
+
+    /// Haiku 5.5 must resolve from every ID Claude Code can emit, and must stay
+    /// distinct from Haiku 4.5: the two differ by 10x, so a collapsed alias
+    /// would be a large silent mispricing rather than a rounding error.
+    #[test]
+    fn claude_haiku_5_5_aliases_map_to_short_prompt_pricing() {
+        let haiku_4_5 = get_model_info("claude-haiku-4-5").expect("Haiku 4.5 should exist");
+        for model in [
+            "claude-haiku-5-5",
+            "claude-haiku-5.5",
+            "claude-5.5-haiku",
+            "anthropic.claude-haiku-5-5",
+            "us.anthropic.claude-haiku-5-5",
+            "eu.anthropic.claude-haiku-5-5",
+            "apac.anthropic.claude-haiku-5-5",
+            "jp.anthropic.claude-haiku-5-5",
+            "au.anthropic.claude-haiku-5-5",
+            "us-gov.anthropic.claude-haiku-5-5",
+            "global.anthropic.claude-haiku-5-5",
+        ] {
+            let model_info = get_model_info(model).expect("model should exist");
+            assert!(!model_info.is_estimated, "{model} should not be estimated");
+            assert!(!std::sync::Arc::ptr_eq(&model_info, &haiku_4_5));
+
+            // 10K input + 10K output + 10K writes + 10K reads, all short-prompt:
+            // $0.001 + $0.005 + $0.00125 + $0.0001.
+            approx_eq(
+                calculate_total_cost_for_service_tier_at(
+                    model,
+                    ServiceTier::Standard,
+                    10_000,
+                    10_000,
+                    10_000,
+                    10_000,
+                    None,
+                ),
+                0.007_35,
+            );
+        }
+    }
+
+    /// Claude Code switches Haiku 5.5 to its long-prompt card only when the
+    /// prompt *exceeds* 100K, and then reprices every category of the request,
+    /// including output and cache tokens. Pin both sides of the boundary.
+    #[test]
+    fn claude_haiku_5_5_long_prompt_bracket_reprices_the_whole_request() {
+        // (prompt size, expected cost) for 1M output tokens plus a prompt made
+        // of ordinary input only, so the context equals `input`.
+        for (input, expected) in [
+            // 0.1 * 0.1 + 0.5 * 1 = 0.51
+            (100_000, 0.51),
+            // 0.100001 * 0.5 + 2.5 * 1 = 2.5500005
+            (100_001, 2.550_000_5),
+        ] {
+            approx_eq(
+                calculate_total_cost_for_context_at(
+                    "claude-haiku-5-5",
+                    input,
+                    1_000_000,
+                    0,
+                    0,
+                    input,
+                    None,
+                ),
+                expected,
+            );
+        }
+
+        // Long-prompt cache rates: 1M writes at $0.625 plus 1M reads at $0.05.
+        approx_eq(
+            calculate_total_cost_for_context_at(
+                "claude-haiku-5-5",
+                0,
+                0,
+                1_000_000,
+                1_000_000,
+                2_000_000,
+                None,
+            ),
+            0.675,
         );
     }
 
