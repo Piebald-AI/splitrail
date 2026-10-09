@@ -132,6 +132,10 @@ enum TierSource {
     /// used: it records the user-visible source profile, not that hidden clone,
     /// and it would miss every chat-specific tier. Per-turn tier history no longer
     /// exists in the database, so a chat's turns are all priced at its current tier.
+    /// That is deliberate, with two consequences: changing a profile's tier reprices
+    /// earlier turns of every chat on it, including already-uploaded messages
+    /// (same `global_hash`, new cost), and a chat that switched profiles is priced
+    /// entirely at the one it uses now.
     ProfileSettings,
 }
 
@@ -157,6 +161,8 @@ impl PiebaldLayout {
     ///
     /// The tier source keys on the *new* tables existing, not the old ones being
     /// absent, so a database too old to have either keeps its previous behavior.
+    /// Both `profile_settings_openai_*` tables are created by the same migration
+    /// transaction, so checking one implies the other.
     fn detect(conn: &Connection) -> Result<Self> {
         let (typed_parts, profile_settings, has_ksuid_map): (bool, bool, bool) = conn.query_row(
             "SELECT
@@ -263,7 +269,9 @@ fn query_messages(conn: &Connection, layout: PiebaldLayout) -> Result<Vec<Piebal
     );
     let mut stmt = conn.prepare(&sql)?;
 
-    // Strict, as in `query_chats`: a failed conversion is a schema change to surface.
+    // Strict, as in `query_chats`. IDs are TEXT-cast and usage columns are nullable;
+    // `role`, `created_at`, and `updated_at` have been `NOT NULL` since Piebald's
+    // initial schema. A failed conversion is therefore a schema change to surface.
     let messages = stmt
         .query_map([], |row| {
             Ok(PiebaldMessage {
@@ -289,9 +297,10 @@ fn query_messages(conn: &Connection, layout: PiebaldLayout) -> Result<Vec<Piebal
 
 /// Query tool call counts per message.
 ///
-/// Returns counts by the owning message's native ID. Typed tools share one execution-context
-/// row per part; counting that row avoids enumerating subtype tables and includes
-/// MCP, legacy, invalid, and still-streaming calls without double counting results.
+/// Returns counts by the owning message's native ID. Typed tools share one
+/// execution-context row per part; counting that row avoids enumerating subtype
+/// tables and includes MCP, legacy, invalid, and still-streaming calls without
+/// double counting results.
 fn query_tool_call_counts(
     conn: &Connection,
     schema: PiebaldSchema,
@@ -389,15 +398,23 @@ fn convert_messages(
 ) -> Vec<ConversationMessage> {
     // Build chat lookup map for O(1) access, keyed like `parent_chat_id`: by native ID.
     let chat_map: HashMap<&str, &PiebaldChat> = chats.iter().map(|c| (c.id.as_str(), c)).collect();
+    let mut unparseable_timestamps = 0usize;
 
-    messages
+    let converted: Vec<ConversationMessage> = messages
         .into_iter()
         .filter_map(|msg| {
+            // `messages.parent_chat_id` cascades on chat deletion and both queries
+            // share one snapshot, so a miss here is not expected in practice.
             let chat = chat_map.get(msg.parent_chat_id.as_str())?;
 
             // Parse timestamp - use updated_at so that streaming updates are captured
-            // (updated_at changes when tokens are added during streaming)
-            let date = parse_timestamp(&msg.updated_at)?;
+            // (updated_at changes when tokens are added during streaming).
+            // Unparseable rows are skipped but counted, so a future timestamp-format
+            // change produces a warning rather than another silent drop to zero.
+            let Some(date) = parse_timestamp(&msg.updated_at) else {
+                unparseable_timestamps += 1;
+                return None;
+            };
 
             // Use project path from Piebald's projects table, falling back to "ungrouped" if not set.
             let project_hash = hash_text(chat.project_directory.as_deref().unwrap_or("ungrouped"));
@@ -491,7 +508,14 @@ fn convert_messages(
                 session_name: chat.title.clone(),
             })
         })
-        .collect()
+        .collect();
+
+    if unparseable_timestamps > 0 {
+        eprintln!(
+            "WARNING: skipped {unparseable_timestamps} Piebald message(s) with unparseable updated_at timestamps"
+        );
+    }
+    converted
 }
 
 #[async_trait]

@@ -391,3 +391,18 @@ fn folded_generation_configs_take_tier_from_the_chat_profile() {
         hash_text("piebald_2026-05-01T12:00:01Z_2")
     );
 }
+
+#[test]
+fn unreadable_rows_fail_the_source_instead_of_vanishing() {
+    let (_directory, source) = ksuid_fixture();
+    let conn = Connection::open(&source.path).unwrap();
+    // SQLite's flexible typing lets a BIGINT column hold text. The analyzer must
+    // report that as an error; skipping the row would understate usage silently.
+    conn.execute_batch(&format!(
+        "UPDATE message_generations SET output_tokens = 'not a number'
+         WHERE message_id = '{}';",
+        KSUID_MESSAGES[1]
+    ))
+    .unwrap();
+    assert!(PiebaldAnalyzer::new().parse_source(&source).is_err());
+}
