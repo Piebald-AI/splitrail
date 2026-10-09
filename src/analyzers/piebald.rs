@@ -12,7 +12,6 @@ use crate::utils::hash_text;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -48,8 +47,14 @@ fn open_piebald_db(path: &PathBuf) -> Result<Connection> {
 }
 
 /// Represents a chat from Piebald's database.
+///
+/// Piebald's primary keys were integers until its KSUID migration rewrote them
+/// as TEXT. Both are read as strings so one code path serves every layout.
 struct PiebaldChat {
-    id: i64,
+    /// Native primary key, used only to join rows within this database.
+    id: String,
+    /// Identity exposed to Splitrail. See [`PiebaldLayout::stable_id_sql`].
+    stable_id: String,
     title: Option<String>,
     model: Option<String>,
     project_directory: Option<String>,
@@ -57,8 +62,12 @@ struct PiebaldChat {
 
 /// Represents a message from Piebald's database.
 struct PiebaldMessage {
-    id: i64,
-    parent_chat_id: i64,
+    /// Native primary key, used only to join tool counts.
+    id: String,
+    /// Identity exposed to Splitrail. See [`PiebaldLayout::stable_id_sql`].
+    stable_id: String,
+    /// Native key of the owning chat.
+    parent_chat_id: String,
     role: String,
     model: Option<String>,
     input_tokens: Option<i64>,
@@ -72,134 +81,230 @@ struct PiebaldMessage {
 }
 
 /// Query all chats from the database.
-fn query_chats(conn: &Connection) -> Result<Vec<PiebaldChat>> {
-    let mut stmt = conn.prepare(
-        "SELECT c.id, c.title, c.model, p.directory
+fn query_chats(conn: &Connection, layout: PiebaldLayout) -> Result<Vec<PiebaldChat>> {
+    let (stable_id, legacy_join) = layout.stable_id_sql("chats", "c");
+    let sql = format!(
+        "SELECT CAST(c.id AS TEXT), {stable_id}, c.title, c.model, p.directory
          FROM chats c
          LEFT JOIN projects p ON p.id = c.project_id
-         ORDER BY c.created_at",
-    )?;
+         {legacy_join}
+         ORDER BY c.created_at"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
+    // Row errors propagate instead of being filtered out. Every value read here
+    // is either TEXT-cast or nullable, so a conversion failure means the schema
+    // changed under us. Skipping such rows one at a time is how a whole schema
+    // migration once turned all Piebald history into a silent zero.
     let chats = stmt
         .query_map([], |row| {
             Ok(PiebaldChat {
                 id: row.get(0)?,
-                title: row.get(1)?,
-                model: row.get(2)?,
-                project_directory: row.get(3)?,
+                stable_id: row.get(1)?,
+                title: row.get(2)?,
+                model: row.get(3)?,
+                project_directory: row.get(4)?,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<_>>()?;
 
     Ok(chats)
 }
 
-/// Database layout before or after Piebald's typed-message-parts migration.
+/// Where tool calls and per-message usage live: before or after Piebald's
+/// typed-message-parts migration.
 #[derive(Clone, Copy)]
 enum PiebaldSchema {
     Legacy,
     TypedParts,
 }
 
-impl PiebaldSchema {
+/// Where a message's OpenAI service tier can be recovered from.
+#[derive(Clone, Copy)]
+enum TierSource {
+    /// Each message or generation pins a `generation_configs` row, whose
+    /// per-engine override tables record the tier used for that turn.
+    GenerationConfig,
+    /// Piebald's generation-config fold dropped those configs and the per-turn
+    /// `config_id`. Settings now live on profiles. A chat with its own settings
+    /// points at a hidden profile it owns, so the chat's profile carries its
+    /// effective tier. `message_generations.profile_id` is deliberately not
+    /// used: it records the user-visible source profile, not that hidden clone,
+    /// and it would miss every chat-specific tier. Per-turn tier history no longer
+    /// exists in the database, so a chat's turns are all priced at its current tier.
+    ProfileSettings,
+}
+
+/// Every independent schema feature the analyzer must adapt to. Piebald
+/// migrates these in separate steps, so they are detected separately rather
+/// than inferred from one another or from an application version.
+#[derive(Clone, Copy)]
+struct PiebaldLayout {
+    parts: PiebaldSchema,
+    tier_source: TierSource,
+    /// Whether `_ksuid_map` exists. Piebald's KSUID migration rewrites integer
+    /// primary keys as TEXT KSUIDs and retains this old-to-new map afterwards.
+    has_ksuid_map: bool,
+}
+
+impl PiebaldLayout {
     /// Detect finalized storage rather than an application version. Piebald commits
     /// the additive schema before backfilling tools, so the generation table can
     /// coexist with authoritative legacy calls and an empty execution-context table.
     /// Keep legacy reads until finalization drops the old tool table atomically with
     /// the old message columns. This also covers a failed or in-progress backfill.
     /// SQL failures still propagate rather than being mistaken for an older schema.
+    ///
+    /// The tier source keys on the *new* tables existing, not the old ones being
+    /// absent, so a database too old to have either keeps its previous behavior.
     fn detect(conn: &Connection) -> Result<Self> {
-        let typed_parts: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'message_generations')
-             AND NOT EXISTS(SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'message_part_tool_call')",
+        let (typed_parts, profile_settings, has_ksuid_map): (bool, bool, bool) = conn.query_row(
+            "SELECT
+                 EXISTS(SELECT 1 FROM sqlite_master
+                        WHERE type = 'table' AND name = 'message_generations')
+                 AND NOT EXISTS(SELECT 1 FROM sqlite_master
+                        WHERE type = 'table' AND name = 'message_part_tool_call'),
+                 EXISTS(SELECT 1 FROM sqlite_master
+                        WHERE type = 'table' AND name = 'profile_settings_openai_responses'),
+                 EXISTS(SELECT 1 FROM sqlite_master
+                        WHERE type = 'table' AND name = '_ksuid_map')",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        Ok(if typed_parts {
-            Self::TypedParts
-        } else {
-            Self::Legacy
+        Ok(Self {
+            parts: if typed_parts {
+                PiebaldSchema::TypedParts
+            } else {
+                PiebaldSchema::Legacy
+            },
+            tier_source: if profile_settings {
+                TierSource::ProfileSettings
+            } else {
+                TierSource::GenerationConfig
+            },
+            has_ksuid_map,
         })
+    }
+
+    /// Return a SQL expression for the identity Splitrail exposes for `alias`,
+    /// plus the join that expression needs (empty when none is needed).
+    ///
+    /// Rows created before Piebald's KSUID migration keep their old integer ID,
+    /// recovered through `_ksuid_map`. That ID feeds `global_hash`, the key Splitrail
+    /// Cloud deduplicates uploads by. With the KSUID instead, every historical
+    /// message would get a new hash and be uploaded and counted a second time. It
+    /// also keeps local hashes and session grouping continuous across the flip.
+    /// Rows created after the flip have no mapping and use their KSUID. A KSUID
+    /// never collides with an old ID, and `created_at` is hashed alongside anyway.
+    fn stable_id_sql(self, table: &str, alias: &str) -> (String, String) {
+        let native = format!("CAST({alias}.id AS TEXT)");
+        if !self.has_ksuid_map {
+            return (native, String::new());
+        }
+        // `table` and `alias` are fixed literals from this module, never input.
+        let map = format!("{alias}_ksuid");
+        (
+            format!("COALESCE(CAST({map}.old_id AS TEXT), {native})"),
+            format!(
+                "LEFT JOIN _ksuid_map {map}
+                        ON {map}.table_name = '{table}' AND {map}.new_id = {alias}.id"
+            ),
+        )
     }
 }
 
-/// Query messages using the matching generation layout, retaining user messages
-/// without generation rows while excluding non-conversational context containers.
-fn query_messages(conn: &Connection, schema: PiebaldSchema) -> Result<Vec<PiebaldMessage>> {
-    let sql = match schema {
-        PiebaldSchema::TypedParts => {
-            // Generation metadata is one-to-one with assistant messages, not user
-            // messages. Keep the outer join and the original message timestamps so
-            // migration does not change deduplication identities or streaming dates.
-            "SELECT m.id, m.parent_chat_id, m.role, g.model, g.input_tokens, g.output_tokens,
-                    g.reasoning_tokens, g.cache_read_tokens, g.cache_write_tokens,
-                    COALESCE(responses.service_tier, completions.service_tier) AS service_tier,
-                    m.created_at, m.updated_at
-             FROM messages m
-             LEFT JOIN message_generations g ON g.message_id = m.id
-             LEFT JOIN override_gen_cfg_data_openai_responses responses
-                    ON responses.gen_cfg_id = g.config_id
+/// Query messages using the matching layout, retaining user messages without
+/// generation rows while excluding non-conversational context containers.
+fn query_messages(conn: &Connection, layout: PiebaldLayout) -> Result<Vec<PiebaldMessage>> {
+    // Generation metadata is one-to-one with assistant messages, not user
+    // messages. Keep the outer join and the original message timestamps so
+    // migration does not change deduplication identities or streaming dates.
+    let (usage, usage_join, kind_filter) = match layout.parts {
+        PiebaldSchema::TypedParts => (
+            "g",
+            "LEFT JOIN message_generations g ON g.message_id = m.id",
+            "AND m.message_kind = 'normal'",
+        ),
+        PiebaldSchema::Legacy => ("m", "", ""),
+    };
+    // Responses settings take precedence over Completions, as they always have.
+    let tier_joins = match layout.tier_source {
+        TierSource::GenerationConfig => format!(
+            "LEFT JOIN override_gen_cfg_data_openai_responses responses
+                    ON responses.gen_cfg_id = {usage}.config_id
              LEFT JOIN override_gen_cfg_data_openai_completions completions
-                    ON completions.gen_cfg_id = g.config_id
-             WHERE m.message_kind = 'normal'
-             ORDER BY m.updated_at"
+                    ON completions.gen_cfg_id = {usage}.config_id"
+        ),
+        TierSource::ProfileSettings => {
+            "LEFT JOIN chats tier_chat ON tier_chat.id = m.parent_chat_id
+             LEFT JOIN profile_settings_openai_responses responses
+                    ON responses.profile_id = tier_chat.profile_id
+             LEFT JOIN profile_settings_openai_completions completions
+                    ON completions.profile_id = tier_chat.profile_id"
+                .to_string()
         }
-        PiebaldSchema::Legacy => {
-            "SELECT m.id, m.parent_chat_id, m.role, m.model, m.input_tokens, m.output_tokens,
-                m.reasoning_tokens, m.cache_read_tokens, m.cache_write_tokens,
+    };
+    let (stable_id, legacy_join) = layout.stable_id_sql("messages", "m");
+    // Unparented messages are chat or Launchpad drafts, not conversation turns.
+    // They could never join a chat below, and excluding them here keeps their
+    // NULL parent from failing the now-strict row conversion.
+    let sql = format!(
+        "SELECT CAST(m.id AS TEXT), {stable_id}, CAST(m.parent_chat_id AS TEXT), m.role,
+                {usage}.model, {usage}.input_tokens, {usage}.output_tokens,
+                {usage}.reasoning_tokens, {usage}.cache_read_tokens, {usage}.cache_write_tokens,
                 COALESCE(responses.service_tier, completions.service_tier) AS service_tier,
                 m.created_at, m.updated_at
          FROM messages m
-         LEFT JOIN override_gen_cfg_data_openai_responses responses
-                ON responses.gen_cfg_id = m.config_id
-         LEFT JOIN override_gen_cfg_data_openai_completions completions
-                ON completions.gen_cfg_id = m.config_id
+         {usage_join}
+         {tier_joins}
+         {legacy_join}
+         WHERE m.parent_chat_id IS NOT NULL {kind_filter}
          ORDER BY m.updated_at"
-        }
-    };
-    let mut stmt = conn.prepare(sql)?;
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
+    // Strict, as in `query_chats`: a failed conversion is a schema change to surface.
     let messages = stmt
         .query_map([], |row| {
             Ok(PiebaldMessage {
                 id: row.get(0)?,
-                parent_chat_id: row.get(1)?,
-                role: row.get(2)?,
-                model: row.get(3)?,
-                input_tokens: row.get(4)?,
-                output_tokens: row.get(5)?,
-                reasoning_tokens: row.get(6)?,
-                cache_read_tokens: row.get(7)?,
-                cache_write_tokens: row.get(8)?,
-                service_tier: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
+                stable_id: row.get(1)?,
+                parent_chat_id: row.get(2)?,
+                role: row.get(3)?,
+                model: row.get(4)?,
+                input_tokens: row.get(5)?,
+                output_tokens: row.get(6)?,
+                reasoning_tokens: row.get(7)?,
+                cache_read_tokens: row.get(8)?,
+                cache_write_tokens: row.get(9)?,
+                service_tier: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<_>>()?;
 
     Ok(messages)
 }
 
 /// Query tool call counts per message.
 ///
-/// Returns counts by owning message ID. Typed tools share one execution-context
+/// Returns counts by the owning message's native ID. Typed tools share one execution-context
 /// row per part; counting that row avoids enumerating subtype tables and includes
 /// MCP, legacy, invalid, and still-streaming calls without double counting results.
-fn query_tool_call_counts(conn: &Connection, schema: PiebaldSchema) -> Result<HashMap<i64, u32>> {
+fn query_tool_call_counts(
+    conn: &Connection,
+    schema: PiebaldSchema,
+) -> Result<HashMap<String, u32>> {
     let sql = match schema {
         PiebaldSchema::Legacy => {
-            "SELECT mp.parent_chat_message_id, COUNT(*) as tool_call_count
+            "SELECT CAST(mp.parent_chat_message_id AS TEXT), COUNT(*) as tool_call_count
              FROM message_parts mp
              JOIN message_part_tool_call tc ON tc.message_part_id = mp.id
              GROUP BY mp.parent_chat_message_id"
         }
         PiebaldSchema::TypedParts => {
-            "SELECT mp.parent_chat_message_id, COUNT(*) as tool_call_count
+            "SELECT CAST(mp.parent_chat_message_id AS TEXT), COUNT(*) as tool_call_count
              FROM message_parts mp
              JOIN tool_execution_context tc ON tc.message_part_id = mp.id
              WHERE mp.part_type = 'tool'
@@ -209,9 +314,8 @@ fn query_tool_call_counts(conn: &Connection, schema: PiebaldSchema) -> Result<Ha
     let mut stmt = conn.prepare(sql)?;
 
     let counts = stmt
-        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u32>(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
 
     Ok(counts)
 }
@@ -281,15 +385,15 @@ fn billable_output_tokens(model: Option<&str>, output_tokens: u64, reasoning_tok
 fn convert_messages(
     chats: &[PiebaldChat],
     messages: Vec<PiebaldMessage>,
-    tool_call_counts: &HashMap<i64, u32>,
+    tool_call_counts: &HashMap<String, u32>,
 ) -> Vec<ConversationMessage> {
-    // Build chat lookup map for O(1) access
-    let chat_map: HashMap<i64, &PiebaldChat> = chats.iter().map(|c| (c.id, c)).collect();
+    // Build chat lookup map for O(1) access, keyed like `parent_chat_id`: by native ID.
+    let chat_map: HashMap<&str, &PiebaldChat> = chats.iter().map(|c| (c.id.as_str(), c)).collect();
 
     messages
         .into_iter()
         .filter_map(|msg| {
-            let chat = chat_map.get(&msg.parent_chat_id)?;
+            let chat = chat_map.get(msg.parent_chat_id.as_str())?;
 
             // Parse timestamp - use updated_at so that streaming updates are captured
             // (updated_at changes when tokens are added during streaming)
@@ -302,10 +406,11 @@ fn convert_messages(
             // Use created_at (not updated_at) so the hash stays stable across token updates.
             // The timestamp has nanosecond precision which is unique per installation,
             // and combined with the message ID ensures no collisions across users.
-            // NOTE: We cannot use just msg.id because it's a local SQLite autoincrement
-            // that starts at 1 for every Piebald installation, causing collisions.
-            let conversation_hash = msg.parent_chat_id.to_string();
-            let global_hash = hash_text(&format!("piebald_{}_{}", msg.created_at, msg.id));
+            // NOTE: We cannot use just the ID because pre-KSUID IDs were local SQLite
+            // autoincrements that start at 1 for every Piebald installation.
+            // Stable IDs keep this formula's output unchanged for pre-KSUID rows.
+            let conversation_hash = chat.stable_id.clone();
+            let global_hash = hash_text(&format!("piebald_{}_{}", msg.created_at, msg.stable_id));
 
             // Determine role
             let role = match msg.role.to_lowercase().as_str() {
@@ -377,12 +482,12 @@ fn convert_messages(
                 project_hash,
                 project_path: chat.project_directory.clone(),
                 conversation_hash,
-                local_hash: Some(msg.id.to_string()),
+                local_hash: Some(msg.stable_id.clone()),
                 global_hash,
                 model: model_str,
                 stats,
                 role,
-                uuid: Some(msg.id.to_string()),
+                uuid: Some(msg.stable_id),
                 session_name: chat.title.clone(),
             })
         })
@@ -421,18 +526,22 @@ impl Analyzer for PiebaldAnalyzer {
         // select a dropped table or combine usage and tool counts from different turns.
         // This is a deferred read transaction on a read-only connection, never a write.
         let tx = conn.transaction()?;
-        let schema = PiebaldSchema::detect(&tx)?;
-        let chats = query_chats(&tx)?;
-        let messages = query_messages(&tx, schema)?;
-        let tool_call_counts = query_tool_call_counts(&tx, schema)?;
+        let layout = PiebaldLayout::detect(&tx)?;
+        let chats = query_chats(&tx, layout)?;
+        let messages = query_messages(&tx, layout)?;
+        let tool_call_counts = query_tool_call_counts(&tx, layout.parts)?;
         tx.commit()?;
         Ok(convert_messages(&chats, messages, &tool_call_counts))
     }
 
     fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
-        let all_messages: Vec<ConversationMessage> = sources
-            .par_iter()
-            .flat_map(|source| self.parse_source(source).unwrap_or_default())
+        // The shared helper reports a source that fails to parse. Swallowing that
+        // error would make an unsupported Piebald schema indistinguishable from
+        // having no Piebald usage at all.
+        let all_messages: Vec<ConversationMessage> = self
+            .parse_sources_parallel_with_paths(sources)
+            .into_iter()
+            .flat_map(|(_, messages)| messages)
             .collect();
         crate::utils::deduplicate_by_local_hash(all_messages)
     }
@@ -503,14 +612,16 @@ mod tests {
     #[test]
     fn test_convert_messages_uses_service_tier_pricing() {
         let chats = vec![PiebaldChat {
-            id: 1,
+            id: "1".to_string(),
+            stable_id: "1".to_string(),
             title: Some("Priority chat".to_string()),
             model: Some("gpt-5.4".to_string()),
             project_directory: Some("/tmp/project".to_string()),
         }];
         let messages = vec![PiebaldMessage {
-            id: 10,
-            parent_chat_id: 1,
+            id: "10".to_string(),
+            stable_id: "10".to_string(),
+            parent_chat_id: "1".to_string(),
             role: "assistant".to_string(),
             model: Some("gpt-5.4".to_string()),
             input_tokens: Some(1_000_000),
@@ -578,14 +689,16 @@ mod tests {
     #[test]
     fn test_convert_messages_counts_cache_writes_toward_astra_context() {
         let chats = vec![PiebaldChat {
-            id: 1,
+            id: "1".to_string(),
+            stable_id: "1".to_string(),
             title: Some("Long cached Astra chat".to_string()),
             model: Some("gpt-6-astra".to_string()),
             project_directory: Some("/tmp/project".to_string()),
         }];
         let messages = vec![PiebaldMessage {
-            id: 10,
-            parent_chat_id: 1,
+            id: "10".to_string(),
+            stable_id: "10".to_string(),
+            parent_chat_id: "1".to_string(),
             role: "assistant".to_string(),
             model: Some("gpt-6-astra".to_string()),
             input_tokens: Some(400_000),
@@ -613,14 +726,16 @@ mod tests {
     #[test]
     fn test_convert_messages_uses_cache_write_rate_without_double_charging() {
         let chats = vec![PiebaldChat {
-            id: 1,
+            id: "1".to_string(),
+            stable_id: "1".to_string(),
             title: Some("Cached chat".to_string()),
             model: Some("gpt-5.6-sol".to_string()),
             project_directory: Some("/tmp/project".to_string()),
         }];
         let messages = vec![PiebaldMessage {
-            id: 10,
-            parent_chat_id: 1,
+            id: "10".to_string(),
+            stable_id: "10".to_string(),
+            parent_chat_id: "1".to_string(),
             role: "assistant".to_string(),
             model: Some("gpt-5.6-sol".to_string()),
             input_tokens: Some(4_583),
