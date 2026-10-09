@@ -212,3 +212,197 @@ fn additive_schema_keeps_legacy_tools_until_finalization() {
         simd_json::to_string(&intermediate).unwrap()
     );
 }
+
+/// Native KSUIDs for the fixture's legacy integer rows, as `_ksuid_map` records them.
+/// Only shape matters to the analyzer: opaque TEXT keys that differ from the old IDs.
+const KSUID_CHAT: &str = "38MTL3YQHcJ50adIYMEcBPnRkPH";
+const KSUID_MESSAGES: [&str; 5] = [
+    "38MTLQWq9LKkm4x1a9khmqx9fnK",
+    "38MTLSiqfyJ1zjxQcQJjcNqgYGD",
+    "38MTLTqvJmzBcRYqY1qTwdF6mHk",
+    "38MTLV3hX7QyNnB2u0w5c5hYxQp",
+    "38MTLWbXy3o1nm5u5o2qkkqL0Ps",
+];
+
+/// Build the typed-parts history after Piebald's KSUID flip: every key is TEXT and
+/// `_ksuid_map` retains the old integers. Generation configs still exist here, as
+/// they did between the flip and the later fold, so the full legacy history applies.
+fn ksuid_fixture() -> (TempDir, DataSource) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = DataSource {
+        path: directory.path().join("app.db"),
+    };
+    let conn = Connection::open(&source.path).unwrap();
+    let [m1, m2, m3, m4, m5] = KSUID_MESSAGES;
+    conn.execute_batch(&format!(
+        "CREATE TABLE _ksuid_map (table_name TEXT NOT NULL, old_id INTEGER NOT NULL,
+                                  new_id TEXT NOT NULL, PRIMARY KEY (table_name, old_id),
+                                  UNIQUE (table_name, new_id));
+         CREATE TABLE projects (id TEXT PRIMARY KEY, directory TEXT);
+         CREATE TABLE profiles (id TEXT PRIMARY KEY);
+         CREATE TABLE chats (id TEXT PRIMARY KEY, title TEXT NOT NULL, model TEXT,
+                             project_id TEXT, profile_id TEXT NOT NULL, created_at TEXT);
+         CREATE TABLE messages (id TEXT PRIMARY KEY, parent_chat_id TEXT, role TEXT,
+                                created_at TEXT, updated_at TEXT,
+                                message_kind TEXT NOT NULL DEFAULT 'normal');
+         CREATE TABLE message_parts (id TEXT PRIMARY KEY,
+                                     parent_chat_message_id TEXT, part_type TEXT,
+                                     part_subtype TEXT);
+         CREATE TABLE message_generations (message_id TEXT PRIMARY KEY, profile_id TEXT,
+                                           config_id TEXT, model TEXT,
+                                           input_tokens BIGINT, output_tokens BIGINT,
+                                           reasoning_tokens BIGINT, cache_read_tokens BIGINT,
+                                           cache_write_tokens BIGINT);
+         CREATE TABLE tool_execution_context (message_part_id TEXT PRIMARY KEY);
+         CREATE TABLE override_gen_cfg_data_openai_responses
+             (gen_cfg_id TEXT PRIMARY KEY, service_tier TEXT);
+         CREATE TABLE override_gen_cfg_data_openai_completions
+             (gen_cfg_id TEXT PRIMARY KEY, service_tier TEXT);
+
+         INSERT INTO _ksuid_map VALUES ('chats', 1, '{KSUID_CHAT}'),
+             ('messages', 1, '{m1}'), ('messages', 2, '{m2}'), ('messages', 3, '{m3}'),
+             ('messages', 4, '{m4}'), ('messages', 5, '{m5}');
+         INSERT INTO projects VALUES ('38MTKprojectKsuid0000000001', '/tmp/piebald-project');
+         INSERT INTO profiles VALUES ('38MTKsourceProfile000000001');
+         INSERT INTO chats VALUES ('{KSUID_CHAT}', 'Schema compatibility', 'gpt-5.4',
+                                   '38MTKprojectKsuid0000000001',
+                                   '38MTKsourceProfile000000001', '2026-05-01T12:00:00Z');
+         INSERT INTO messages VALUES
+             ('{m1}', '{KSUID_CHAT}', 'user', '2026-05-01T12:00:00Z', '2026-05-01T12:00:00Z', 'normal'),
+             ('{m2}', '{KSUID_CHAT}', 'assistant', '2026-05-01T12:00:01Z', '2026-05-01T12:00:05Z', 'normal'),
+             ('{m3}', '{KSUID_CHAT}', 'assistant', '2026-05-01T12:00:02Z', '2026-05-01T12:00:06Z', 'normal'),
+             ('{m4}', '{KSUID_CHAT}', 'assistant', '2026-05-01T12:00:03Z', '2026-05-01T12:00:07Z', 'normal'),
+             ('{m5}', '{KSUID_CHAT}', 'user', '2026-05-01T12:00:04Z', '2026-05-01T12:00:08Z',
+              'context_container');
+         INSERT INTO message_generations VALUES
+             ('{m2}', '38MTKsourceProfile000000001', 'cfg20', 'gpt-5.5', 1000, 200, 30, 100, 50),
+             ('{m3}', '38MTKsourceProfile000000001', 'cfg30', NULL, 500, 100, 10, 0, 0);
+         INSERT INTO override_gen_cfg_data_openai_responses VALUES ('cfg20', 'priority');
+         INSERT INTO override_gen_cfg_data_openai_completions VALUES
+             ('cfg20', 'flex'), ('cfg30', 'flex');
+         INSERT INTO message_parts VALUES ('p1', '{m2}', 'text', NULL),
+             ('p2', '{m2}', 'tool', 'read_file'), ('p3', '{m2}', 'tool', 'mcp'),
+             ('p4', '{m3}', 'tool', 'streaming'), ('p5', '{m5}', 'context', 'agent_rules');
+         INSERT INTO tool_execution_context VALUES ('p2'), ('p3'), ('p4');"
+    ))
+    .unwrap();
+    (directory, source)
+}
+
+/// Apply Piebald's generation-config fold to a KSUID fixture: the per-turn configs
+/// and their override tables disappear, and settings move onto profiles. The chat
+/// points at a hidden clone carrying its own tier, while generations keep naming
+/// the visible source profile, whose settings must not be used.
+fn fold_generation_configs(source: &DataSource) {
+    // Only this disposable fixture is modified; production databases are read-only.
+    let conn = Connection::open(&source.path).unwrap();
+    conn.execute_batch(&format!(
+        "ALTER TABLE message_generations DROP COLUMN config_id;
+         DROP TABLE override_gen_cfg_data_openai_responses;
+         DROP TABLE override_gen_cfg_data_openai_completions;
+         CREATE TABLE profile_settings_openai_responses
+             (profile_id TEXT PRIMARY KEY, service_tier TEXT);
+         CREATE TABLE profile_settings_openai_completions
+             (profile_id TEXT PRIMARY KEY, service_tier TEXT);
+         INSERT INTO profiles VALUES ('38MTKhiddenCloneProfile0001');
+         UPDATE chats SET profile_id = '38MTKhiddenCloneProfile0001' WHERE id = '{KSUID_CHAT}';
+         INSERT INTO profile_settings_openai_responses VALUES
+             ('38MTKhiddenCloneProfile0001', 'priority'),
+             ('38MTKsourceProfile000000001', 'flex');
+         INSERT INTO profile_settings_openai_completions VALUES
+             ('38MTKhiddenCloneProfile0001', 'flex');"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn ksuid_flip_preserves_history_and_pre_flip_identities() {
+    let (_legacy_directory, legacy) = fixture(PiebaldSchema::Legacy);
+    let (_ksuid_directory, ksuid) = ksuid_fixture();
+    let analyzer = PiebaldAnalyzer::new();
+    let flipped = analyzer.parse_source(&ksuid).unwrap();
+    assert_history(&flipped);
+    // Byte-identical output, including global hashes, proves pre-flip messages are
+    // neither lost nor re-identified, so Splitrail Cloud will not count them twice.
+    assert_eq!(
+        simd_json::to_string(&analyzer.parse_source(&legacy).unwrap()).unwrap(),
+        simd_json::to_string(&flipped).unwrap()
+    );
+}
+
+#[test]
+fn post_flip_rows_use_ksuids_and_drafts_are_ignored() {
+    let (_directory, source) = ksuid_fixture();
+    let conn = Connection::open(&source.path).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO messages VALUES
+             ('3KSoWEjm2TfxHgblgGUuZQhwtq6', '{KSUID_CHAT}', 'assistant',
+              '2026-10-09T15:39:19.371208769+00:00', '2026-10-09T15:39:20+00:00', 'normal'),
+             ('3KSoWdraftMessage0000000001', NULL, 'user',
+              '2026-10-09T15:40:00+00:00', '2026-10-09T15:40:00+00:00', 'normal');
+         INSERT INTO message_generations VALUES ('3KSoWEjm2TfxHgblgGUuZQhwtq6',
+             NULL, NULL, 'gpt-5.5', 10, 20, 0, 0, 0);"
+    ))
+    .unwrap();
+
+    let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
+    // The NULL-parent draft is not a conversation turn and must not fail the parse.
+    assert_eq!(messages.len(), 5);
+    let new = messages.last().unwrap();
+    assert_eq!(new.uuid.as_deref(), Some("3KSoWEjm2TfxHgblgGUuZQhwtq6"));
+    assert_eq!(
+        new.global_hash,
+        hash_text("piebald_2026-10-09T15:39:19.371208769+00:00_3KSoWEjm2TfxHgblgGUuZQhwtq6")
+    );
+    // The chat itself was mapped, so its session identity is still the old integer.
+    assert_eq!(new.conversation_hash, "1");
+    assert_eq!(new.stats.output_tokens, 20);
+}
+
+#[test]
+fn folded_generation_configs_take_tier_from_the_chat_profile() {
+    let (_directory, source) = ksuid_fixture();
+    fold_generation_configs(&source);
+    let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
+    assert_eq!(messages.len(), 4);
+
+    // The fold erased per-turn tiers, so both turns now use the hidden clone's
+    // Responses tier. The source profile's `flex` must not leak in.
+    for (message, model, input, output, write, read) in [
+        (&messages[1], "gpt-5.5", 900, 230, 50, 100),
+        (&messages[2], "gpt-5.4", 500, 110, 0, 0),
+    ] {
+        let expected = calculate_total_cost_for_service_tier_at(
+            model,
+            ServiceTier::Priority,
+            input,
+            output,
+            write,
+            read,
+            Some(message.date),
+        );
+        assert!(expected > 0.0);
+        assert_eq!(message.stats.cost, expected, "{model}");
+    }
+    assert_eq!(messages[1].stats.tool_calls, 2);
+    assert_eq!(messages[2].stats.tool_calls, 1);
+    assert_eq!(
+        messages[1].global_hash,
+        hash_text("piebald_2026-05-01T12:00:01Z_2")
+    );
+}
+
+#[test]
+fn unreadable_rows_fail_the_source_instead_of_vanishing() {
+    let (_directory, source) = ksuid_fixture();
+    let conn = Connection::open(&source.path).unwrap();
+    // SQLite's flexible typing lets a BIGINT column hold text. The analyzer must
+    // report that as an error; skipping the row would understate usage silently.
+    conn.execute_batch(&format!(
+        "UPDATE message_generations SET output_tokens = 'not a number'
+         WHERE message_id = '{}';",
+        KSUID_MESSAGES[1]
+    ))
+    .unwrap();
+    assert!(PiebaldAnalyzer::new().parse_source(&source).is_err());
+}
