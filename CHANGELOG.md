@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.11.1] - 2026-10-09
+- Fix Piebald usage tracking for newer Piebald databases (#273) - @mike1858
+
 ## [3.11.0] - 2026-10-07
 - feat(tui): show total tokens for each period (#259) - @jimyag
 - Add Claude Haiku 5.5 pricing with its long-prompt bracket (#271) - @mike1858
