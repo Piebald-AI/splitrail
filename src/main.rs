@@ -25,6 +25,7 @@ mod upload;
 mod utils;
 mod version_check;
 mod watcher;
+mod web;
 
 use crate::config::UploadState;
 
@@ -71,6 +72,15 @@ enum Commands {
     Stats(StatsArgs),
     /// Run as an MCP (Model Context Protocol) server
     Mcp,
+    /// Show local usage trends in a browser
+    Web(WebArgs),
+}
+
+#[derive(Args)]
+struct WebArgs {
+    /// Local port to listen on
+    #[arg(long, default_value_t = 8765)]
+    port: u16,
 }
 
 #[derive(Args)]
@@ -188,6 +198,12 @@ async fn main() {
         Some(Commands::Mcp) => {
             if let Err(e) = mcp::run_mcp_server().await {
                 eprintln!("MCP server error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Web(args)) => {
+            if let Err(e) = web::run(args.port).await {
+                eprintln!("Web server error: {e:#}");
                 std::process::exit(1);
             }
         }

@@ -80,6 +80,12 @@ jobs:
           components: rustc-codegen-cranelift-preview
       - name: Run tests
         run: cargo test --locked
+      - name: Install Node for dashboard data tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test dashboard data
+        run: node --test src/web/data.test.mjs
 
   license_checks:
     name: License checks
