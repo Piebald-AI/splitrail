@@ -2,6 +2,16 @@
 // model, project, and session). Everything the dashboard shows derives here.
 
 export const OTHER = '\u0000other';
+export const SESSION_PAGE_SIZE = 50;
+
+// Quote every field and keep labels from being interpreted as spreadsheet formulas.
+export function csv(rows) {
+  return rows.map(row => row.map(value => {
+    let text = String(value ?? '');
+    if (typeof value === 'string' && /^(?:[\t\r]|\s*[=+\-@])/.test(text)) text = `'${text}`;
+    return `"${text.replaceAll('"', '""')}"`;
+  }).join(',')).join('\r\n') + '\r\n';
+}
 
 export function rowTokens(row) {
   return row.inputTokens + row.outputTokens + row.cachedTokens;
@@ -83,14 +93,14 @@ export function bucketKeys(range, granularity, now) {
 }
 
 function emptyTotals() {
-  return { cost: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, messages: 0, sessions: new Set(), dates: new Set() };
+  return { cost: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, messages: 0, toolCalls: 0, sessions: new Set(), dates: new Set() };
 }
 
-const SUMMED = ['cost', 'inputTokens', 'outputTokens', 'cachedTokens', 'reasoningTokens', 'messages'];
+const SUMMED = ['cost', 'inputTokens', 'outputTokens', 'cachedTokens', 'reasoningTokens', 'messages', 'toolCalls'];
 
 function addRow(totals, row) {
   for (const field of SUMMED) totals[field] += row[field];
-  totals.sessions.add(`${row.tool}:${row.session}`);
+  totals.sessions.add(row.session);
   totals.dates.add(row.date);
   return totals;
 }
@@ -146,10 +156,36 @@ export function stackedSeries(rows, keys, granularity, dimension, metric, slots)
   return [...series].map(([id, values]) => ({ id, values })).sort((a, b) => order(a.id) - order(b.id));
 }
 
+// Monday-first weekday rows × 24 local hours.
+export function weekdayHourGrid(rows, metric) {
+  const weekdays = new Map();
+  const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  for (const row of rows) {
+    if (!weekdays.has(row.date)) weekdays.set(row.date, (new Date(`${row.date}T12:00:00`).getDay() + 6) % 7);
+    grid[weekdays.get(row.date)][row.hour] += metricValue(row, metric);
+  }
+  return grid;
+}
+
 // A round axis step such that four steps cover `max`.
 export function niceStep(max) {
   if (!(max > 0)) return 1;
   const raw = max / 4;
   const magnitude = 10 ** Math.floor(Math.log10(raw));
   return [1, 2, 2.5, 5, 10].map(multiple => multiple * magnitude).find(step => step >= raw);
+}
+
+// How much of the total the largest tenth of the values hold.
+export function topTenthShare(values) {
+  if (!values.length) return { count: 0, share: 0 };
+  const sorted = [...values].sort((a, b) => b - a);
+  const count = Math.max(1, Math.round(sorted.length / 10));
+  const total = sorted.reduce((sum, value) => sum + value, 0);
+  return { count, share: total > 0 ? sorted.slice(0, count).reduce((sum, value) => sum + value, 0) / total : 0 };
+}
+
+export function median(values) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
 }
