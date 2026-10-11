@@ -978,6 +978,7 @@ elements.refresh.addEventListener('click', () => load(true));
 elements.language.addEventListener('change', event => setLanguage(event.target.value, true));
 window.addEventListener('hashchange', () => {
   state = readHash();
+  sessionLimit = SESSION_PAGE_SIZE;
   render();
 });
 document.addEventListener('click', () => {

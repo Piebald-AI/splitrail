@@ -107,6 +107,13 @@ test('CSV preserves exact values, escapes fields, and neutralizes formula labels
     '"a,b","a""b","a\nb","\'=1+1","\'  @x","-2","1234567"\r\n');
 });
 
+test('CSV neutralizes leading tabs and carriage returns without changing numbers', () => {
+  for (const value of ['\tplain', '\rplain', '\t=1+1', '\r@x', '  +1', '-2']) {
+    assert.equal(csv([[value]]), `"'${value}"\r\n`);
+  }
+  assert.equal(csv([[-2, 'plain']]), '"-2","plain"\r\n');
+});
+
 test('all locales provide the same labels and interpolation signatures', () => {
   for (const locale of Object.values(messages)) {
     assert.deepEqual(Object.keys(locale).sort(), Object.keys(messages.en).sort());

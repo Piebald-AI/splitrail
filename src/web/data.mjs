@@ -8,7 +8,7 @@ export const SESSION_PAGE_SIZE = 50;
 export function csv(rows) {
   return rows.map(row => row.map(value => {
     let text = String(value ?? '');
-    if (typeof value === 'string' && /^[\s]*[=+\-@]/.test(text)) text = `'${text}`;
+    if (typeof value === 'string' && /^(?:[\t\r]|\s*[=+\-@])/.test(text)) text = `'${text}`;
     return `"${text.replaceAll('"', '""')}"`;
   }).join(',')).join('\r\n') + '\r\n';
 }
