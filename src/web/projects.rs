@@ -245,7 +245,10 @@ mod tests {
     use std::fs;
 
     fn text(path: &Path) -> String {
-        path.to_string_lossy().into_owned()
+        path.components()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Lays out a linked worktree the way `git worktree add` does.
@@ -280,9 +283,9 @@ mod tests {
             text(&main.join(".worktree/removed-too")),
             text(&home.join("src/example-worktrees/example-issue-1")),
             // The repository moved; worktrees left beside its old location still find it.
-            "/old/example-worktrees/example".to_string(),
-            "/old/example-worktrees/example-issue-2".to_string(),
-            "/older/example".to_string(),
+            text(Path::new("/old/example-worktrees/example")),
+            text(Path::new("/old/example-worktrees/example-issue-2")),
+            text(Path::new("/older/example")),
         ];
         let other = text(&home.join("src/example-other"));
         let kubevirt = text(&kubevirt);

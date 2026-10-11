@@ -768,11 +768,18 @@ mod tests {
 
     #[test]
     fn groups_usage_by_local_hour_and_session_into_merged_projects() {
+        let project: PathBuf = Path::new("/work/project").components().collect();
+        let project_id = project.to_string_lossy().into_owned();
+        let worktree_path = project
+            .join(".worktrees")
+            .join("feature")
+            .to_string_lossy()
+            .into_owned();
         let message = ConversationMessage {
             application: Application::CodexCli,
             date: Utc.with_ymd_and_hms(2026, 9, 22, 12, 0, 0).unwrap(),
             project_hash: "hash".into(),
-            project_path: Some("/work/project".into()),
+            project_path: Some(project_id.clone()),
             conversation_hash: "session".into(),
             local_hash: None,
             global_hash: "message".into(),
@@ -806,7 +813,7 @@ mod tests {
         zero_usage.stats = Stats::default();
         let mut worktree = message.clone();
         worktree.project_hash = String::new();
-        worktree.project_path = Some("/work/project/.worktrees/feature".into());
+        worktree.project_path = Some(worktree_path.clone());
         worktree.conversation_hash = "worktree-session".into();
         let stats = MultiAnalyzerStats {
             analyzer_stats: vec![AgenticCodingToolStats {
@@ -834,19 +841,14 @@ mod tests {
                 row.model == "gpt-test" && row.hour == hour && row.session == "Codex CLI:session"
             })
             .unwrap();
-        assert_eq!(row.project, "/work/project");
+        assert_eq!(row.project, project_id);
         assert_eq!(row.input_tokens, 20);
         assert_eq!(row.output_tokens, 10);
         assert_eq!(row.cached_tokens, 8);
         assert_eq!(row.reasoning_tokens, 4);
         assert_eq!(row.messages, 2);
         assert_eq!(row.tool_calls, 6);
-        assert!(
-            snapshot
-                .rows
-                .iter()
-                .all(|row| row.project == "/work/project")
-        );
+        assert!(snapshot.rows.iter().all(|row| row.project == project_id));
 
         // Sessions span user messages too, and a worktree session joins its repository.
         assert_eq!(snapshot.sessions.len(), 2);
@@ -855,12 +857,9 @@ mod tests {
         assert_eq!(session.name.as_deref(), Some("Fix login"));
         assert_eq!(session.start, user.date);
         assert_eq!(session.end, next_hour.date);
-        assert_eq!(snapshot.sessions[1].project, "/work/project");
+        assert_eq!(snapshot.sessions[1].project, project_id);
         assert_eq!(snapshot.projects.len(), 1);
-        assert_eq!(
-            snapshot.projects[0].paths,
-            ["/work/project", "/work/project/.worktrees/feature"]
-        );
+        assert_eq!(snapshot.projects[0].paths, [project_id, worktree_path]);
 
         let mut other_tool = stats.analyzer_stats[0].clone();
         other_tool.analyzer_name = "Other tool".into();
