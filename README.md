@@ -69,7 +69,7 @@ The overview shows estimated cost, total tokens, session count, and cache share,
 
 Switch between cost and tokens, and group the stacked trend by model, tool, or project. The chart supports hourly, daily, weekly, and monthly intervals; click a daily bar to inspect that day by hour. Focus the chart and use the arrow keys to read values, or Enter to drill into a day. Model, tool, and project rankings also filter on click. The five entities with the highest cost in the selected period keep their colors while filters change; the rest are grouped as Other.
 
-The first page load scans local usage files; subsequent page loads reuse that snapshot. Click Refresh to scan again. Concurrent requests share one scan, and a failed refresh preserves the previous snapshot. Dates and hours use the machine's local time. Total tokens match the TUI: input + output + cached; reasoning tokens are not added again. Costs use public API prices and may differ from subscription spending.
+Usage snapshots are saved in the system cache directory under `splitrail/web-usage-v1.json`. On restart, the page immediately shows the saved snapshot while a background scan refreshes it, then updates automatically. The first run without a valid cache waits for a scan. Click Refresh to scan again. Concurrent refreshes share one scan, cached pages remain available during scanning, and a failed refresh preserves the previous snapshot. Cache files with a different application version or timezone are ignored. Dates and hours use the machine's local time. Total tokens match the TUI: input + output + cached; reasoning tokens are not added again. Costs use public API prices and may differ from subscription spending.
 
 Frontend aggregation tests run with `node --test src/web/data.test.mjs`.
 

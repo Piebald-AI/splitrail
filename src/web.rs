@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,7 +22,7 @@ mod projects;
 
 use projects::Projects;
 
-#[derive(Default, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HourlyUsage {
     date: String,
@@ -38,7 +40,7 @@ struct HourlyUsage {
     tool_calls: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionInfo {
     id: String,
@@ -50,13 +52,13 @@ struct SessionInfo {
 }
 
 /// A project assembled from several paths (worktrees, moves, subdirectories).
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct ProjectInfo {
     id: String,
     paths: Vec<String>,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageSnapshot {
     scanned_at: DateTime<Utc>,
@@ -207,38 +209,127 @@ fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
 struct CachedUsage {
     snapshot: Arc<UsageSnapshot>,
     completed_at: Instant,
+    from_disk: bool,
 }
 
 #[derive(Default)]
 struct UsageState {
-    // The asynchronous lock covers the scan so queued requests share its result.
-    cached: tokio::sync::Mutex<Option<CachedUsage>>,
+    cached: parking_lot::RwLock<Option<CachedUsage>>,
+    scan: tokio::sync::Mutex<()>,
+    cache_path: Option<PathBuf>,
+}
+
+fn cache_timezone() -> String {
+    std::env::var("TZ")
+        .ok()
+        .or_else(|| iana_time_zone::get_timezone().ok())
+        .unwrap_or_else(|| Local::now().offset().to_string())
+}
+
+fn read_snapshot(path: &Path) -> Result<UsageSnapshot> {
+    let mut bytes = std::fs::read(path)?;
+    let (version, timezone, snapshot): (String, String, UsageSnapshot) =
+        simd_json::serde::from_slice(&mut bytes)?;
+    anyhow::ensure!(
+        version == env!("CARGO_PKG_VERSION") && timezone == cache_timezone(),
+        "Web cache version or timezone changed"
+    );
+    Ok(snapshot)
+}
+
+fn save_snapshot(path: &Path, snapshot: &UsageSnapshot) -> Result<()> {
+    let parent = path.parent().context("Web cache has no parent directory")?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = path.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    let result = (|| -> Result<()> {
+        let bytes =
+            simd_json::serde::to_vec(&(env!("CARGO_PKG_VERSION"), cache_timezone(), snapshot))?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 impl UsageState {
+    fn persistent(path: PathBuf) -> Self {
+        let snapshot = match read_snapshot(&path) {
+            Ok(snapshot) => Some(CachedUsage {
+                snapshot: Arc::new(snapshot),
+                completed_at: Instant::now(),
+                from_disk: true,
+            }),
+            Err(error) => {
+                if path.exists() {
+                    eprintln!("Failed to read web cache {}: {error:#}", path.display());
+                }
+                None
+            }
+        };
+        Self {
+            cached: parking_lot::RwLock::new(snapshot),
+            cache_path: Some(path),
+            ..Default::default()
+        }
+    }
+
     async fn load(
         self: Arc<Self>,
         refresh: bool,
+        startup: bool,
         loader: impl FnOnce() -> Result<UsageSnapshot> + Send + 'static,
     ) -> Result<Arc<UsageSnapshot>> {
         let requested_at = Instant::now();
-        // Own the lock in a task: disconnecting a client must not start another
-        // scan while its blocking work is still running.
+        if !refresh
+            && !startup
+            && let Some(cached) = self.cached.read().as_ref()
+        {
+            return Ok(cached.snapshot.clone());
+        }
+        // A disconnected client must not release a still-running scan.
         tokio::spawn(async move {
-            let mut cached = self.cached.lock().await;
-            if let Some(cached) = cached.as_ref()
-                && (!refresh || cached.completed_at >= requested_at)
+            let _scan = self.scan.lock().await;
+            if let Some(cached) = self.cached.read().as_ref()
+                && (cached.completed_at >= requested_at
+                    || (!refresh && (!startup || !cached.from_disk)))
             {
                 return Ok(cached.snapshot.clone());
             }
+            let cache_path = self.cache_path.clone();
             let snapshot = Arc::new(
-                tokio::task::spawn_blocking(loader)
-                    .await
-                    .context("Web usage scan failed")??,
+                tokio::task::spawn_blocking(move || {
+                    let snapshot = loader()?;
+                    if let Some(path) = cache_path
+                        && let Err(error) = save_snapshot(&path, &snapshot)
+                    {
+                        eprintln!("Failed to save web cache {}: {error:#}", path.display());
+                    }
+                    Ok::<_, anyhow::Error>(snapshot)
+                })
+                .await
+                .context("Web usage scan failed")??,
             );
-            *cached = Some(CachedUsage {
+            *self.cached.write() = Some(CachedUsage {
                 snapshot: snapshot.clone(),
                 completed_at: Instant::now(),
+                from_disk: false,
             });
             Ok(snapshot)
         })
@@ -251,6 +342,8 @@ impl UsageState {
 struct UsageQuery {
     #[serde(default)]
     refresh: bool,
+    #[serde(default)]
+    startup: bool,
 }
 
 fn load_usage() -> Result<UsageSnapshot> {
@@ -260,8 +353,21 @@ fn load_usage() -> Result<UsageSnapshot> {
 }
 
 async fn usage(State(state): State<Arc<UsageState>>, Query(query): Query<UsageQuery>) -> Response {
-    let response = match state.load(query.refresh, load_usage).await {
-        Ok(snapshot) => Json(snapshot.as_ref()).into_response(),
+    let response = match state
+        .clone()
+        .load(query.refresh, query.startup, load_usage)
+        .await
+    {
+        Ok(snapshot) => {
+            let stale = state.cached.read().as_ref().is_some_and(|cached| {
+                cached.from_disk || !Arc::ptr_eq(&cached.snapshot, &snapshot)
+            });
+            (
+                [("x-splitrail-stale", if stale { "true" } else { "false" })],
+                Json(snapshot.as_ref()),
+            )
+                .into_response()
+        }
         Err(error) => {
             eprintln!("Failed to load web usage: {error:#}");
             (
@@ -292,7 +398,7 @@ async fn local_host_only(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-fn app() -> Router {
+fn app_with_state(state: Arc<UsageState>) -> Router {
     Router::new()
         .route("/", get(|| async { Html(include_str!("web/index.html")) }))
         .route(
@@ -342,7 +448,12 @@ fn app() -> Router {
             }),
         )
         .layer(from_fn(local_host_only))
-        .with_state(Arc::new(UsageState::default()))
+        .with_state(state)
+}
+
+#[cfg(test)]
+fn app() -> Router {
+    app_with_state(Arc::new(UsageState::default()))
 }
 
 pub async fn run(port: u16) -> Result<()> {
@@ -351,7 +462,20 @@ pub async fn run(port: u16) -> Result<()> {
         .await
         .with_context(|| format!("Failed to listen on {address}"))?;
     println!("Splitrail web: http://{address}");
-    axum::serve(listener, app())
+    let state = Arc::new(
+        dirs::cache_dir().map_or_else(UsageState::default, |directory| {
+            UsageState::persistent(directory.join("splitrail").join("web-usage-v1.json"))
+        }),
+    );
+    if state.cached.read().is_some() {
+        let refresh = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = refresh.load(false, true, load_usage).await {
+                eprintln!("Failed to refresh startup web usage: {error:#}");
+            }
+        });
+    }
+    axum::serve(listener, app_with_state(state))
         .await
         .context("Web server stopped")
 }
@@ -373,23 +497,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disk_snapshot_survives_restart_and_startup_refreshes_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.json");
+        let state = Arc::new(UsageState::persistent(path.clone()));
+        state
+            .clone()
+            .load(false, false, || Ok(snapshot_with_input(10)))
+            .await
+            .unwrap();
+        let restarted = Arc::new(UsageState::persistent(path.clone()));
+        assert!(restarted.cached.read().as_ref().unwrap().from_disk);
+        let cached = restarted
+            .clone()
+            .load(false, false, || anyhow::bail!("must use disk"))
+            .await
+            .unwrap();
+        assert_eq!(cached.rows[0].input_tokens, 10);
+        restarted
+            .clone()
+            .load(false, true, || Ok(snapshot_with_input(20)))
+            .await
+            .unwrap();
+        restarted
+            .clone()
+            .load(false, true, || anyhow::bail!("startup already refreshed"))
+            .await
+            .unwrap();
+        assert_eq!(read_snapshot(&path).unwrap().rows[0].input_tokens, 20);
+        let error = restarted
+            .clone()
+            .load(true, false, || anyhow::bail!("scan failed"))
+            .await;
+        assert!(error.is_err());
+        assert_eq!(read_snapshot(&path).unwrap().rows[0].input_tokens, 20);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_cache_is_ignored_and_failed_write_preserves_previous_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.json");
+        std::fs::write(&path, b"broken").unwrap();
+        assert!(UsageState::persistent(path.clone()).cached.read().is_none());
+        for (version, timezone) in [
+            ("old".to_owned(), cache_timezone()),
+            (env!("CARGO_PKG_VERSION").to_owned(), "different".to_owned()),
+        ] {
+            std::fs::write(
+                &path,
+                simd_json::serde::to_vec(&(version, timezone, snapshot_with_input(10))).unwrap(),
+            )
+            .unwrap();
+            assert!(UsageState::persistent(path.clone()).cached.read().is_none());
+        }
+        // A directory cannot replace the previous cache file.
+        let destination = directory.path().join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("previous"), b"keep").unwrap();
+        assert!(save_snapshot(&destination, &snapshot_with_input(20)).is_err());
+        assert_eq!(
+            std::fs::read(destination.join("previous")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_page_stays_available_while_startup_refresh_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.json");
+        save_snapshot(&path, &snapshot_with_input(10)).unwrap();
+        let state = Arc::new(UsageState::persistent(path));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let refresh = tokio::spawn(state.clone().load(false, true, move || {
+            started_tx.send(()).unwrap();
+            finish_rx.blocking_recv().unwrap();
+            Ok(snapshot_with_input(20))
+        }));
+        started_rx.await.unwrap();
+        let cached = state
+            .clone()
+            .load(false, false, || anyhow::bail!("must not scan"))
+            .await
+            .unwrap();
+        assert_eq!(cached.rows[0].input_tokens, 10);
+        let waiting = state
+            .clone()
+            .load(false, true, || anyhow::bail!("must share startup scan"));
+        tokio::pin!(waiting);
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        finish_tx.send(()).unwrap();
+        assert_eq!(waiting.await.unwrap().rows[0].input_tokens, 20);
+        refresh.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn reuses_snapshot_and_refreshes_explicitly() {
         let state = Arc::new(UsageState::default());
         let first = state
             .clone()
-            .load(false, || Ok(snapshot_with_input(10)))
+            .load(false, false, || Ok(snapshot_with_input(10)))
             .await
             .unwrap();
         let cached = state
             .clone()
-            .load(false, || anyhow::bail!("cached request must not scan"))
+            .load(false, false, || {
+                anyhow::bail!("cached request must not scan")
+            })
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&first, &cached));
         assert_eq!(cached.rows[0].input_tokens, 10);
         let refreshed = state
             .clone()
-            .load(true, || Ok(snapshot_with_input(20)))
+            .load(true, false, || Ok(snapshot_with_input(20)))
             .await
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &refreshed));
@@ -401,20 +631,20 @@ mod tests {
         let state = Arc::new(UsageState::default());
         state
             .clone()
-            .load(false, || Ok(UsageSnapshot::default()))
+            .load(false, false, || Ok(UsageSnapshot::default()))
             .await
             .unwrap();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
-        let first = tokio::spawn(state.clone().load(true, move || {
+        let first = tokio::spawn(state.clone().load(true, false, move || {
             started_tx.send(()).unwrap();
             finish_rx.blocking_recv().unwrap();
             Ok(UsageSnapshot::default())
         }));
         started_rx.await.unwrap();
-        let second = state
-            .clone()
-            .load(true, || anyhow::bail!("concurrent request must not scan"));
+        let second = state.clone().load(true, false, || {
+            anyhow::bail!("concurrent request must not scan")
+        });
         tokio::pin!(second);
         assert!(futures::poll!(second.as_mut()).is_pending());
         finish_tx.send(()).unwrap();
@@ -428,7 +658,7 @@ mod tests {
         let state = Arc::new(UsageState::default());
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
-        let request = tokio::spawn(state.clone().load(false, move || {
+        let request = tokio::spawn(state.clone().load(false, false, move || {
             started_tx.send(()).unwrap();
             finish_rx.blocking_recv().unwrap();
             Ok(UsageSnapshot::default())
@@ -436,9 +666,9 @@ mod tests {
         started_rx.await.unwrap();
         request.abort();
         assert!(request.await.err().unwrap().is_cancelled());
-        let next = state
-            .clone()
-            .load(false, || anyhow::bail!("running scan must be reused"));
+        let next = state.clone().load(false, false, || {
+            anyhow::bail!("running scan must be reused")
+        });
         tokio::pin!(next);
         assert!(futures::poll!(next.as_mut()).is_pending());
         finish_tx.send(()).unwrap();
@@ -450,25 +680,27 @@ mod tests {
         let state = Arc::new(UsageState::default());
         let first = state
             .clone()
-            .load(false, || Ok(UsageSnapshot::default()))
+            .load(false, false, || Ok(UsageSnapshot::default()))
             .await
             .unwrap();
         let error = state
             .clone()
-            .load(true, || anyhow::bail!("scan failed"))
+            .load(true, false, || anyhow::bail!("scan failed"))
             .await
             .err()
             .unwrap();
         assert_eq!(error.to_string(), "scan failed");
         let cached = state
             .clone()
-            .load(false, || anyhow::bail!("must preserve previous data"))
+            .load(false, false, || {
+                anyhow::bail!("must preserve previous data")
+            })
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&first, &cached));
         let retry = state
             .clone()
-            .load(true, || Ok(UsageSnapshot::default()))
+            .load(true, false, || Ok(UsageSnapshot::default()))
             .await
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &retry));

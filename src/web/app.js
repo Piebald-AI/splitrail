@@ -179,15 +179,19 @@ function toggleFilter(key, value) {
   update({ filters: { ...state.filters, [key]: next }, session: null });
 }
 
-async function load(refresh = false) {
+async function load(refresh = false, startup = false) {
   loading = true;
   loadError = null;
   elements.refresh.disabled = true;
   renderStatus();
   try {
-    const response = await fetch(`/api/usage${refresh ? '?refresh=true' : ''}`, { cache: 'no-store' });
+    const response = await fetch(`/api/usage${refresh ? '?refresh=true' : startup ? '?startup=true' : ''}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     snapshot = prepare(await response.json());
+    if (!refresh && !startup && response.headers.get('x-splitrail-stale') === 'true') {
+      render();
+      return await load(false, true);
+    }
   } catch (error) {
     loadError = error.message;
   } finally {
