@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import {
   OTHER, metricValue, periodKey, selectRange, inRange, matchesFilters, granularityOptions, bucketKeys,
-  sumRows, groupRows, cacheShare, colorSlots, stackedSeries, niceStep,
+  sumRows, groupRows, totalTokens, cacheShare, colorSlots, stackedSeries, niceStep,
 } from './data.mjs';
 
 const row = (overrides = {}) => ({
@@ -81,4 +83,22 @@ test('axis steps cover the maximum, including empty data', () => {
   assert.equal(niceStep(87), 25);
   assert.equal(niceStep(4e8), 1e8);
   assert.equal(niceStep(0), 1);
+});
+
+test('model rankings show no price when cost has no counted tokens', () => {
+  const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const rankSource = source.slice(source.indexOf('function rankSub('), source.indexOf('function rankCard('));
+  const rankSub = runInNewContext(`${rankSource}\nrankSub`, {
+    totalTokens, cacheShare,
+    labels: { cacheShort: share => `cache ${share}`, perMillion: price => `${price}/M`, noPrice: 'No price' },
+    fmt: {
+      cost: value => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value),
+      percent: (value, digits) => `${(value * 100).toFixed(digits)}%`,
+    },
+  });
+  const costOnly = row({ cost: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 });
+  assert.equal(rankSub('model', sumRows([costOnly])), 'No price · cache 0%');
+  assert.equal(rankSub('model', sumRows([{ ...costOnly, reasoningTokens: 100 }])), 'No price · cache 0%');
+  assert.equal(rankSub('model', sumRows([{ ...costOnly, inputTokens: 1e6 }])), '$1.00/M · cache 0%');
+  assert.equal(rankSub('model', sumRows([row({ cost: 0 })])), 'No price · cache 17%');
 });

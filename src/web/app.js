@@ -553,7 +553,8 @@ function trendChart(series, view, title) {
 function rankSub(key, totals) {
   const cache = labels.cacheShort(fmt.percent(cacheShare(totals), 0));
   if (key === 'model') {
-    const price = totals.cost > 0 ? labels.perMillion(fmt.cost((totals.cost / totalTokens(totals)) * 1e6)) : labels.noPrice;
+    const tokens = totalTokens(totals);
+    const price = totals.cost > 0 && tokens > 0 ? labels.perMillion(fmt.cost((totals.cost / tokens) * 1e6)) : labels.noPrice;
     return `${price} · ${cache}`;
   }
   if (key === 'tool') return `${labels.sessionCount(fmt.int(totals.sessions.size))} · ${cache}`;
