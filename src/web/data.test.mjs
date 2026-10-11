@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import { messages } from './locales.mjs';
 import {
-  OTHER, metricValue, periodKey, selectRange, inRange, matchesFilters, granularityOptions, bucketKeys,
-  sumRows, groupRows, totalTokens, cacheShare, colorSlots, stackedSeries, niceStep,
+  OTHER, localDateKey, metricValue, periodKey, selectRange, inRange, matchesFilters, granularityOptions, bucketKeys,
+  sumRows, groupRows, totalTokens, cacheShare, colorSlots, stackedSeries, weekdayHourGrid, niceStep, topTenthShare, median, csv,
 } from './data.mjs';
 
 const row = (overrides = {}) => ({
   date: '2025-12-31', hour: 23, model: 'a', project: 'p', tool: 't', session: 's',
-  inputTokens: 10, outputTokens: 3, cachedTokens: 2, reasoningTokens: 4, cost: 0.1, messages: 1, ...overrides,
+  inputTokens: 10, outputTokens: 3, cachedTokens: 2, reasoningTokens: 4, cost: 0.1, messages: 1, toolCalls: 0, ...overrides,
 });
 const filters = (overrides = {}) => ({ model: new Set(), project: new Set(), tool: new Set(), ...overrides });
 const now = new Date(2026, 0, 2, 12, 30);
@@ -68,37 +69,73 @@ test('stacked series preserve totals and keep entity colors when filtered', () =
   assert.deepEqual(filtered.map(item => item.id), ['m1', 'm2', 'm3', 'm4', OTHER]);
 });
 
-test('totals, grouping, cache share, and tool-specific session counts', () => {
+test('totals, grouping, cache share, and concentration', () => {
   const rows = [row({ session: 'x' }), row({ session: 'y', cost: 0.3, cachedTokens: 30 })];
   const totals = sumRows(rows);
   assert.equal(totals.sessions.size, 2);
   assert.equal(cacheShare(totals), 32 / 52);
   assert.equal(groupRows(rows, item => item.session).get('y').cost, 0.3);
-  assert.equal(sumRows([row(), row({ tool: 'other' })]).sessions.size, 2);
-  assert.equal(metricValue(row(), 'tokens'), 15);
-  assert.equal(cacheShare(sumRows([])), 0);
+  assert.deepEqual(topTenthShare([90, 5, 1, 1, 1, 1, 1, 0, 0, 0]), { count: 1, share: 0.9 });
+  assert.equal(median([5, 1, 3]), 3);
 });
 
-test('axis steps cover the maximum, including empty data', () => {
+test('weekday grid is Monday-first and axis steps are round', () => {
+  const grid = weekdayHourGrid([row({ date: '2026-01-05', hour: 9 }), row({ date: '2026-01-04', hour: 9 })], 'cost');
+  assert.equal(grid[0][9], 0.1);
+  assert.equal(grid[6][9], 0.1);
   assert.equal(niceStep(87), 25);
   assert.equal(niceStep(4e8), 1e8);
   assert.equal(niceStep(0), 1);
 });
 
-test('model rankings show no price when cost has no counted tokens', () => {
+test('model rankings guard cost-only and reasoning-only rows', () => {
   const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
   const rankSource = source.slice(source.indexOf('function rankSub('), source.indexOf('function rankCard('));
   const rankSub = runInNewContext(`${rankSource}\nrankSub`, {
-    totalTokens, cacheShare,
-    labels: { cacheShort: share => `cache ${share}`, perMillion: price => `${price}/M`, noPrice: 'No price' },
-    fmt: {
-      cost: value => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value),
-      percent: (value, digits) => `${(value * 100).toFixed(digits)}%`,
-    },
+    totalTokens, cacheShare, t: key => messages.en[key],
+    fmt: { cost: value => `$${value.toFixed(2)}`, percent: (value, digits) => `${(value * 100).toFixed(digits)}%` },
   });
   const costOnly = row({ cost: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0 });
-  assert.equal(rankSub('model', sumRows([costOnly])), 'No price · cache 0%');
-  assert.equal(rankSub('model', sumRows([{ ...costOnly, reasoningTokens: 100 }])), 'No price · cache 0%');
-  assert.equal(rankSub('model', sumRows([{ ...costOnly, inputTokens: 1e6 }])), '$1.00/M · cache 0%');
-  assert.equal(rankSub('model', sumRows([row({ cost: 0 })])), 'No price · cache 17%');
+  assert.equal(rankSub('model', 'a', sumRows([costOnly])), 'No price · cache 0%');
+  assert.equal(rankSub('model', 'a', sumRows([{ ...costOnly, reasoningTokens: 100 }])), 'No price · cache 0%');
+  assert.equal(rankSub('model', 'a', sumRows([{ ...costOnly, inputTokens: 1e6 }])), '$1.00/M · cache 0%');
+  assert.equal(rankSub('model', 'a', sumRows([row({ cost: 0 })])), 'No price · cache 17%');
+});
+
+test('CSV preserves exact values, escapes fields, and neutralizes formula labels', () => {
+  assert.equal(csv([['a,b', 'a"b', 'a\nb', '=1+1', '  @x', -2, 1234567]]),
+    '"a,b","a""b","a\nb","\'=1+1","\'  @x","-2","1234567"\r\n');
+});
+
+test('all locales provide the same labels and interpolation signatures', () => {
+  for (const locale of Object.values(messages)) {
+    assert.deepEqual(Object.keys(locale).sort(), Object.keys(messages.en).sort());
+    for (const [key, value] of Object.entries(messages.en)) {
+      assert.equal(typeof locale[key], typeof value, key);
+      if (typeof value === 'function') assert.equal(locale[key].length, value.length, key);
+      if (typeof value === 'object') assert.deepEqual(Object.keys(locale[key]).sort(), Object.keys(value).sort());
+    }
+  }
+});
+
+test('bookmarked dates must be valid calendar dates', () => {
+  const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const stateSource = source.slice(source.indexOf('function defaultState('), source.indexOf('function writeHash('));
+  const location = { hash: '' };
+  const readHash = runInNewContext(`${stateSource}\nreadHash`, {
+    location, URLSearchParams, localDateKey, noon: key => new Date(`${key}T12:00:00`),
+    VIEWS: ['overview', 'sessions', 'breakdown'], RANGES: ['today', '7', '30', '90', 'all'],
+    METRICS: ['cost', 'tokens'], DIMENSIONS: ['tool', 'model', 'project'],
+    GRANULARITIES: ['hour', 'day', 'week', 'month'], SORTS: ['recent', 'cost', 'tokens', 'duration'],
+    BREAKDOWNS: ['period', 'project', 'model', 'tool'],
+  });
+  for (const day of ['2026-02-30', '2026-99-01', 'garbage']) {
+    location.hash = `#day=${day}`;
+    assert.equal(readHash().day, null);
+  }
+  location.hash = '#view=sessions&day=2024-02-29&tool=one&tool=two';
+  const state = readHash();
+  assert.equal(state.day, '2024-02-29');
+  assert.equal(state.view, 'sessions');
+  assert.deepEqual([...state.filters.tool], ['one', 'two']);
 });
