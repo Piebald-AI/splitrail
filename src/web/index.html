@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Splitrail · Local usage</title>
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <span class="brand-name">Splitrail</span>
+        <span class="brand-divider" aria-hidden="true"></span>
+        <span class="brand-subtitle">Local usage</span>
+      </div>
+      <div class="header-actions">
+        <span id="status" class="status" role="status"></span>
+        <button id="refresh" class="btn" type="button">
+          <svg class="icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.46-3.54"></path><path d="M13 2.8v2.9h-2.9"></path></svg>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </div>
+  </header>
+  <div id="filters" class="wrap filters"></div>
+  <main id="view" class="wrap view"></main>
+</body>
+</html>

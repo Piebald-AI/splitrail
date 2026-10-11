@@ -61,6 +61,18 @@ Run one command to instantly review all of your CLI coding agent usage.  Upload 
 ### [Splitrail Cloud](https://splitrail.dev)
 <img width="750" alt="Screenshot of Splitrail Cloud" src="https://raw.githubusercontent.com/Piebald-AI/splitrail/main/screenshots/cloud.png" />
 
+## Local Web Dashboard
+
+Run `splitrail web` and open `http://127.0.0.1:8765`. Use `splitrail web --port 9000` to choose another port. The server listens only on `127.0.0.1` and accepts that IP in the Host header. It reads local usage through the existing analyzers without uploading it. Static assets are embedded in the binary; no frontend build or Node installation is needed to run it.
+
+The overview shows estimated cost, total tokens, session count, and cache share, with comparisons against the previous period. Filter by today, 7, 30, or 90 days, or all history, and select tools, models, or projects. Selections within one field combine; selections across fields narrow the result. Projects use their recorded paths or analyzer project IDs.
+
+Switch between cost and tokens, and group the stacked trend by model, tool, or project. The chart supports hourly, daily, weekly, and monthly intervals; click a daily bar to inspect that day by hour. Focus the chart and use the arrow keys to read values, or Enter to drill into a day. Model, tool, and project rankings also filter on click. The five entities with the highest cost in the selected period keep their colors while filters change; the rest are grouped as Other.
+
+Each page load or Refresh scans local usage files again. Dates and hours use the machine's local time. Total tokens match the TUI: input + output + cached; reasoning tokens are not added again. Costs use public API prices and may differ from subscription spending.
+
+Frontend aggregation tests run with `node --test src/web/data.test.mjs`.
+
 ## MCP Server
 
 Splitrail can run as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, allowing AI assistants to query your usage statistics programmatically.

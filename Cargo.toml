@@ -22,6 +22,7 @@ zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
+axum = "0.8"
 lasso = { version = "0.7", features = ["multi-threaded"] }
 futures = "0.3"
 rayon = "1.10"
