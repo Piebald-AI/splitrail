@@ -19,6 +19,7 @@ const TIMELINE_HEIGHT = 88;
 const MIN_SLOT = 4;
 const LANGUAGE_KEY = 'splitrail-web-language';
 const SVG_NS = 'http://www.w3.org/2000/svg';
+const POLL_MS = 60_000;
 
 
 const elements = Object.fromEntries(['status', 'refresh', 'language', 'tabs-bar', 'tabs', 'filters', 'view']
@@ -200,6 +201,16 @@ async function load(refresh = false, startup = false) {
     render();
   }
 }
+
+function schedulePoll() {
+  setTimeout(async () => {
+    if (!document.hidden && !loading) await load();
+    schedulePoll();
+  }, POLL_MS);
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !loading) load();
+});
 
 function prepare(data) {
   const projects = new Map(data.projects.map(project => [project.id, project.paths]));
@@ -995,3 +1006,4 @@ document.addEventListener('keydown', event => {
 });
 setLanguage(language, false);
 load();
+schedulePoll();
