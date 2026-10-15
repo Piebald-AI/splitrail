@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.12.0] - 2026-10-15
+- feat(web): add localhost usage dashboard (#276) - @jimyag
+- feat(web): add sessions and breakdown dashboard views (#277) - @jimyag
+- feat(web): auto-refresh usage data every 60s (#280) - @jimyag
+- Bump rustls to 0.23.46 for RUSTSEC-2026-0346 through 0349 (#281) - @mike1858
+- Bill Gemini 4 Argon at standard rates after its introductory period (#279) - @mike1858
+
 ## [3.11.1] - 2026-10-09
 - Fix Piebald usage tracking for newer Piebald databases (#273) - @mike1858
 
