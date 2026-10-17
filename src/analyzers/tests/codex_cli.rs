@@ -9,7 +9,16 @@ const SESSION_FILE_NAME: &str =
     "rollout-2026-07-22T12-34-56-243232f1-a7ab-44e6-b2c3-045b673746ea.jsonl";
 
 fn write_test_session(path: &std::path::Path) {
-    let content = concat!(
+    std::fs::write(path, test_session_content()).unwrap();
+}
+
+fn write_compressed_test_session(path: &std::path::Path) {
+    let compressed = zstd::stream::encode_all(test_session_content().as_bytes(), 1).unwrap();
+    std::fs::write(path, compressed).unwrap();
+}
+
+fn test_session_content() -> String {
+    concat!(
         r#"{"timestamp":"2026-07-22T12:34:56.000Z","type":"session_meta","payload":{"id":"243232f1-a7ab-44e6-b2c3-045b673746ea","timestamp":"2026-07-22T12:34:56.000Z"}}"#,
         "\n",
         r#"{"timestamp":"2026-07-22T12:35:00.000Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}"#,
@@ -20,8 +29,8 @@ fn write_test_session(path: &std::path::Path) {
         "\n",
         r#"{"timestamp":"2026-07-22T12:35:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5,"total_tokens":150}}}}"#,
         "\n"
-    );
-    std::fs::write(path, content).unwrap();
+    )
+    .to_string()
 }
 
 #[test]
@@ -101,6 +110,115 @@ fn test_valid_codex_data_paths_must_be_inside_watched_directories() {
     let data_dirs = vec![sessions_dir];
     assert!(is_valid_data_path_in(&session_path, &data_dirs));
     assert!(!is_valid_data_path_in(&unrelated_path, &data_dirs));
+
+    let compressed_path = data_dirs[0].join("session.jsonl.zst");
+    std::fs::write(&compressed_path, "").unwrap();
+    assert!(is_valid_data_path_in(&compressed_path, &data_dirs));
+    assert!(!is_valid_data_path_in(
+        &data_dirs[0].join("session.jsonl.gz"),
+        &data_dirs
+    ));
+}
+
+#[test]
+fn test_compressed_session_is_discovered_and_deduped_with_plain_copy() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let active_dir = temp_dir.path().join(".codex/sessions/2026/07/22");
+    std::fs::create_dir_all(&active_dir).unwrap();
+    let plain_path = active_dir.join(SESSION_FILE_NAME);
+    let compressed_path = active_dir.join(format!("{SESSION_FILE_NAME}.zst"));
+    write_test_session(&plain_path);
+    write_compressed_test_session(&compressed_path);
+    std::fs::write(active_dir.join("session.jsonl.gz"), "").unwrap();
+
+    let sources = discover_data_sources_in(vec![temp_dir.path().join(".codex/sessions")]);
+    assert_eq!(sources.len(), 1);
+    assert!(sources[0].path == plain_path || sources[0].path == compressed_path);
+}
+
+#[test]
+fn test_compressed_session_parses_like_plain() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path();
+    let active_dir = home.join(".codex/sessions/2026/07/22");
+    let archived_dir = home.join(".codex/archived_sessions");
+    std::fs::create_dir_all(&active_dir).unwrap();
+    std::fs::create_dir_all(&archived_dir).unwrap();
+    let plain_path = active_dir.join(SESSION_FILE_NAME);
+    let compressed_path = archived_dir.join(format!("{SESSION_FILE_NAME}.zst"));
+    write_test_session(&plain_path);
+    write_compressed_test_session(&compressed_path);
+
+    // Both files describe the same session, so the compressed copy must produce
+    // the same identities and token stats as the plain one.
+    assert_eq!(
+        canonical_session_path(&compressed_path),
+        canonical_session_path(&plain_path)
+    );
+    let (plain_messages, plain_model) = parse_codex_cli_jsonl_file(&plain_path).unwrap();
+    let (compressed_messages, compressed_model) =
+        parse_codex_cli_jsonl_file(&compressed_path).unwrap();
+
+    assert_eq!(plain_model, compressed_model);
+    assert_eq!(plain_messages.len(), compressed_messages.len());
+    for (plain, compressed) in plain_messages.iter().zip(&compressed_messages) {
+        assert_eq!(plain.role, compressed.role);
+        assert_eq!(plain.conversation_hash, compressed.conversation_hash);
+        assert_eq!(plain.global_hash, compressed.global_hash);
+        assert_eq!(plain.stats.input_tokens, compressed.stats.input_tokens);
+        assert_eq!(plain.stats.output_tokens, compressed.stats.output_tokens);
+        assert_eq!(plain.stats.cached_tokens, compressed.stats.cached_tokens);
+    }
+}
+
+#[test]
+fn test_compressed_archived_session_matches_uncompressed_identity() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path();
+    let archived_dir = home.join(".codex/archived_sessions");
+    std::fs::create_dir_all(&archived_dir).unwrap();
+    let archived_path = archived_dir.join(format!("{SESSION_FILE_NAME}.zst"));
+    write_compressed_test_session(&archived_path);
+
+    assert_eq!(
+        canonical_session_path(&archived_path),
+        home.join(".codex/sessions/2026/07/22")
+            .join(SESSION_FILE_NAME)
+    );
+
+    let (messages, _) = parse_codex_cli_jsonl_file(&archived_path).unwrap();
+    assert!(!messages.is_empty());
+    let expected_hash =
+        crate::utils::hash_text(&canonical_session_path(&archived_path).to_string_lossy());
+    assert_eq!(messages[0].conversation_hash, expected_hash);
+}
+
+#[test]
+fn test_truncated_compressed_session_keeps_complete_messages() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join(format!("{SESSION_FILE_NAME}.zst"));
+    let head = concat!(
+        r#"{"timestamp":"2026-07-22T12:34:56.000Z","type":"session_meta","payload":{"id":"243232f1-a7ab-44e6-b2c3-045b673746ea","timestamp":"2026-07-22T12:34:56.000Z"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-07-22T12:35:00.000Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-07-22T12:35:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Test truncated frames"}]}}"#,
+        "\n",
+    );
+    let tail = concat!(
+        r#"{"timestamp":"2026-07-22T12:35:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5,"total_tokens":150}}}}"#,
+        "\n",
+    );
+
+    let mut compressed = zstd::stream::encode_all(head.as_bytes(), 1).unwrap();
+    let mut truncated = zstd::stream::encode_all(tail.as_bytes(), 1).unwrap();
+    truncated.truncate(truncated.len() - 2);
+    compressed.extend(truncated);
+    std::fs::write(&path, compressed).unwrap();
+
+    let (messages, _) = parse_codex_cli_jsonl_file(&path).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(matches!(messages[0].role, crate::types::MessageRole::User));
 }
 
 #[test]
