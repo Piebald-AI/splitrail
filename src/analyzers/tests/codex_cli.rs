@@ -516,9 +516,63 @@ fn test_parse_codex_cli_counts_tool_calls() {
         .unwrap();
 
     assert_eq!(assistant_msg.stats.tool_calls, 2);
+    assert_eq!(assistant_msg.stats.terminal_commands, 2);
     assert_eq!(assistant_msg.stats.input_tokens, 100);
     assert_eq!(assistant_msg.stats.output_tokens, 30);
     assert_eq!(assistant_msg.stats.reasoning_tokens, 5);
+}
+
+#[test]
+fn test_parse_codex_cli_maps_tool_calls_to_activity_stats() {
+    let mut temp_file = NamedTempFile::new().unwrap();
+
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-10-17T12:00:00.000Z","type":"turn_context","payload":{{"model":"gpt-5-codex"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-10-17T12:00:01.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Inspect the repo"}}]}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-10-17T12:00:02.000Z","type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":"{{}}","call_id":"call_exec"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-10-17T12:00:03.000Z","type":"response_item","payload":{{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch","call_id":"call_patch"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-10-17T12:00:04.000Z","type":"response_item","payload":{{"type":"function_call","name":"read_file","arguments":"{{}}","call_id":"call_read"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-10-17T12:00:05.000Z","type":"response_item","payload":{{"type":"custom_tool_call","name":"write_file","input":"hello","call_id":"call_write"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-10-17T12:00:06.000Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5,"total_tokens":155}}}}}}}}"#
+    )
+    .unwrap();
+
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let assistant_msg = messages
+        .iter()
+        .find(|msg| matches!(msg.role, crate::types::MessageRole::Assistant))
+        .unwrap();
+
+    assert_eq!(assistant_msg.stats.tool_calls, 4);
+    assert_eq!(assistant_msg.stats.terminal_commands, 1);
+    assert_eq!(assistant_msg.stats.files_edited, 1);
+    assert_eq!(assistant_msg.stats.files_read, 1);
+    assert_eq!(assistant_msg.stats.files_added, 1);
 }
 
 #[test]

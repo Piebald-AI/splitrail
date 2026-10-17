@@ -323,6 +323,25 @@ fn is_noise_title_candidate(text: &str) -> bool {
         || trimmed.starts_with("# AGENTS.md instructions for")
 }
 
+fn record_tool_call(name: &str, stats: &mut Stats) {
+    stats.tool_calls = stats.tool_calls.saturating_add(1);
+    match name {
+        "exec_command" | "exec" | "shell" | "bash" | "local_shell" | "run_terminal_command" => {
+            stats.terminal_commands = stats.terminal_commands.saturating_add(1);
+        }
+        "apply_patch" | "edit" | "edit_file" => {
+            stats.files_edited = stats.files_edited.saturating_add(1);
+        }
+        "read" | "read_file" | "view_file" => {
+            stats.files_read = stats.files_read.saturating_add(1);
+        }
+        "write" | "write_file" | "create_file" => {
+            stats.files_added = stats.files_added.saturating_add(1);
+        }
+        _ => {}
+    }
+}
+
 /// Returns (messages, detected_session_model_name)
 pub(crate) fn parse_codex_cli_jsonl_file(
     file_path: &Path,
@@ -360,6 +379,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
     let mut saw_token_usage = false;
     let mut _turn_context: Option<CodexCliTurnContext> = None;
     let mut current_tool_call_ids: HashSet<String> = HashSet::with_capacity(20);
+    let mut current_tool_stats = Stats::default();
     let mut session_name: Option<String> = None;
     let mut fallback_session_name: Option<String> = None;
     let mut project_path: Option<String> = None;
@@ -433,16 +453,20 @@ pub(crate) fn parse_codex_cli_jsonl_file(
             "response_item" => {
                 if let simd_json::OwnedValue::Object(map) = &wrapper.payload
                     && let Some(simd_json::OwnedValue::String(item_type)) = map.get("type")
-                    && item_type == "function_call"
+                    && matches!(item_type.as_str(), "function_call" | "custom_tool_call")
                 {
-                    if let Some(simd_json::OwnedValue::String(call_id)) = map.get("call_id") {
-                        current_tool_call_ids.insert(call_id.clone());
-                    } else {
-                        current_tool_call_ids.insert(format!(
+                    let call_id = match map.get("call_id") {
+                        Some(simd_json::OwnedValue::String(call_id)) => call_id.clone(),
+                        _ => format!(
                             "{}_{}",
                             wrapper.timestamp.to_rfc3339(),
                             current_tool_call_ids.len()
-                        ));
+                        ),
+                    };
+                    if current_tool_call_ids.insert(call_id)
+                        && let Some(simd_json::OwnedValue::String(name)) = map.get("name")
+                    {
+                        record_tool_call(name, &mut current_tool_stats);
                     }
                     continue;
                 }
@@ -622,8 +646,13 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 &model_state.name,
                                 wrapper.timestamp,
                             );
-                            stats.tool_calls = current_tool_call_ids.len() as u32;
+                            stats.tool_calls = current_tool_stats.tool_calls;
+                            stats.files_read = current_tool_stats.files_read;
+                            stats.files_edited = current_tool_stats.files_edited;
+                            stats.files_added = current_tool_stats.files_added;
+                            stats.terminal_commands = current_tool_stats.terminal_commands;
                             current_tool_call_ids.clear();
+                            current_tool_stats = Stats::default();
 
                             entries.push(ConversationMessage {
                                 application: Application::CodexCli,

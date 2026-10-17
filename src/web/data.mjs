@@ -95,13 +95,20 @@ export function bucketKeys(range, granularity, now) {
 }
 
 function emptyTotals() {
-  return { cost: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, messages: 0, toolCalls: 0, sessions: new Set(), dates: new Set() };
+  return {
+    cost: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, reasoningTokens: 0, messages: 0, toolCalls: 0,
+    filesRead: 0, filesEdited: 0, filesAdded: 0, terminalCommands: 0, sessions: new Set(), dates: new Set(),
+  };
 }
 
-const SUMMED = ['cost', 'inputTokens', 'outputTokens', 'cachedTokens', 'reasoningTokens', 'messages', 'toolCalls'];
+const SUMMED = [
+  'cost', 'inputTokens', 'outputTokens', 'cachedTokens', 'reasoningTokens', 'messages', 'toolCalls',
+  'filesRead', 'filesEdited', 'filesAdded', 'terminalCommands',
+];
 
 function addRow(totals, row) {
-  for (const field of SUMMED) totals[field] += row[field];
+  // Snapshots written before an activity field existed simply contribute zero.
+  for (const field of SUMMED) totals[field] += row[field] ?? 0;
   totals.sessions.add(row.session);
   totals.dates.add(row.date);
   return totals;

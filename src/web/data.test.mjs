@@ -11,7 +11,8 @@ import {
 
 const row = (overrides = {}) => ({
   date: '2025-12-31', hour: 23, model: 'a', project: 'p', tool: 't', session: 's',
-  inputTokens: 10, outputTokens: 3, cachedTokens: 2, reasoningTokens: 4, cost: 0.1, messages: 1, toolCalls: 0, ...overrides,
+  inputTokens: 10, outputTokens: 3, cachedTokens: 2, reasoningTokens: 4, cost: 0.1, messages: 1, toolCalls: 0,
+  filesRead: 0, filesEdited: 0, filesAdded: 0, terminalCommands: 0, ...overrides,
 });
 const filters = (overrides = {}) => ({ model: new Set(), project: new Set(), tool: new Set(), ...overrides });
 const now = new Date(2026, 0, 2, 12, 30);
@@ -71,10 +72,11 @@ test('stacked series preserve totals and keep entity colors when filtered', () =
 });
 
 test('totals, grouping, cache share, and concentration', () => {
-  const rows = [row({ session: 'x' }), row({ session: 'y', cost: 0.3, cachedTokens: 30 })];
+  const rows = [row({ session: 'x' }), row({ session: 'y', cost: 0.3, cachedTokens: 30, filesRead: 2, filesEdited: 1, terminalCommands: 3 })];
   const totals = sumRows(rows);
   assert.equal(totals.sessions.size, 2);
   assert.equal(cacheShare(totals), 32 / 52);
+  assert.deepEqual([totals.filesRead, totals.filesEdited, totals.filesAdded, totals.terminalCommands], [2, 1, 0, 3]);
   assert.equal(groupRows(rows, item => item.session).get('y').cost, 0.3);
   assert.deepEqual(topTenthShare([90, 5, 1, 1, 1, 1, 1, 0, 0, 0]), { count: 1, share: 0.9 });
   assert.equal(median([5, 1, 3]), 3);
@@ -92,8 +94,12 @@ test('weekday grid is Monday-first and axis steps are round', () => {
   assert.equal(niceStep(0), 1);
 });
 
-test('requests metric counts model replies', () => {
+test('replies metric counts model responses', () => {
   assert.equal(metricValue(row({ messages: 3 }), 'requests'), 3);
+});
+
+test('every locale presents the requests metric as replies', () => {
+  for (const locale of Object.values(messages)) assert.equal(locale.requests, locale.replies);
 });
 
 test('session shape bands cover every value without gaps or overlap', () => {
@@ -154,7 +160,7 @@ test('bookmarked dates must be valid calendar dates', () => {
     location, URLSearchParams, localDateKey, noon: key => new Date(`${key}T12:00:00`),
     VIEWS: ['overview', 'sessions', 'breakdown'], RANGES: ['today', '7', '30', '90', 'all'],
     METRICS: ['cost', 'tokens', 'requests'], DIMENSIONS: ['tool', 'model', 'project'],
-    GRANULARITIES: ['hour', 'day', 'week', 'month'], SORTS: ['recent', 'cost', 'tokens', 'duration'],
+    GRANULARITIES: ['hour', 'day', 'week', 'month'], SORTS: ['recent', 'cost', 'tokens', 'requests', 'duration'],
     BREAKDOWNS: ['period', 'project', 'model', 'tool'],
     SHAPES: ['messages', 'duration', 'toolCalls'],
   });
