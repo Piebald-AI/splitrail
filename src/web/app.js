@@ -833,9 +833,11 @@ function sessionsView(view) {
       list.length > shown.length
         ? h('button', { type: 'button', class: 'link', 'data-focus': 'load-more', onclick: () => { sessionLimit += SESSION_PAGE_SIZE; render(); } }, t('loadMore'))
         : null));
+  const ids = new Set(list.map(item => item.id));
+  const listTotals = sumRows(view.rows.filter(row => ids.has(row.session)));
   return [
-    list.length ? sessionKpis(list, view.totals) : null,
-    h('div', { class: 'sess-insights' }, shapeCard(list), activityCard(view)),
+    list.length ? sessionKpis(list, listTotals) : null,
+    h('div', { class: 'sess-insights' }, shapeCard(list), activityCard(listTotals)),
     h('div', { class: 'sess-layout' }, listCard, sessionDetail(selected)),
   ];
 }
@@ -882,8 +884,7 @@ function shapeCard(list) {
     h('p', { class: 'hint' }, t('shapeNote')));
 }
 
-function activityCard(view) {
-  const { totals } = view;
+function activityCard(totals) {
   const sessions = Math.max(1, totals.sessions.size);
   const filesChanged = totals.filesEdited + totals.filesAdded;
   const stat = (name, value, note) => h('div', { class: 'activity-stat' },
