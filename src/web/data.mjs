@@ -18,7 +18,9 @@ export function rowTokens(row) {
 }
 
 export function metricValue(row, metric) {
-  return metric === 'cost' ? row.cost : rowTokens(row);
+  if (metric === 'cost') return row.cost;
+  if (metric === 'requests') return row.messages;
+  return rowTokens(row);
 }
 
 export function localDateKey(date) {
@@ -188,4 +190,28 @@ export function median(values) {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length / 2)];
+}
+
+// Value at `fraction` of the sorted values; 0.9 is the p90.
+export function percentile(values, fraction) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(fraction * sorted.length) - 1))];
+}
+
+// Session shape bands. The last band is open-ended, and `duration` is minutes.
+export const SESSION_SHAPES = {
+  messages: [[1, 5], [6, 15], [16, 30], [31, 60], [61, 120], [121, Infinity]],
+  duration: [[0, 10], [11, 30], [31, 60], [61, 120], [121, 360], [361, Infinity]],
+  toolCalls: [[0, 0], [1, 5], [6, 20], [21, 50], [51, 100], [101, Infinity]],
+};
+
+// How many values land in each [min, max] band, in band order.
+export function histogram(values, buckets) {
+  const counts = new Array(buckets.length).fill(0);
+  for (const value of values) {
+    const index = buckets.findIndex(([min, max]) => value >= min && value <= max);
+    if (index !== -1) counts[index] += 1;
+  }
+  return counts;
 }

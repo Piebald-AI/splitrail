@@ -1,7 +1,7 @@
 import {
   OTHER, SESSION_PAGE_SIZE, rowTokens, localDateKey, shiftDate, periodKey, selectRange, inRange, matchesFilters,
   granularityOptions, bucketKeys, sumRows, groupRows, totalTokens, cacheShare, colorSlots, stackedSeries,
-  weekdayHourGrid, niceStep, topTenthShare, median, csv,
+  weekdayHourGrid, niceStep, topTenthShare, median, percentile, csv, SESSION_SHAPES, histogram,
 } from './data.mjs';
 import { messages } from './locales.mjs';
 
@@ -9,8 +9,11 @@ const DIMENSIONS = ['tool', 'model', 'project'];
 const VIEWS = ['overview', 'sessions', 'breakdown'];
 const RANGES = ['today', '7', '30', '90', 'all'];
 const RANGE_LABELS = { today: 'today', 7: 'last7', 30: 'last30', 90: 'last90', all: 'all' };
-const METRICS = ['cost', 'tokens'];
+const METRICS = ['cost', 'tokens', 'requests'];
 const SORTS = ['recent', 'cost', 'tokens', 'duration'];
+const SHAPES = ['messages', 'duration', 'toolCalls'];
+// The shape toggle labels reuse existing keys: replies, duration, tool calls.
+const SHAPE_LABELS = { messages: 'replies', duration: 'durationLabel', toolCalls: 'toolCalls' };
 const BREAKDOWNS = ['period', 'project', 'model', 'tool'];
 const GRANULARITIES = ['hour', 'day', 'week', 'month'];
 const PLOT_HEIGHT = 240;
@@ -129,7 +132,7 @@ function compact(value) {
 function defaultState() {
   return {
     view: 'overview', range: '30', day: null, metric: 'cost', group: 'model', granularity: null,
-    sort: 'recent', q: '', session: null, dim: 'project',
+    sort: 'recent', q: '', session: null, dim: 'project', shape: 'messages',
     filters: { tool: new Set(), model: new Set(), project: new Set() },
   };
 }
@@ -147,6 +150,7 @@ function readHash() {
   choose('granularity', GRANULARITIES);
   choose('sort', SORTS);
   choose('dim', BREAKDOWNS);
+  choose('shape', SHAPES);
   const day = params.get('day');
   if (/^\d{4}-\d{2}-\d{2}$/.test(day ?? '') && localDateKey(noon(day)) === day) next.day = day;
   next.q = params.get('q') ?? '';
@@ -158,7 +162,7 @@ function readHash() {
 function writeHash() {
   const params = new URLSearchParams();
   const defaults = defaultState();
-  for (const key of ['view', 'range', 'day', 'metric', 'group', 'granularity', 'sort', 'q', 'session', 'dim']) {
+  for (const key of ['view', 'range', 'day', 'metric', 'group', 'granularity', 'sort', 'q', 'session', 'dim', 'shape']) {
     if (state[key] && state[key] !== defaults[key]) params.set(key, state[key]);
   }
   for (const key of DIMENSIONS) for (const value of state.filters[key]) params.append(key, value);
@@ -265,8 +269,10 @@ function sessionMinutes(meta) {
   return Math.max(1, Math.round((meta.end - meta.start) / 60000));
 }
 
-const amount = totals => (state.metric === 'cost' ? totals.cost : totalTokens(totals));
-const formatAmount = value => (state.metric === 'cost' ? fmt.cost(value) : fmt.compact(value));
+const amount = totals => (state.metric === 'cost' ? totals.cost
+  : state.metric === 'requests' ? totals.messages : totalTokens(totals));
+const formatAmount = value => (state.metric === 'cost' ? fmt.cost(value)
+  : state.metric === 'requests' ? fmt.int(value) : fmt.compact(value));
 const formatAxis = value => (state.metric === 'cost' ? `$${fmt.compact(value)}` : fmt.compact(value));
 
 function compute() {
@@ -503,6 +509,8 @@ function kpiSection(view) {
       h('p', { class: 'small muted' }, average)),
     card(t('totalTokens'), fmt.compact(totalTokens(totals)), delta(totalTokens(totals), prev && totalTokens(prev), comparison),
       composition(totals, 'comp'), compositionLegend(totals)),
+    card(t('requests'), fmt.int(totals.messages), delta(totals.messages, prev?.messages, comparison),
+      h('p', { class: 'small muted' }, t('requestsSub')(fmt.compact(totals.messages ? totalTokens(totals) / totals.messages : 0)))),
     card(t('sessions'), fmt.int(totals.sessions.size), delta(totals.sessions.size, prev?.sessions.size, comparison),
       h('p', { class: 'small muted' }, durations.length ? t('sessionsSub')(fmt.duration(median(durations)), fmt.int(totals.messages)) : t('noSessions'))),
     card(t('cacheShare'), fmt.percent(cacheShare(totals)), prev ? points(cacheShare(totals), cacheShare(prev), comparison) : t('noComparison'),
@@ -547,7 +555,7 @@ function stackBar(series, index, total, height, dimension) {
 
 function trendSection(view) {
   const series = stackedSeries(view.rows, view.keys, view.granularity, state.group, state.metric, slots[state.group]);
-  const title = t('trendTitle')(t('every')[view.granularity], state.metric);
+  const title = t('trendTitle')(t('every')[view.granularity], t(state.metric));
   return h('section', { class: 'card trend' },
     sectionHead('01', title, t('stackedBy')(t(state.group), rangeLabel(view.range)),
       h('span', { class: 'small muted' }, t('group')),
@@ -754,9 +762,9 @@ function topSessionsSection(view) {
   const sessions = [...groupRows(view.rows, row => row.session)].filter(([id]) => snapshot.sessions.has(id));
   const ranked = sessions.sort((a, b) => amount(b[1]) - amount(a[1]));
   const { count, share } = topTenthShare(sessions.map(([, totals]) => totals.cost));
-  const sort = state.metric === 'cost' ? 'cost' : 'tokens';
+  const sort = state.metric === 'cost' ? 'cost' : state.metric === 'requests' ? 'recent' : 'tokens';
   return h('section', { class: 'card top' },
-    sectionHead('06', state.metric === 'cost' ? t('topByCost') : t('topByTokens'), null,
+    sectionHead('06', t({ cost: 'topByCost', tokens: 'topByTokens', requests: 'topByRequests' }[state.metric]), null,
       sessions.length ? h('span', { class: 'small muted' }, t('concentration')(fmt.int(count), fmt.percent(share, 0))) : null),
     ranked.slice(0, 5).map(([id, totals], index) => {
       const meta = snapshot.sessions.get(id);
@@ -814,7 +822,33 @@ function sessionsView(view) {
       list.length > shown.length
         ? h('button', { type: 'button', class: 'link', 'data-focus': 'load-more', onclick: () => { sessionLimit += SESSION_PAGE_SIZE; render(); } }, t('loadMore'))
         : null));
-  return [h('div', { class: 'sess-layout' }, listCard, sessionDetail(selected))];
+  return [shapeCard(list), h('div', { class: 'sess-layout' }, listCard, sessionDetail(selected))];
+}
+
+// Session shape: how the filtered sessions spread over size bands, in the
+// same spirit as Magpie's 会话形态 but limited to what local data records.
+function shapeCard(list) {
+  const buckets = SESSION_SHAPES[state.shape];
+  const value = item => (state.shape === 'messages' ? item.totals.messages
+    : state.shape === 'duration' ? sessionMinutes(item.meta) : item.totals.toolCalls);
+  const values = list.map(value);
+  const counts = histogram(values, buckets);
+  const max = Math.max(0, ...counts);
+  const label = ([min, max_]) => (max_ === Infinity ? t('bandPlus')(fmt.int(min)) : min === max_ ? fmt.int(min) : t('bandRange')(fmt.int(min), fmt.int(max_)));
+  // Median and p90 follow the selected band so the header matches the bars.
+  const format = value => (state.shape === 'duration' ? fmt.duration(value) : fmt.int(value));
+  const spread = values.length ? ` · ${t('sessionSpread')(format(median(values)), format(percentile(values, 0.9)))}` : '';
+  return h('section', { class: 'card shape', 'aria-label': t('sessionShape') },
+    sectionHead('01', t('sessionShape'), `${t('shapeSub')(fmt.int(list.length))}${spread}`,
+      segmented(t('sessionShape'), SHAPES.map(key => ({ value: key, label: t(SHAPE_LABELS[key]), pressed: state.shape === key })), shape => update({ shape }))),
+    h('div', { class: 'shape-bars' }, buckets.map((band, index) => h('div', {
+      class: 'shape-bar', title: t('shapeBand')(label(band), fmt.int(counts[index])),
+    },
+    h('span', { class: 'shape-plot' },
+      h('span', { class: 'num shape-count' }, counts[index] ? fmt.int(counts[index]) : ''),
+      h('span', { class: 'shape-fill', style: `height:${max ? (counts[index] / max) * 100 : 0}%` })),
+    h('span', { class: 'shape-label' }, label(band))))),
+    h('p', { class: 'hint' }, t('shapeNote')));
 }
 
 function sessionRow(item, modelTokens, selected) {
@@ -823,8 +857,10 @@ function sessionRow(item, modelTokens, selected) {
   const tokens = className => h('span', { class: `tokens-cell ${className}` },
     h('span', { class: 'num' }, fmt.compact(totalTokens(totals))), composition(totals, 'mini-comp'));
   const cost = className => h('span', { class: `num right ${className}` }, fmt.cost(totals.cost));
+  const requests = className => h('span', { class: `num right ${className}` }, fmt.int(totals.messages));
   // The selected metric is the emphasized last column, the only figure left on phones.
-  const [secondary, primary] = state.metric === 'cost' ? [tokens, cost] : [cost, tokens];
+  const [secondary, primary] = state.metric === 'cost' ? [tokens, cost]
+    : state.metric === 'requests' ? [cost, requests] : [cost, tokens];
   return h('button', {
     type: 'button', class: 'sess-grid sess-row', 'aria-pressed': String(selected), 'data-focus': `session:${item.id}`,
     onclick: () => {
@@ -898,6 +934,7 @@ function sessionDetail(item) {
       models.map(([model, modelTotals]) => h('div', { class: 'detail-model' },
         h('span', { class: 'rank-name' }, swatch(seriesColor('model', model)), h('span', { class: 'ellipsis' }, label('model', model))),
         h('span', { class: 'num muted' }, `${t('replyCount')(fmt.int(modelTotals.messages))} · ${fmt.compact(totalTokens(modelTotals))}`),
+        h('span', { class: 'num muted' }, t('cacheShort')(fmt.percent(cacheShare(modelTotals), 0))),
         h('span', { class: 'num right', style: 'font-weight:600' }, modelTotals.cost > 0 ? fmt.cost(modelTotals.cost) : t('noPrice'))))),
     h('div', {}, h('h3', {}, t('tokenMix')), composition(totals, 'comp'), compositionLegend(totals)),
     h('div', { class: 'detail-id' }, h('span', { class: 'mono small muted ellipsis', title: meta.id }, meta.id), copy),
@@ -916,13 +953,17 @@ function breakdownView(view) {
   // Token counts are compact so every column fits; the exact count is the cell's title.
   const tokens = value => (value ? h('td', { title: fmt.int(value) }, fmt.compact(value)) : h('td', {}, '—'));
   const share = totals => h('td', {}, amount(view.totals) > 0 ? fmt.percent(amount(totals) / amount(view.totals)) : '—');
-  const costColumn = ['cost', totals => h('td', {}, fmt.cost(totals.cost))];
-  const tokensColumn = ['totalTokens', totals => tokens(totalTokens(totals))];
-  // The selected metric leads the table and its share follows it.
+  // Each metric has a value column and a share column; the selected metric
+  // leads the table with its share, the other two follow.
+  const metricColumns = {
+    cost: ['cost', totals => h('td', {}, fmt.cost(totals.cost))],
+    tokens: ['totalTokens', totals => tokens(totalTokens(totals))],
+    requests: ['requests', totals => h('td', {}, fmt.int(totals.messages))],
+  };
+  const shareNames = { cost: 'shareOfCost', tokens: 'shareOfTokens', requests: 'shareOfRequests' };
+  const rest = Object.keys(metricColumns).filter(name => name !== state.metric);
   const columns = [
-    ...(state.metric === 'cost'
-      ? [costColumn, ['shareOfCost', share], tokensColumn]
-      : [tokensColumn, ['shareOfTokens', share], costColumn]),
+    metricColumns[state.metric], [shareNames[state.metric], share], ...rest.map(name => metricColumns[name]),
     ['input', totals => tokens(totals.inputTokens)],
     ['cached', totals => tokens(totals.cachedTokens)],
     ['output', totals => tokens(totals.outputTokens)],
@@ -930,7 +971,8 @@ function breakdownView(view) {
     ['cacheShare', totals => h('td', {}, fmt.percent(cacheShare(totals)))],
     ['averagePrice', totals => h('td', {}, totals.cost > 0 && totalTokens(totals) > 0 ? fmt.cost((totals.cost / totalTokens(totals)) * 1e6) : '—')],
     ['sessions', totals => h('td', {}, fmt.int(totals.sessions.size))],
-    ['replies', totals => h('td', {}, fmt.int(totals.messages))],
+    // Requests are the model replies, so the metric column already shows them.
+    ...(state.metric === 'requests' ? [] : [['replies', totals => h('td', {}, fmt.int(totals.messages))]]),
   ];
   const cells = totals => columns.map(([, cell]) => cell(totals));
   const exportValues = totals => {
@@ -940,6 +982,7 @@ function breakdownView(view) {
       cacheShare: cacheShare(totals), sessions: totals.sessions.size, replies: totals.messages,
       shareOfCost: amount(view.totals) > 0 ? amount(totals) / amount(view.totals) : '',
       shareOfTokens: amount(view.totals) > 0 ? amount(totals) / amount(view.totals) : '',
+      shareOfRequests: amount(view.totals) > 0 ? amount(totals) / amount(view.totals) : '',
       averagePrice: totals.cost > 0 && totalTokens(totals) > 0 ? totals.cost / totalTokens(totals) * 1e6 : '',
     };
     return columns.map(([name]) => values[name]);

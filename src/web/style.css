@@ -92,7 +92,7 @@ select.btn { padding-right: 6px; }
 .section-title h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
 .section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 
-.kpis { display: grid; grid-template-columns: minmax(0, 1.7fr) repeat(3, minmax(0, 1fr)); gap: 12px; }
+.kpis { display: grid; grid-template-columns: minmax(0, 1.7fr) repeat(4, minmax(0, 1fr)); gap: 12px; }
 .kpi { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px 16px; }
 .kpi-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .kpi-label { font-size: 13px; font-weight: 500; color: var(--ink-2); }
@@ -180,6 +180,15 @@ select.btn { padding-right: 6px; }
 .block { display: block; }
 
 .sess-layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 12px; align-items: start; }
+.shape { padding: 14px 20px 12px; }
+.shape .section-head { margin-bottom: 14px; }
+.shape-bars { display: flex; gap: 8px; }
+.shape-bar { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; }
+/* Counts ride above each bar, so the bars need a fixed plot height of their own. */
+.shape-plot { position: relative; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 150px; }
+.shape-count { font-size: 12px; font-weight: 600; }
+.shape-fill { width: 100%; max-width: 64px; min-height: 2px; border-radius: 4px 4px 0 0; background: var(--brand); }
+.shape-label { padding-top: 6px; border-top: 1px solid var(--axis); font-size: 11px; color: var(--muted); text-align: center; white-space: nowrap; }
 .sess-list { padding: 12px 0 4px; }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 0 16px 12px; }
 .search { position: relative; display: flex; align-items: center; flex: 1 1 240px; max-width: 360px; }
@@ -209,7 +218,7 @@ select.btn { padding-right: 6px; }
 .timeline .stack { width: 70%; }
 .timeline-labels { display: flex; gap: 4px; margin-top: 6px; }
 .timeline-labels span { flex: 1 1 0; min-width: 0; text-align: center; font-size: 10px; color: var(--muted); white-space: nowrap; }
-.detail-model { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.detail-model { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 10px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
 .detail-id { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
 .detail-id .btn { min-height: 28px; font-size: 12px; }
 .detail > .btn { justify-content: center; }
