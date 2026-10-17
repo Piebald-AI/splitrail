@@ -38,6 +38,14 @@ struct HourlyUsage {
     cost: f64,
     messages: u32,
     tool_calls: u32,
+    #[serde(default)]
+    files_read: u64,
+    #[serde(default)]
+    files_edited: u64,
+    #[serde(default)]
+    files_added: u64,
+    #[serde(default)]
+    terminal_commands: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -49,6 +57,10 @@ struct SessionInfo {
     project: String,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
+    #[serde(default)]
+    active_minutes: u32,
+    #[serde(skip)]
+    timestamps: Vec<DateTime<Utc>>,
 }
 
 /// A project assembled from several paths (worktrees, moves, subdirectories).
@@ -65,6 +77,16 @@ struct UsageSnapshot {
     rows: Vec<HourlyUsage>,
     sessions: Vec<SessionInfo>,
     projects: Vec<ProjectInfo>,
+}
+
+fn active_minutes(timestamps: &mut [DateTime<Utc>]) -> u32 {
+    timestamps.sort_unstable();
+    let seconds: i64 = timestamps
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).num_seconds())
+        .filter(|seconds| *seconds > 0 && *seconds < 5 * 60)
+        .sum();
+    u32::try_from((seconds.max(60) + 59) / 60).unwrap_or(u32::MAX)
 }
 
 fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
@@ -114,12 +136,15 @@ fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
                 project: project.to_string(),
                 start: message.date,
                 end: message.date,
+                active_minutes: 0,
+                timestamps: Vec::new(),
             });
         if message.date < session.start {
             session.start = message.date;
             session.project = project.to_string();
         }
         session.end = session.end.max(message.date);
+        session.timestamps.push(message.date);
         if session.name.is_none() {
             session.name.clone_from(&message.session_name);
         }
@@ -162,6 +187,12 @@ fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
         row.cost += message.stats.cost;
         row.messages = row.messages.saturating_add(1);
         row.tool_calls = row.tool_calls.saturating_add(message.stats.tool_calls);
+        row.files_read = row.files_read.saturating_add(message.stats.files_read);
+        row.files_edited = row.files_edited.saturating_add(message.stats.files_edited);
+        row.files_added = row.files_added.saturating_add(message.stats.files_added);
+        row.terminal_commands = row
+            .terminal_commands
+            .saturating_add(message.stats.terminal_commands);
     }
 
     let rows: Vec<HourlyUsage> = hours
@@ -178,6 +209,10 @@ fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
     let mut sessions: Vec<SessionInfo> = sessions
         .into_values()
         .filter(|session| used_sessions.contains(session.id.as_str()))
+        .map(|mut session| {
+            session.active_minutes = active_minutes(&mut session.timestamps);
+            session
+        })
         .collect();
     sessions.sort_by(|left, right| {
         left.start
@@ -909,5 +944,47 @@ mod tests {
         assert_eq!(snapshot.rows[0].input_tokens, 0);
         assert_eq!(snapshot.rows[0].cost, 0.5);
         assert_eq!(snapshot.sessions.len(), 1);
+    }
+
+    #[test]
+    fn session_activity_counts_short_gaps_and_file_operations() {
+        let message_at = |minute| ConversationMessage {
+            application: Application::CodexCli,
+            date: Utc.with_ymd_and_hms(2026, 9, 22, 12, minute, 0).unwrap(),
+            project_hash: "hash".into(),
+            project_path: Some("/work/project".into()),
+            conversation_hash: "session".into(),
+            local_hash: None,
+            global_hash: format!("message-{minute}"),
+            model: Some("gpt-test".into()),
+            stats: Stats {
+                input_tokens: 10,
+                files_read: 2,
+                files_edited: 1,
+                files_added: 1,
+                terminal_commands: 1,
+                tool_calls: 1,
+                ..Default::default()
+            },
+            role: MessageRole::Assistant,
+            uuid: None,
+            session_name: None,
+        };
+        let stats = MultiAnalyzerStats {
+            analyzer_stats: vec![AgenticCodingToolStats {
+                daily_stats: BTreeMap::new(),
+                num_conversations: 1,
+                messages: vec![message_at(0), message_at(2), message_at(10)],
+                analyzer_name: "Codex CLI".into(),
+            }],
+        };
+
+        let snapshot = usage_snapshot(&stats);
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].files_read, 6);
+        assert_eq!(snapshot.rows[0].files_edited, 3);
+        assert_eq!(snapshot.rows[0].files_added, 3);
+        assert_eq!(snapshot.rows[0].terminal_commands, 3);
+        assert_eq!(snapshot.sessions[0].active_minutes, 2);
     }
 }

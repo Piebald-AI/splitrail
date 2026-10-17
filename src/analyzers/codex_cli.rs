@@ -91,25 +91,38 @@ pub(crate) fn data_dirs_with_roots(
         .unwrap_or_default()
 }
 
+/// Session files are plain JSONL, or `*.jsonl.zst` once Codex compresses them.
+fn session_file_name(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    Some(name.strip_suffix(".zst").unwrap_or(name))
+}
+
+pub(crate) fn is_codex_session_file(path: &Path) -> bool {
+    session_file_name(path).is_some_and(|name| name.ends_with(".jsonl"))
+}
+
 pub(crate) fn canonical_session_path(file_path: &Path) -> PathBuf {
+    // Drop a compression suffix so a session keeps the same identity (and hash)
+    // after Codex compresses it in place.
+    let Some(file_name) = session_file_name(file_path) else {
+        return file_path.to_path_buf();
+    };
+    let uncompressed_path = file_path.with_file_name(file_name);
     let Some(archive_dir) = file_path
         .ancestors()
         .find(|path| path.file_name() == Some(OsStr::new("archived_sessions")))
     else {
-        return file_path.to_path_buf();
+        return uncompressed_path;
     };
     let Some(codex_dir) = archive_dir.parent() else {
-        return file_path.to_path_buf();
-    };
-    let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) else {
-        return file_path.to_path_buf();
+        return uncompressed_path;
     };
     let Some(date) = file_name
         .strip_prefix("rollout-")
         .and_then(|rest| rest.get(..10))
         .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
     else {
-        return file_path.to_path_buf();
+        return uncompressed_path;
     };
 
     codex_dir
@@ -129,13 +142,7 @@ pub(crate) fn discover_data_sources_in(
         .filter(|dir| dir.is_dir())
         .flat_map(|dir| WalkDir::new(dir).into_iter())
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry.file_type().is_file()
-                && entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "jsonl")
-        })
+        .filter(|entry| entry.file_type().is_file() && is_codex_session_file(entry.path()))
         .filter(|entry| seen_sessions.insert(canonical_session_path(entry.path())))
         .map(|entry| DataSource {
             path: entry.into_path(),
@@ -145,9 +152,7 @@ pub(crate) fn discover_data_sources_in(
 
 pub(crate) fn is_valid_data_path_in(path: &Path, data_dirs: &[PathBuf]) -> bool {
     path.is_file()
-        && path
-            .extension()
-            .is_some_and(|extension| extension == "jsonl")
+        && is_codex_session_file(path)
         && data_dirs.iter().any(|data_dir| path.starts_with(data_dir))
 }
 
@@ -160,7 +165,13 @@ impl Analyzer for CodexCliAnalyzer {
     fn get_data_glob_patterns(&self) -> Vec<String> {
         Self::data_dirs()
             .into_iter()
-            .map(|data_dir| format!("{}/**/*.jsonl", data_dir.to_string_lossy()))
+            .flat_map(|data_dir| {
+                let base = data_dir.to_string_lossy().into_owned();
+                [
+                    format!("{base}/**/*.jsonl"),
+                    format!("{base}/**/*.jsonl.zst"),
+                ]
+            })
             .collect()
     }
 
@@ -174,9 +185,7 @@ impl Analyzer for CodexCliAnalyzer {
             .filter(|d| d.is_dir())
             .flat_map(|dir| WalkDir::new(dir).into_iter())
             .filter_map(|e| e.ok())
-            .any(|e| {
-                e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "jsonl")
-            })
+            .any(|e| e.file_type().is_file() && is_codex_session_file(e.path()))
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
@@ -314,6 +323,25 @@ fn is_noise_title_candidate(text: &str) -> bool {
         || trimmed.starts_with("# AGENTS.md instructions for")
 }
 
+fn record_tool_call(name: &str, stats: &mut Stats) {
+    stats.tool_calls = stats.tool_calls.saturating_add(1);
+    match name {
+        "exec_command" | "exec" | "shell" | "bash" | "local_shell" | "run_terminal_command" => {
+            stats.terminal_commands = stats.terminal_commands.saturating_add(1);
+        }
+        "apply_patch" | "edit" | "edit_file" => {
+            stats.files_edited = stats.files_edited.saturating_add(1);
+        }
+        "read" | "read_file" | "view_file" => {
+            stats.files_read = stats.files_read.saturating_add(1);
+        }
+        "write" | "write_file" | "create_file" => {
+            stats.files_added = stats.files_added.saturating_add(1);
+        }
+        _ => {}
+    }
+}
+
 /// Returns (messages, detected_session_model_name)
 pub(crate) fn parse_codex_cli_jsonl_file(
     file_path: &Path,
@@ -325,17 +353,33 @@ pub(crate) fn parse_codex_cli_jsonl_file(
         .to_string_lossy()
         .into_owned();
 
-    let mut file = File::open(file_path)?;
-
-    // Read entire file at once to avoid per-line allocations
+    // Read entire file at once to avoid per-line allocations. Codex compresses
+    // closed sessions in place to `*.jsonl.zst`, which is transparently decoded
+    // here so both forms parse identically. The local data is never rewritten.
     let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
+    if file_path
+        .extension()
+        .is_some_and(|extension| extension == "zst")
+    {
+        let mut decoder = zstd::stream::read::Decoder::new(File::open(file_path)?)?;
+        // A torn or truncated frame still decodes its complete blocks, so keep
+        // those messages instead of dropping the whole session.
+        if let Err(error) = decoder.read_to_end(&mut buffer) {
+            warn_once(format!(
+                "WARNING: Codex session {file_path_str} has a truncated compressed tail; parsing {} decoded bytes: {error}",
+                buffer.len()
+            ));
+        }
+    } else {
+        File::open(file_path)?.read_to_end(&mut buffer)?;
+    }
 
     let mut session_model: Option<SessionModel> = None;
     let mut previous_total_usage: Option<CodexCliTokenUsage> = None;
     let mut saw_token_usage = false;
     let mut _turn_context: Option<CodexCliTurnContext> = None;
     let mut current_tool_call_ids: HashSet<String> = HashSet::with_capacity(20);
+    let mut current_tool_stats = Stats::default();
     let mut session_name: Option<String> = None;
     let mut fallback_session_name: Option<String> = None;
     let mut project_path: Option<String> = None;
@@ -409,16 +453,20 @@ pub(crate) fn parse_codex_cli_jsonl_file(
             "response_item" => {
                 if let simd_json::OwnedValue::Object(map) = &wrapper.payload
                     && let Some(simd_json::OwnedValue::String(item_type)) = map.get("type")
-                    && item_type == "function_call"
+                    && matches!(item_type.as_str(), "function_call" | "custom_tool_call")
                 {
-                    if let Some(simd_json::OwnedValue::String(call_id)) = map.get("call_id") {
-                        current_tool_call_ids.insert(call_id.clone());
-                    } else {
-                        current_tool_call_ids.insert(format!(
+                    let call_id = match map.get("call_id") {
+                        Some(simd_json::OwnedValue::String(call_id)) => call_id.clone(),
+                        _ => format!(
                             "{}_{}",
                             wrapper.timestamp.to_rfc3339(),
                             current_tool_call_ids.len()
-                        ));
+                        ),
+                    };
+                    if current_tool_call_ids.insert(call_id)
+                        && let Some(simd_json::OwnedValue::String(name)) = map.get("name")
+                    {
+                        record_tool_call(name, &mut current_tool_stats);
                     }
                     continue;
                 }
@@ -598,8 +646,13 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 &model_state.name,
                                 wrapper.timestamp,
                             );
-                            stats.tool_calls = current_tool_call_ids.len() as u32;
+                            stats.tool_calls = current_tool_stats.tool_calls;
+                            stats.files_read = current_tool_stats.files_read;
+                            stats.files_edited = current_tool_stats.files_edited;
+                            stats.files_added = current_tool_stats.files_added;
+                            stats.terminal_commands = current_tool_stats.terminal_commands;
                             current_tool_call_ids.clear();
+                            current_tool_stats = Stats::default();
 
                             entries.push(ConversationMessage {
                                 application: Application::CodexCli,
