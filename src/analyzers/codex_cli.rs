@@ -122,7 +122,7 @@ pub(crate) fn canonical_session_path(file_path: &Path) -> PathBuf {
         .and_then(|rest| rest.get(..10))
         .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
     else {
-        return file_path.to_path_buf();
+        return uncompressed_path;
     };
 
     codex_dir

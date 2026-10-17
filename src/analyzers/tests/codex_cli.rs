@@ -79,6 +79,19 @@ fn test_archived_session_uses_original_active_path_as_identity() {
 }
 
 #[test]
+fn test_unparseable_archived_session_ignores_compression_suffix() {
+    let home = std::path::PathBuf::from("/home/test");
+    let archived = home
+        .join(".codex/archived_sessions")
+        .join("session.jsonl.zst");
+
+    assert_eq!(
+        canonical_session_path(&archived),
+        home.join(".codex/archived_sessions/session.jsonl")
+    );
+}
+
+#[test]
 fn test_active_and_archived_copies_are_discovered_once() {
     let temp_dir = tempfile::tempdir().unwrap();
     let active_dir = temp_dir.path().join(".codex/sessions/2026/07/22");
