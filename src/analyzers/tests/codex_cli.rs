@@ -569,6 +569,7 @@ fn test_parse_codex_cli_maps_tool_calls_to_activity_stats() {
         r#"{{"timestamp":"2026-10-17T12:00:05.000Z","type":"response_item","payload":{{"type":"custom_tool_call","name":"write_file","input":"hello","call_id":"call_write"}}}}"#
     )
     .unwrap();
+    let before_usage_len = temp_file.as_file().metadata().unwrap().len();
     writeln!(
         temp_file,
         r#"{{"timestamp":"2026-10-17T12:00:06.000Z","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5,"total_tokens":155}}}}}}}}"#
@@ -591,7 +592,7 @@ fn test_parse_codex_cli_maps_tool_calls_to_activity_stats() {
         .iter()
         .enumerate()
     {
-        writeln!(temp_file, r#"{{"timestamp":"2026-10-17T12:00:07.000Z","type":"response_item","payload":{{"type":"function_call","name":"{name}","arguments":"{{}}","call_id":"tail_{index}"}}}}"#).unwrap();
+        writeln!(temp_file, r#"{{"timestamp":"2026-10-18T12:00:07.000Z","type":"response_item","payload":{{"type":"function_call","name":"{name}","arguments":"{{}}","call_id":"tail_{index}"}}}}"#).unwrap();
     }
     writeln!(temp_file, r#"{{"timestamp":"2026-10-17T12:00:08.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Continue"}}]}}}}"#).unwrap();
     let (messages, _) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
@@ -599,17 +600,56 @@ fn test_parse_codex_cli_maps_tool_calls_to_activity_stats() {
         .iter()
         .find(|msg| msg.stats.input_tokens > 0)
         .unwrap();
-    assert_eq!(usage.stats.tool_calls, 8);
-    assert_eq!(usage.stats.terminal_commands, 2);
-    assert_eq!(usage.stats.files_read, 2);
-    assert_eq!(usage.stats.files_edited, 2);
-    assert_eq!(usage.stats.files_added, 2);
+    assert_eq!(usage.stats.tool_calls, 4);
+    assert_eq!(
+        messages.iter().map(|msg| msg.stats.tool_calls).sum::<u32>(),
+        8
+    );
+    let trailing: Vec<_> = messages
+        .iter()
+        .filter(|msg| msg.date.date_naive().to_string() == "2026-10-18")
+        .collect();
+    assert_eq!(trailing.len(), 4);
+    assert_eq!(
+        trailing
+            .iter()
+            .map(|msg| msg.stats.terminal_commands)
+            .sum::<u64>(),
+        1
+    );
+    assert_eq!(
+        trailing.iter().map(|msg| msg.stats.files_read).sum::<u64>(),
+        1
+    );
+    assert_eq!(
+        trailing
+            .iter()
+            .map(|msg| msg.stats.files_edited)
+            .sum::<u64>(),
+        1
+    );
+    assert_eq!(
+        trailing
+            .iter()
+            .map(|msg| msg.stats.files_added)
+            .sum::<u64>(),
+        1
+    );
     assert_eq!(usage.stats.input_tokens, assistant_msg.stats.input_tokens);
     assert_eq!(usage.stats.output_tokens, assistant_msg.stats.output_tokens);
-    assert!(matches!(
-        messages.last().unwrap().role,
-        crate::types::MessageRole::User
-    ));
+    temp_file.as_file().set_len(before_usage_len).unwrap();
+    let (messages, _) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let activity: Vec<_> = messages
+        .iter()
+        .filter(|msg| msg.stats.tool_calls > 0)
+        .collect();
+    assert_eq!(activity.len(), 4);
+    assert!(
+        activity
+            .iter()
+            .all(|msg| msg.stats.input_tokens == 0 && msg.stats.output_tokens == 0)
+    );
+    assert_eq!(activity[0].date.to_rfc3339(), "2026-10-17T12:00:02+00:00");
 }
 
 #[test]
