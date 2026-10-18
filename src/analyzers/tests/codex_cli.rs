@@ -153,8 +153,13 @@ fn test_compressed_session_is_discovered_and_deduped_with_plain_copy() {
 fn test_compressed_session_parses_like_plain() {
     let temp_dir = tempfile::tempdir().unwrap();
     let home = temp_dir.path();
-    let active_dir = home.join(".codex/sessions/2026/07/22");
-    let archived_dir = home.join(".codex/archived_sessions");
+    let active_dir = home
+        .join(".codex")
+        .join("sessions")
+        .join("2026")
+        .join("07")
+        .join("22");
+    let archived_dir = home.join(".codex").join("archived_sessions");
     std::fs::create_dir_all(&active_dir).unwrap();
     std::fs::create_dir_all(&archived_dir).unwrap();
     let plain_path = active_dir.join(SESSION_FILE_NAME);
