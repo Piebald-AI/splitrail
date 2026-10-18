@@ -380,6 +380,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
     let mut _turn_context: Option<CodexCliTurnContext> = None;
     let mut current_tool_call_ids: HashSet<String> = HashSet::with_capacity(20);
     let mut current_tool_stats = Stats::default();
+    let mut last_usage_entry = None;
     let mut session_name: Option<String> = None;
     let mut fallback_session_name: Option<String> = None;
     let mut project_path: Option<String> = None;
@@ -676,6 +677,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                     .or_else(|| fallback_session_name.clone()),
                             });
 
+                            last_usage_entry = Some(entries.len() - 1);
                             saw_token_usage = true;
                         }
                     }
@@ -685,6 +687,25 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                 // Skip other types for now
             }
         }
+    }
+
+    if let Some(index) = last_usage_entry {
+        let stats = &mut entries[index].stats;
+        stats.tool_calls = stats
+            .tool_calls
+            .saturating_add(current_tool_stats.tool_calls);
+        stats.files_read = stats
+            .files_read
+            .saturating_add(current_tool_stats.files_read);
+        stats.files_edited = stats
+            .files_edited
+            .saturating_add(current_tool_stats.files_edited);
+        stats.files_added = stats
+            .files_added
+            .saturating_add(current_tool_stats.files_added);
+        stats.terminal_commands = stats
+            .terminal_commands
+            .saturating_add(current_tool_stats.terminal_commands);
     }
 
     // Return both messages and the detected session model name

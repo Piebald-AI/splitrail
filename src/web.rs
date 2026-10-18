@@ -203,6 +203,11 @@ fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
                 || row.cached_tokens > 0
                 || row.reasoning_tokens > 0
                 || row.cost > 0.0
+                || row.tool_calls > 0
+                || row.files_read > 0
+                || row.files_edited > 0
+                || row.files_added > 0
+                || row.terminal_commands > 0
         })
         .collect();
     let used_sessions: HashSet<&str> = rows.iter().map(|row| row.session.as_str()).collect();
@@ -1033,5 +1038,35 @@ mod tests {
         assert_eq!(snapshot.rows[0].files_added, 3);
         assert_eq!(snapshot.rows[0].terminal_commands, 3);
         assert_eq!(snapshot.sessions[0].active_minutes, 2);
+
+        for activity in [
+            Stats {
+                tool_calls: 1,
+                ..Default::default()
+            },
+            Stats {
+                files_read: 1,
+                ..Default::default()
+            },
+            Stats {
+                files_edited: 1,
+                ..Default::default()
+            },
+            Stats {
+                files_added: 1,
+                ..Default::default()
+            },
+            Stats {
+                terminal_commands: 1,
+                ..Default::default()
+            },
+        ] {
+            let mut stats = stats.clone();
+            stats.analyzer_stats[0].messages.truncate(1);
+            stats.analyzer_stats[0].messages[0].stats = activity;
+            let snapshot = usage_snapshot(&stats);
+            assert_eq!(snapshot.rows.len(), 1, "activity-only row must be retained");
+            assert_eq!(snapshot.sessions.len(), 1);
+        }
     }
 }

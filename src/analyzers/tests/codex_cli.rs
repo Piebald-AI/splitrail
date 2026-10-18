@@ -586,6 +586,30 @@ fn test_parse_codex_cli_maps_tool_calls_to_activity_stats() {
     assert_eq!(assistant_msg.stats.files_edited, 1);
     assert_eq!(assistant_msg.stats.files_read, 1);
     assert_eq!(assistant_msg.stats.files_added, 1);
+
+    for (index, name) in ["exec_command", "read_file", "apply_patch", "write_file"]
+        .iter()
+        .enumerate()
+    {
+        writeln!(temp_file, r#"{{"timestamp":"2026-10-17T12:00:07.000Z","type":"response_item","payload":{{"type":"function_call","name":"{name}","arguments":"{{}}","call_id":"tail_{index}"}}}}"#).unwrap();
+    }
+    writeln!(temp_file, r#"{{"timestamp":"2026-10-17T12:00:08.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Continue"}}]}}}}"#).unwrap();
+    let (messages, _) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    let usage = messages
+        .iter()
+        .find(|msg| msg.stats.input_tokens > 0)
+        .unwrap();
+    assert_eq!(usage.stats.tool_calls, 8);
+    assert_eq!(usage.stats.terminal_commands, 2);
+    assert_eq!(usage.stats.files_read, 2);
+    assert_eq!(usage.stats.files_edited, 2);
+    assert_eq!(usage.stats.files_added, 2);
+    assert_eq!(usage.stats.input_tokens, assistant_msg.stats.input_tokens);
+    assert_eq!(usage.stats.output_tokens, assistant_msg.stats.output_tokens);
+    assert!(matches!(
+        messages.last().unwrap().role,
+        crate::types::MessageRole::User
+    ));
 }
 
 #[test]
