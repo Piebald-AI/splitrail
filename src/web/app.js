@@ -1,7 +1,7 @@
 import {
   OTHER, SESSION_PAGE_SIZE, rowTokens, localDateKey, shiftDate, periodKey, selectRange, inRange, matchesFilters,
   granularityOptions, bucketKeys, sumRows, groupRows, totalTokens, cacheShare, colorSlots, stackedSeries,
-  weekdayHourGrid, niceStep, topTenthShare, median, percentile, csv, SESSION_SHAPES, histogram,
+  weekdayHourGrid, niceStep, topTenthShare, median, percentile, csv, SESSION_SHAPES, histogram, mapModelAliases,
 } from './data.mjs';
 import { messages } from './locales.mjs';
 
@@ -219,7 +219,7 @@ document.addEventListener('visibilitychange', () => {
 function prepare(data) {
   const projects = new Map(data.projects.map(project => [project.id, project.paths]));
   return {
-    rows: data.rows,
+    rows: mapModelAliases(data.rows, data.modelAliases),
     sessions: new Map(data.sessions.map(session => [session.id, { ...session, start: new Date(session.start), end: new Date(session.end) }])),
     projects,
     labels: projectLabels([...projects.keys()], projects),
@@ -989,6 +989,8 @@ function sessionDetail(item) {
       models.map(([model, modelTotals]) => h('div', { class: 'detail-model' },
         h('span', { class: 'rank-name', title: label('model', model) },
           swatch(seriesColor('model', model)), h('span', { class: 'model-name' }, label('model', model))),
+        [...new Set(rows.filter(row => row.model === model && row.originalModel !== model).map(row => row.originalModel))]
+          .map(original => h('span', { class: 'small muted model-name' }, original)),
         h('span', { class: 'detail-model-stats' },
           h('span', { class: 'num muted' }, `${t('replyCount')(fmt.int(modelTotals.messages))} · ${fmt.compact(totalTokens(modelTotals))}`),
           h('span', { class: 'num muted' }, t('cacheShort')(fmt.percent(cacheShare(modelTotals), 0))),

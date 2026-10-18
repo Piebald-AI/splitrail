@@ -4,6 +4,23 @@
 export const OTHER = '\u0000other';
 export const SESSION_PAGE_SIZE = 50;
 
+// Only user-configured aliases change display grouping; cached rows stay raw.
+export function mapModelAliases(rows, aliases = {}) {
+  const mapping = new Map(Object.entries(aliases));
+  return rows.map(row => {
+    let model = row.model;
+    const base = model.slice(model.lastIndexOf('/') + 1);
+    if (!mapping.has(model) && mapping.has(base)) model = base;
+    const visited = new Set();
+    while (mapping.has(model)) {
+      if (visited.has(model)) return { ...row, originalModel: row.model };
+      visited.add(model);
+      model = mapping.get(model);
+    }
+    return { ...row, model, originalModel: row.model };
+  });
+}
+
 // Quote every field and keep labels from being interpreted as spreadsheet formulas.
 export function csv(rows) {
   return rows.map(row => row.map(value => {

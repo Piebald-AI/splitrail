@@ -252,6 +252,15 @@ struct UsageState {
     cached: parking_lot::RwLock<Option<CachedUsage>>,
     scan: tokio::sync::Mutex<()>,
     cache_path: Option<PathBuf>,
+    model_aliases: HashMap<String, String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageResponse<'a> {
+    #[serde(flatten)]
+    snapshot: &'a UsageSnapshot,
+    model_aliases: &'a HashMap<String, String>,
 }
 
 fn cache_timezone() -> String {
@@ -399,7 +408,10 @@ async fn usage(State(state): State<Arc<UsageState>>, Query(query): Query<UsageQu
             });
             (
                 [("x-splitrail-stale", if stale { "true" } else { "false" })],
-                Json(snapshot.as_ref()),
+                Json(UsageResponse {
+                    snapshot: snapshot.as_ref(),
+                    model_aliases: &state.model_aliases,
+                }),
             )
                 .into_response()
         }
@@ -491,17 +503,17 @@ fn app() -> Router {
     app_with_state(Arc::new(UsageState::default()))
 }
 
-pub async fn run(port: u16) -> Result<()> {
+pub async fn run(port: u16, model_aliases: HashMap<String, String>) -> Result<()> {
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("Failed to listen on {address}"))?;
     println!("Splitrail web: http://{address}");
-    let state = Arc::new(
-        dirs::cache_dir().map_or_else(UsageState::default, |directory| {
-            UsageState::persistent(directory.join("splitrail").join("web-usage-v1.json"))
-        }),
-    );
+    let mut state = dirs::cache_dir().map_or_else(UsageState::default, |directory| {
+        UsageState::persistent(directory.join("splitrail").join("web-usage-v1.json"))
+    });
+    state.model_aliases = model_aliases;
+    let state = Arc::new(state);
     if state.cached.read().is_some() {
         let refresh = state.clone();
         tokio::spawn(async move {
@@ -739,6 +751,41 @@ mod tests {
             .await
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &retry));
+    }
+
+    #[tokio::test]
+    async fn serves_current_aliases_with_raw_cached_models() {
+        use crate::reqwest_simd_json::ResponseSimdJsonExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut snapshot = snapshot_with_input(10);
+        snapshot.rows[0].model = "group/auto-flash".into();
+        let state = Arc::new(UsageState {
+            model_aliases: HashMap::from([("group/auto-flash".into(), "flash".into())]),
+            cached: parking_lot::RwLock::new(Some(CachedUsage {
+                snapshot: Arc::new(snapshot),
+                completed_at: Instant::now(),
+                from_disk: true,
+            })),
+            ..Default::default()
+        });
+        let server =
+            tokio::spawn(async move { axum::serve(listener, app_with_state(state)).await });
+        let response: simd_json::OwnedValue = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/api/usage"))
+            .send()
+            .await
+            .unwrap()
+            .simd_json()
+            .await
+            .unwrap();
+        assert_eq!(response["modelAliases"]["group/auto-flash"], "flash");
+        assert_eq!(response["rows"][0]["model"], "group/auto-flash");
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]

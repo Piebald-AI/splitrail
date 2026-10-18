@@ -6,7 +6,7 @@ import { messages } from './locales.mjs';
 import {
   OTHER, localDateKey, metricValue, periodKey, selectRange, inRange, matchesFilters, granularityOptions, bucketKeys,
   sumRows, groupRows, totalTokens, cacheShare, colorSlots, stackedSeries, weekdayHourGrid, niceStep, topTenthShare, median, csv,
-  percentile, SESSION_SHAPES, histogram,
+  percentile, SESSION_SHAPES, histogram, mapModelAliases,
 } from './data.mjs';
 
 const row = (overrides = {}) => ({
@@ -16,6 +16,24 @@ const row = (overrides = {}) => ({
 });
 const filters = (overrides = {}) => ({ model: new Set(), project: new Set(), tool: new Set(), ...overrides });
 const now = new Date(2026, 0, 2, 12, 30);
+
+test('configured model aliases merge grouping and filters while retaining original names', () => {
+  const raw = [row({ model: 'group/auto-flash' }), row({ model: 'vendor/flash-v1' }), row({ model: 'flash' }), row({ model: 'unknown' })];
+  const rows = mapModelAliases(raw, { 'group/auto-flash': 'flash-v1', 'flash-v1': 'flash' });
+  assert.deepEqual(rows.map(row => row.model), ['flash', 'flash', 'flash', 'unknown']);
+  assert.deepEqual(rows.map(row => row.originalModel), raw.map(row => row.model));
+  assert.equal(groupRows(rows, row => row.model).get('flash').messages, 3);
+  assert.equal(rows.filter(row => matchesFilters(row, filters({ model: new Set(['flash']) }))).length, 3);
+  assert.equal(sumRows(rows).cost, sumRows(raw).cost);
+  assert.equal(raw[0].model, 'group/auto-flash');
+  assert.equal(mapModelAliases(raw)[0].model, 'group/auto-flash');
+});
+
+test('exact aliases win over bare names and cycles preserve the original name', () => {
+  const aliases = { 'vendor/a': 'exact', a: 'bare', x: 'y', y: 'x', self: 'self' };
+  const rows = mapModelAliases(['vendor/a', 'x', 'vendor/y', 'self', 'toString'].map(model => row({ model })), aliases);
+  assert.deepEqual(rows.map(row => row.model), ['exact', 'x', 'vendor/y', 'self', 'toString']);
+});
 
 test('week and month keys cross year boundaries', () => {
   assert.equal(periodKey('2025-12-31', 23, 'week'), '2025-12-29');
