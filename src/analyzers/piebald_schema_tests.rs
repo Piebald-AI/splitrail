@@ -359,37 +359,155 @@ fn post_flip_rows_use_ksuids_and_drafts_are_ignored() {
     assert_eq!(new.stats.output_tokens, 20);
 }
 
+/// Assert that both assistant turns of a [`ksuid_fixture`] history are priced at
+/// `tier`. The fixture's models price Standard and Priority differently, so a
+/// turn priced at the other one fails here rather than passing by accident. They
+/// have no Flex card, so a leaked `flex` prices as Standard and is caught too.
+fn assert_turns_priced_at(messages: &[ConversationMessage], tier: ServiceTier) {
+    assert_eq!(messages.len(), 4);
+    for (message, model, input, output, write, read) in [
+        (&messages[1], "gpt-5.5", 900, 230, 50, 100),
+        (&messages[2], "gpt-5.4", 500, 110, 0, 0),
+    ] {
+        let cost_at = |tier| {
+            calculate_total_cost_for_service_tier_at(
+                model,
+                tier,
+                input,
+                output,
+                write,
+                read,
+                Some(message.date),
+            )
+        };
+        let expected = cost_at(tier);
+        assert!(expected > 0.0);
+        assert_ne!(
+            cost_at(ServiceTier::Standard),
+            cost_at(ServiceTier::Priority),
+            "{model}"
+        );
+        assert_eq!(message.stats.cost, expected, "{model} {tier:?}");
+    }
+}
+
 #[test]
 fn folded_generation_configs_take_tier_from_the_chat_profile() {
     let (_directory, source) = ksuid_fixture();
     fold_generation_configs(&source);
     let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
-    assert_eq!(messages.len(), 4);
 
     // The fold erased per-turn tiers, so both turns now use the hidden clone's
     // Responses tier. The source profile's `flex` must not leak in.
-    for (message, model, input, output, write, read) in [
-        (&messages[1], "gpt-5.5", 900, 230, 50, 100),
-        (&messages[2], "gpt-5.4", 500, 110, 0, 0),
-    ] {
-        let expected = calculate_total_cost_for_service_tier_at(
-            model,
-            ServiceTier::Priority,
-            input,
-            output,
-            write,
-            read,
-            Some(message.date),
-        );
-        assert!(expected > 0.0);
-        assert_eq!(message.stats.cost, expected, "{model}");
-    }
+    assert_turns_priced_at(&messages, ServiceTier::Priority);
     assert_eq!(messages[1].stats.tool_calls, 2);
     assert_eq!(messages[2].stats.tool_calls, 1);
     assert_eq!(
         messages[1].global_hash,
         hash_text("piebald_2026-05-01T12:00:01Z_2")
     );
+}
+
+/// The fixture chat's own hidden profile once [`fold_generation_configs`] runs.
+const HIDDEN_CLONE: &str = "38MTKhiddenCloneProfile0001";
+/// The visible profile that clone came from, which generations still name.
+const SOURCE_PROFILE: &str = "38MTKsourceProfile000000001";
+
+/// Apply Piebald's later settings change to a folded fixture: the per-engine
+/// settings tables disappear without their typed tiers being carried anywhere,
+/// and profiles gain the custom request properties that are now the only way to
+/// request a tier.
+fn drop_profile_settings_tables(source: &DataSource) {
+    // Only this disposable fixture is modified; production databases are read-only.
+    let conn = Connection::open(&source.path).unwrap();
+    conn.execute_batch(
+        "DROP TABLE profile_settings_openai_responses;
+         DROP TABLE profile_settings_openai_completions;
+         ALTER TABLE profiles ADD COLUMN custom_override_fields TEXT;",
+    )
+    .unwrap();
+}
+
+/// Store `fields` verbatim as a fixture profile's custom request properties.
+fn set_custom_fields(source: &DataSource, profile_id: &str, fields: Option<&str>) {
+    let conn = Connection::open(&source.path).unwrap();
+    conn.execute(
+        "UPDATE profiles SET custom_override_fields = ?1 WHERE id = ?2",
+        rusqlite::params![fields, profile_id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn custom_properties_set_the_tier_once_settings_tables_are_gone() {
+    let (_directory, source) = ksuid_fixture();
+    fold_generation_configs(&source);
+    drop_profile_settings_tables(&source);
+    // Piebald merges these top-level keys into the request body, so the hidden
+    // clone's `service_tier` is what both turns requested. An unrelated key must
+    // not get in the way, and the source profile's `flex` must not leak in.
+    set_custom_fields(
+        &source,
+        HIDDEN_CLONE,
+        Some(r#"{"max_tokens": 20, "service_tier": "priority"}"#),
+    );
+    set_custom_fields(&source, SOURCE_PROFILE, Some(r#"{"service_tier": "flex"}"#));
+
+    let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
+    assert_turns_priced_at(&messages, ServiceTier::Priority);
+    assert_eq!(messages[1].stats.tool_calls, 2);
+    assert_eq!(messages[2].stats.tool_calls, 1);
+    assert_eq!(
+        messages[1].global_hash,
+        hash_text("piebald_2026-05-01T12:00:01Z_2")
+    );
+}
+
+#[test]
+fn absent_or_unusable_custom_tiers_price_at_standard_without_failing() {
+    let (_directory, source) = ksuid_fixture();
+    fold_generation_configs(&source);
+    drop_profile_settings_tables(&source);
+    let analyzer = PiebaldAnalyzer::new();
+    // Custom properties are free-form, and none of these names a tier. None may
+    // fail the source either: on malformed JSON, SQLite's JSON functions raise an
+    // error that would abort the whole query if they were ever evaluated on it.
+    for fields in [
+        None,
+        Some("{}"),
+        Some(r#"{"max_tokens": 20}"#),
+        Some("not json"),
+        Some(r#"{"service_tier": 5}"#),
+        Some(r#"{"service_tier": null}"#),
+        Some(r#"{"service_tier": {"name": "priority"}}"#),
+        Some(r#"["service_tier", "priority"]"#),
+    ] {
+        set_custom_fields(&source, HIDDEN_CLONE, fields);
+        let messages = analyzer
+            .parse_source(&source)
+            .unwrap_or_else(|error| panic!("{fields:?}: {error}"));
+        assert_turns_priced_at(&messages, ServiceTier::Standard);
+    }
+}
+
+#[test]
+fn databases_recording_no_tier_anywhere_price_at_standard() {
+    let (_directory, source) = ksuid_fixture();
+    fold_generation_configs(&source);
+    // Every tier source this analyzer knows is gone, as in a layout newer than
+    // it. Joining one anyway is the regression guarded here: that failed every
+    // read with "no such table" and hid all Piebald usage.
+    let conn = Connection::open(&source.path).unwrap();
+    conn.execute_batch(
+        "DROP TABLE profile_settings_openai_responses;
+         DROP TABLE profile_settings_openai_completions;",
+    )
+    .unwrap();
+
+    let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
+    assert_turns_priced_at(&messages, ServiceTier::Standard);
+    assert_eq!(messages[1].stats.tool_calls, 2);
+    assert_eq!(messages[2].stats.tool_calls, 1);
 }
 
 #[test]

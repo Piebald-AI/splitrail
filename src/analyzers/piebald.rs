@@ -137,6 +137,24 @@ enum TierSource {
     /// (same `global_hash`, new cost), and a chat that switched profiles is priced
     /// entirely at the one it uses now.
     ProfileSettings,
+    /// Databases without any per-engine settings tables store no typed tier. A
+    /// tier can reach the provider only as a custom request property on the
+    /// profile (`custom_override_fields`, a JSON object), whose top-level keys
+    /// Piebald merges into the request body verbatim, replacing anything it set
+    /// itself. That object's `service_tier` is therefore exactly the tier that
+    /// was requested.
+    ///
+    /// The chat's own profile is used for the same hidden-clone reason as
+    /// [`TierSource::ProfileSettings`], with the same per-turn limitation. A
+    /// database that moved here from typed settings did not carry their tiers over
+    /// into custom properties, so turns that ran at another tier back then are now
+    /// priced at the standard tier, already-uploaded ones included.
+    ProfileCustomFields,
+    /// None of the sources above exists, so the database records no tier at all
+    /// and every turn is priced at the standard tier. A tier only adjusts pricing:
+    /// a layout this analyzer does not know must not fail the whole source, which
+    /// is what joining a table that is not there would do.
+    Unrecorded,
 }
 
 /// Every independent schema feature the analyzer must adapt to. Piebald
@@ -159,12 +177,24 @@ impl PiebaldLayout {
     /// the old message columns. This also covers a failed or in-progress backfill.
     /// SQL failures still propagate rather than being mistaken for an older schema.
     ///
-    /// The tier source keys on the *new* tables existing, not the old ones being
-    /// absent, so a database too old to have either keeps its previous behavior.
-    /// Both `profile_settings_openai_*` tables are created by the same migration
-    /// transaction, so checking one implies the other.
+    /// Each tier source is selected only when its own storage exists, never
+    /// inferred from another source being absent. Treating "the newer tables are
+    /// missing" as "this database is older" is how a database that had moved past
+    /// every known source got joined against tables it dropped long before, which
+    /// failed every read and hid all Piebald usage. Each pair of OpenAI settings
+    /// tables is created and dropped together in one migration transaction, so
+    /// checking one table implies the other, and a committed database never holds
+    /// both typed sources. Custom properties become the source only once no typed
+    /// storage remains, which keeps pricing unchanged for every layout that still
+    /// has typed storage.
     fn detect(conn: &Connection) -> Result<Self> {
-        let (typed_parts, profile_settings, has_ksuid_map): (bool, bool, bool) = conn.query_row(
+        let (typed_parts, profile_settings, generation_configs, custom_fields, has_ksuid_map): (
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+        ) = conn.query_row(
             "SELECT
                  EXISTS(SELECT 1 FROM sqlite_master
                         WHERE type = 'table' AND name = 'message_generations')
@@ -173,9 +203,21 @@ impl PiebaldLayout {
                  EXISTS(SELECT 1 FROM sqlite_master
                         WHERE type = 'table' AND name = 'profile_settings_openai_responses'),
                  EXISTS(SELECT 1 FROM sqlite_master
+                        WHERE type = 'table' AND name = 'override_gen_cfg_data_openai_responses'),
+                 EXISTS(SELECT 1 FROM pragma_table_info('profiles')
+                        WHERE name = 'custom_override_fields'),
+                 EXISTS(SELECT 1 FROM sqlite_master
                         WHERE type = 'table' AND name = '_ksuid_map')",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )?;
         Ok(Self {
             parts: if typed_parts {
@@ -185,8 +227,12 @@ impl PiebaldLayout {
             },
             tier_source: if profile_settings {
                 TierSource::ProfileSettings
-            } else {
+            } else if generation_configs {
                 TierSource::GenerationConfig
+            } else if custom_fields {
+                TierSource::ProfileCustomFields
+            } else {
+                TierSource::Unrecorded
             },
             has_ksuid_map,
         })
@@ -233,22 +279,49 @@ fn query_messages(conn: &Connection, layout: PiebaldLayout) -> Result<Vec<Piebal
         ),
         PiebaldSchema::Legacy => ("m", "", ""),
     };
-    // Responses settings take precedence over Completions, as they always have.
-    let tier_joins = match layout.tier_source {
-        TierSource::GenerationConfig => format!(
-            "LEFT JOIN override_gen_cfg_data_openai_responses responses
-                    ON responses.gen_cfg_id = {usage}.config_id
-             LEFT JOIN override_gen_cfg_data_openai_completions completions
-                    ON completions.gen_cfg_id = {usage}.config_id"
+    // Each tier source contributes the joins it needs and the expression that
+    // reads the tier through them. Only a source `detect` saw is ever joined.
+    // For typed settings, Responses take precedence over Completions, as they
+    // always have.
+    let typed_tier = "COALESCE(responses.service_tier, completions.service_tier)";
+    let (tier_joins, service_tier) = match layout.tier_source {
+        TierSource::GenerationConfig => (
+            format!(
+                "LEFT JOIN override_gen_cfg_data_openai_responses responses
+                        ON responses.gen_cfg_id = {usage}.config_id
+                 LEFT JOIN override_gen_cfg_data_openai_completions completions
+                        ON completions.gen_cfg_id = {usage}.config_id"
+            ),
+            typed_tier,
         ),
-        TierSource::ProfileSettings => {
+        TierSource::ProfileSettings => (
             "LEFT JOIN chats tier_chat ON tier_chat.id = m.parent_chat_id
              LEFT JOIN profile_settings_openai_responses responses
                     ON responses.profile_id = tier_chat.profile_id
              LEFT JOIN profile_settings_openai_completions completions
                     ON completions.profile_id = tier_chat.profile_id"
-                .to_string()
-        }
+                .to_string(),
+            typed_tier,
+        ),
+        TierSource::ProfileCustomFields => (
+            "LEFT JOIN chats tier_chat ON tier_chat.id = m.parent_chat_id
+             LEFT JOIN profiles tier_profile ON tier_profile.id = tier_chat.profile_id"
+                .to_string(),
+            // Custom properties are free-form, so read them defensively. The JSON
+            // functions raise an error on malformed text, and an error here would
+            // fail the whole query, so they run only inside a THEN branch, which
+            // SQLite evaluates only after its WHEN holds. Nested CASEs make that
+            // ordering explicit rather than relying on how an AND is evaluated.
+            // Only a JSON string can name a tier: any other value yields NULL
+            // (standard pricing) instead of failing the strict TEXT row read.
+            "CASE WHEN json_valid(tier_profile.custom_override_fields) THEN
+                 CASE json_type(tier_profile.custom_override_fields, '$.service_tier')
+                     WHEN 'text' THEN
+                         json_extract(tier_profile.custom_override_fields, '$.service_tier')
+                 END
+             END",
+        ),
+        TierSource::Unrecorded => (String::new(), "NULL"),
     };
     let (stable_id, legacy_join) = layout.stable_id_sql("messages", "m");
     // Unparented messages are chat or Launchpad drafts, not conversation turns.
@@ -258,7 +331,7 @@ fn query_messages(conn: &Connection, layout: PiebaldLayout) -> Result<Vec<Piebal
         "SELECT CAST(m.id AS TEXT), {stable_id}, CAST(m.parent_chat_id AS TEXT), m.role,
                 {usage}.model, {usage}.input_tokens, {usage}.output_tokens,
                 {usage}.reasoning_tokens, {usage}.cache_read_tokens, {usage}.cache_write_tokens,
-                COALESCE(responses.service_tier, completions.service_tier) AS service_tier,
+                {service_tier} AS service_tier,
                 m.created_at, m.updated_at
          FROM messages m
          {usage_join}
