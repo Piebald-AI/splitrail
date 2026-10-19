@@ -1,7 +1,7 @@
 import {
   OTHER, SESSION_PAGE_SIZE, rowTokens, localDateKey, shiftDate, periodKey, selectRange, inRange, matchesFilters,
   granularityOptions, bucketKeys, sumRows, groupRows, totalTokens, cacheShare, colorSlots, stackedSeries,
-  weekdayHourGrid, niceStep, topTenthShare, median, csv,
+  weekdayHourGrid, niceStep, topTenthShare, median, percentile, csv, SESSION_SHAPES, histogram, mapModelAliases,
 } from './data.mjs';
 import { messages } from './locales.mjs';
 
@@ -9,8 +9,11 @@ const DIMENSIONS = ['tool', 'model', 'project'];
 const VIEWS = ['overview', 'sessions', 'breakdown'];
 const RANGES = ['today', '7', '30', '90', 'all'];
 const RANGE_LABELS = { today: 'today', 7: 'last7', 30: 'last30', 90: 'last90', all: 'all' };
-const METRICS = ['cost', 'tokens'];
-const SORTS = ['recent', 'cost', 'tokens', 'duration'];
+const METRICS = ['cost', 'tokens', 'requests'];
+const SORTS = ['recent', 'cost', 'tokens', 'requests', 'duration'];
+const SHAPES = ['messages', 'duration', 'toolCalls'];
+// The shape toggle labels reuse existing keys: replies, active time, tool calls.
+const SHAPE_LABELS = { messages: 'replies', duration: 'activeTime', toolCalls: 'toolCalls' };
 const BREAKDOWNS = ['period', 'project', 'model', 'tool'];
 const GRANULARITIES = ['hour', 'day', 'week', 'month'];
 const PLOT_HEIGHT = 240;
@@ -129,7 +132,7 @@ function compact(value) {
 function defaultState() {
   return {
     view: 'overview', range: '30', day: null, metric: 'cost', group: 'model', granularity: null,
-    sort: 'recent', q: '', session: null, dim: 'project',
+    sort: 'recent', q: '', session: null, dim: 'project', shape: 'messages',
     filters: { tool: new Set(), model: new Set(), project: new Set() },
   };
 }
@@ -147,6 +150,7 @@ function readHash() {
   choose('granularity', GRANULARITIES);
   choose('sort', SORTS);
   choose('dim', BREAKDOWNS);
+  choose('shape', SHAPES);
   const day = params.get('day');
   if (/^\d{4}-\d{2}-\d{2}$/.test(day ?? '') && localDateKey(noon(day)) === day) next.day = day;
   next.q = params.get('q') ?? '';
@@ -158,7 +162,7 @@ function readHash() {
 function writeHash() {
   const params = new URLSearchParams();
   const defaults = defaultState();
-  for (const key of ['view', 'range', 'day', 'metric', 'group', 'granularity', 'sort', 'q', 'session', 'dim']) {
+  for (const key of ['view', 'range', 'day', 'metric', 'group', 'granularity', 'sort', 'q', 'session', 'dim', 'shape']) {
     if (state[key] && state[key] !== defaults[key]) params.set(key, state[key]);
   }
   for (const key of DIMENSIONS) for (const value of state.filters[key]) params.append(key, value);
@@ -215,7 +219,7 @@ document.addEventListener('visibilitychange', () => {
 function prepare(data) {
   const projects = new Map(data.projects.map(project => [project.id, project.paths]));
   return {
-    rows: data.rows,
+    rows: mapModelAliases(data.rows, data.modelAliases),
     sessions: new Map(data.sessions.map(session => [session.id, { ...session, start: new Date(session.start), end: new Date(session.end) }])),
     projects,
     labels: projectLabels([...projects.keys()], projects),
@@ -252,6 +256,10 @@ function projectTitle(value) {
   return paths ? [value, ...paths.filter(path => path !== value)].join('\n') : label('project', value);
 }
 
+function labelTitle(key, value) {
+  return key === 'project' ? projectTitle(value) : label(key, value);
+}
+
 function seriesColor(dimension, value) {
   const slot = slots[dimension].get(value);
   return slot === undefined ? 'var(--other)' : `var(--series-${slot})`;
@@ -261,12 +269,15 @@ function sessionName(meta) {
   return meta.name?.trim() || t('untitled');
 }
 
-function sessionMinutes(meta) {
-  return Math.max(1, Math.round((meta.end - meta.start) / 60000));
+// Active time excludes idle gaps of five minutes or more between messages.
+function activeMinutes(meta) {
+  return meta.activeMinutes || Math.max(1, Math.round((meta.end - meta.start) / 60000));
 }
 
-const amount = totals => (state.metric === 'cost' ? totals.cost : totalTokens(totals));
-const formatAmount = value => (state.metric === 'cost' ? fmt.cost(value) : fmt.compact(value));
+const amount = totals => (state.metric === 'cost' ? totals.cost
+  : state.metric === 'requests' ? totals.messages : totalTokens(totals));
+const formatAmount = value => (state.metric === 'cost' ? fmt.cost(value)
+  : state.metric === 'requests' ? fmt.int(value) : fmt.compact(value));
 const formatAxis = value => (state.metric === 'cost' ? `$${fmt.compact(value)}` : fmt.compact(value));
 
 function compute() {
@@ -382,7 +393,7 @@ function renderTabs(view) {
 function renderFilters(view) {
   const chips = DIMENSIONS.flatMap(key => [...state.filters[key]].map(value => h('button', {
     type: 'button', class: 'chip', 'aria-label': t('removeFilter')(label(key, value)), 'data-focus': `chip:${key}:${value}`,
-    title: key === 'project' ? projectTitle(value) : null, onclick: () => toggleFilter(key, value),
+    title: labelTitle(key, value), onclick: () => toggleFilter(key, value),
   }, h('span', {}, `${t(key)}: ${label(key, value)}`), closeIcon())));
   elements.filters.replaceChildren(...[
     segmented(t('range'), RANGES.map(range => ({ value: range, label: t(RANGE_LABELS[range]), pressed: !state.day && state.range === range })),
@@ -429,7 +440,7 @@ function filterMenu(key, view) {
     options.length
       ? h('div', { class: 'menu-list' }, options.map(([value, item]) => h('button', {
         type: 'button', class: 'menu-item', 'aria-pressed': String(selected.has(value)), 'data-focus': `option:${key}:${value}`,
-        title: key === 'project' ? projectTitle(value) : null, onclick: () => toggleFilter(key, value),
+        title: labelTitle(key, value), onclick: () => toggleFilter(key, value),
       }, h('span', { class: 'check', 'aria-hidden': 'true' }, selected.has(value) ? '✓' : ''),
       h('span', { class: 'ellipsis grow' }, label(key, value)),
       h('span', { class: 'num small muted' }, amount(item) ? formatAmount(amount(item)) : '—'))))
@@ -488,7 +499,7 @@ function kpiSection(view) {
     const position = index.get(periodKey(row.date, row.hour, view.granularity));
     if (position !== undefined) costs[position] += row.cost;
   }
-  const durations = [...totals.sessions].map(id => snapshot.sessions.get(id)).filter(Boolean).map(sessionMinutes);
+  const durations = [...totals.sessions].map(id => snapshot.sessions.get(id)).filter(Boolean).map(activeMinutes);
   const average = range.days === 1
     ? (state.day ? t('wholeDay') : t('asOf')(fmt.clock(view.now)))
     : t('dailyAverage')(fmt.cost(totals.cost / range.days), fmt.int(totals.dates.size), fmt.int(range.days));
@@ -503,6 +514,8 @@ function kpiSection(view) {
       h('p', { class: 'small muted' }, average)),
     card(t('totalTokens'), fmt.compact(totalTokens(totals)), delta(totalTokens(totals), prev && totalTokens(prev), comparison),
       composition(totals, 'comp'), compositionLegend(totals)),
+    card(t('requests'), fmt.int(totals.messages), delta(totals.messages, prev?.messages, comparison),
+      h('p', { class: 'small muted' }, t('requestsSub')(fmt.compact(totals.messages ? totalTokens(totals) / totals.messages : 0)))),
     card(t('sessions'), fmt.int(totals.sessions.size), delta(totals.sessions.size, prev?.sessions.size, comparison),
       h('p', { class: 'small muted' }, durations.length ? t('sessionsSub')(fmt.duration(median(durations)), fmt.int(totals.messages)) : t('noSessions'))),
     card(t('cacheShare'), fmt.percent(cacheShare(totals)), prev ? points(cacheShare(totals), cacheShare(prev), comparison) : t('noComparison'),
@@ -547,7 +560,7 @@ function stackBar(series, index, total, height, dimension) {
 
 function trendSection(view) {
   const series = stackedSeries(view.rows, view.keys, view.granularity, state.group, state.metric, slots[state.group]);
-  const title = t('trendTitle')(t('every')[view.granularity], state.metric);
+  const title = t('trendTitle')(t('every')[view.granularity], t(state.metric));
   return h('section', { class: 'card trend' },
     sectionHead('01', title, t('stackedBy')(t(state.group), rangeLabel(view.range)),
       h('span', { class: 'small muted' }, t('group')),
@@ -588,7 +601,7 @@ function trendChart(series, view, title) {
       h('p', { class: 'tip-value num' }, formatAmount(totals[index])),
       h('div', { class: 'tip-rows' }, parts.map(item => h('div', { class: 'tip-row' },
         h('span', { class: 'tip-key', style: `background:${seriesColor(state.group, item.id)}` }),
-        h('span', { class: 'ellipsis' }, label(state.group, item.id)),
+        h('span', { class: 'tip-label grow' }, label(state.group, item.id)),
         h('span', { class: 'num' }, formatAmount(item.values[index]))))));
     const position = (index + 0.5) / keys.length;
     tip.style.left = `${position * 100}%`;
@@ -659,9 +672,10 @@ function rankCard(view, key, number) {
     sectionHead(number, t(key), null, h('span', { class: 'small muted' }, t('clickToFilter'))),
     groups.slice(0, 6).map(([value, totals]) => h('button', {
       type: 'button', class: 'rank-row', 'aria-pressed': String(state.filters[key].has(value)), 'data-focus': `rank:${key}:${value}`,
-      title: key === 'project' ? projectTitle(value) : label(key, value), onclick: () => toggleFilter(key, value),
+      title: labelTitle(key, value), onclick: () => toggleFilter(key, value),
     },
-    h('span', { class: 'rank-name' }, key === state.group ? swatch(seriesColor(key, value)) : null, h('span', { class: 'ellipsis' }, label(key, value))),
+    h('span', { class: 'rank-name' }, key === state.group ? swatch(seriesColor(key, value)) : null,
+      h('span', { class: key === 'model' ? 'model-name' : 'ellipsis' }, label(key, value))),
     h('span', { class: 'rank-value num' }, formatAmount(amount(totals))),
     h('span', { class: 'rank-meter' },
       h('span', { class: 'track', 'aria-hidden': 'true' }, h('span', { class: 'fill', style: `width:${max > 0 ? (amount(totals) / max) * 100 : 0}%` })),
@@ -753,21 +767,25 @@ function heatSection(view) {
 function topSessionsSection(view) {
   const sessions = [...groupRows(view.rows, row => row.session)].filter(([id]) => snapshot.sessions.has(id));
   const ranked = sessions.sort((a, b) => amount(b[1]) - amount(a[1]));
-  const { count, share } = topTenthShare(sessions.map(([, totals]) => totals.cost));
-  const sort = state.metric === 'cost' ? 'cost' : 'tokens';
+  const { count, share } = topTenthShare(sessions.map(([, totals]) => amount(totals)));
+  const sort = state.metric;
   return h('section', { class: 'card top' },
-    sectionHead('06', state.metric === 'cost' ? t('topByCost') : t('topByTokens'), null,
-      sessions.length ? h('span', { class: 'small muted' }, t('concentration')(fmt.int(count), fmt.percent(share, 0))) : null),
+    sectionHead('06', t({ cost: 'topByCost', tokens: 'topByTokens', requests: 'topByRequests' }[state.metric]), null,
+      sessions.length ? h('span', { class: 'small muted' }, t('concentration')(fmt.int(count), fmt.percent(share, 0), t(state.metric).toLowerCase())) : null),
     ranked.slice(0, 5).map(([id, totals], index) => {
       const meta = snapshot.sessions.get(id);
-      return h('button', { type: 'button', class: 'top-row', 'data-focus': `top:${id}`, onclick: () => update({ view: 'sessions', sort, session: id, q: '' }) },
+      return h('button', {
+        type: 'button', class: 'top-row', 'data-focus': `top:${id}`,
+        title: `${sessionName(meta)} · ${label('project', meta.project)} · ${meta.tool}`,
+        onclick: () => update({ view: 'sessions', sort, session: id, q: '' }),
+      },
         h('span', { class: 'mono small muted' }, String(index + 1)),
         h('span', { class: 'ellipsis' },
           h('span', { class: 'block ellipsis' }, sessionName(meta)),
           h('span', { class: 'block ellipsis small muted' }, `${label('project', meta.project)} · ${meta.tool} · ${fmt.md(localDateKey(meta.start))}`)),
         h('span', { class: 'right' },
           h('span', { class: 'block num', style: 'font-weight:600' }, formatAmount(amount(totals))),
-          h('span', { class: 'block num small muted' }, fmt.duration(sessionMinutes(meta)))));
+          h('span', { class: 'block num small muted', title: t('activeTimeHelp') }, fmt.duration(activeMinutes(meta)))));
     }),
     sessions.length ? null : h('p', { class: 'menu-empty' }, t('noUsage')),
     h('button', { type: 'button', class: 'link more', onclick: () => update({ view: 'sessions', sort, session: null }) }, t('viewAllSessions')));
@@ -785,7 +803,8 @@ function sessionsView(view) {
     recent: (a, b) => b.meta.start - a.meta.start,
     cost: (a, b) => b.totals.cost - a.totals.cost,
     tokens: (a, b) => totalTokens(b.totals) - totalTokens(a.totals),
-    duration: (a, b) => sessionMinutes(b.meta) - sessionMinutes(a.meta),
+    requests: (a, b) => b.totals.messages - a.totals.messages,
+    duration: (a, b) => activeMinutes(b.meta) - activeMinutes(a.meta),
   };
   const list = [...groupRows(view.rows, row => row.session)]
     .map(([id, totals]) => ({ id, totals, meta: snapshot.sessions.get(id) }))
@@ -800,10 +819,10 @@ function sessionsView(view) {
         h('span', { class: 'sr-only' }, t('searchSessions')),
         svg('svg', { class: 'icon', viewBox: '0 0 16 16', width: 14, height: 14, 'aria-hidden': 'true' }, svg('circle', { cx: 7, cy: 7, r: 4.5 }), svg('path', { d: 'm10.5 10.5 3 3' })),
         h('input', { type: 'search', value: state.q, placeholder: t('searchSessions'), 'data-focus': 'session-search', oninput: event => update({ q: event.target.value }) })),
-      segmented(t('sort'), SORTS.map(sort => ({ value: sort, label: sort === 'duration' ? t('durationLabel') : t(sort), pressed: state.sort === sort })), sort => update({ sort })),
+      segmented(t('sort'), SORTS.map(sort => ({ value: sort, label: sort === 'duration' ? t('activeTime') : t(sort), pressed: state.sort === sort })), sort => update({ sort })),
       h('span', { class: 'small muted count-label' }, t('sessionCountIn')(fmt.int(list.length), rangeLabel(view.range)))),
     h('div', { class: 'sess-grid sess-head', 'aria-hidden': 'true' },
-      h('span', {}, t('session')), h('span', { class: 'hide-sm' }, t('started')), h('span', { class: 'hide-sm' }, t('durationLabel')),
+      h('span', {}, t('session')), h('span', { class: 'hide-sm' }, t('started')), h('span', { class: 'hide-sm' }, t('activeTime')),
       h('span', { class: 'hide-sm right' }, t('replies')), h('span', { class: 'hide-sm' }, t('models')),
       h('span', { class: 'hide-sm right' }, t(state.metric === 'cost' ? 'tokens' : 'cost')),
       h('span', { class: 'hide-sm right' }, t('cached')), h('span', { class: 'right' }, t(state.metric))),
@@ -814,7 +833,72 @@ function sessionsView(view) {
       list.length > shown.length
         ? h('button', { type: 'button', class: 'link', 'data-focus': 'load-more', onclick: () => { sessionLimit += SESSION_PAGE_SIZE; render(); } }, t('loadMore'))
         : null));
-  return [h('div', { class: 'sess-layout' }, listCard, sessionDetail(selected))];
+  const ids = new Set(list.map(item => item.id));
+  const listTotals = sumRows(view.rows.filter(row => ids.has(row.session)));
+  return [
+    list.length ? sessionKpis(list, listTotals) : null,
+    h('div', { class: 'sess-insights' }, shapeCard(list), activityCard(listTotals)),
+    h('div', { class: 'sess-layout' }, listCard, sessionDetail(selected)),
+  ];
+}
+
+function sessionKpis(list, totals) {
+  const active = list.reduce((sum, item) => sum + activeMinutes(item.meta), 0);
+  const projects = new Set(list.map(item => item.meta.project)).size;
+  const replies = totals.messages;
+  const stat = (name, value, title) => h('div', { class: 'session-kpi', title },
+    h('span', { class: 'session-kpi-label' }, name),
+    h('span', { class: 'session-kpi-value num' }, value));
+  return h('section', { class: 'card session-kpis', 'aria-label': t('sessionSummary') },
+    stat(t('totalActive'), fmt.duration(active), t('activeTimeHelp')),
+    stat(t('replies'), fmt.int(replies)),
+    stat(t('costPerReply'), fmt.cost(replies ? totals.cost / replies : 0)),
+    stat(t('tokensPerReply'), fmt.compact(replies ? totalTokens(totals) / replies : 0)),
+    stat(t('cacheShare'), fmt.percent(cacheShare(totals))),
+    stat(t('projects'), fmt.int(projects)));
+}
+
+// Session shape: how the filtered sessions spread over size bands, in the
+// same spirit as Magpie's 会话形态 but limited to what local data records.
+function shapeCard(list) {
+  const buckets = SESSION_SHAPES[state.shape];
+  const value = item => (state.shape === 'messages' ? item.totals.messages
+    : state.shape === 'duration' ? activeMinutes(item.meta) : item.totals.toolCalls);
+  const values = list.map(value);
+  const counts = histogram(values, buckets);
+  const max = Math.max(0, ...counts);
+  const label = ([min, max_]) => (max_ === Infinity ? t('bandPlus')(fmt.int(min)) : min === max_ ? fmt.int(min) : t('bandRange')(fmt.int(min), fmt.int(max_)));
+  // Median and p90 follow the selected band so the header matches the bars.
+  const format = value => (state.shape === 'duration' ? fmt.duration(value) : fmt.int(value));
+  const spread = values.length ? ` · ${t('sessionSpread')(format(median(values)), format(percentile(values, 0.9)))}` : '';
+  return h('section', { class: 'card shape', 'aria-label': t('sessionShape') },
+    sectionHead('01', t('sessionShape'), `${t('shapeSub')(fmt.int(list.length))}${spread}`,
+      segmented(t('sessionShape'), SHAPES.map(key => ({ value: key, label: t(SHAPE_LABELS[key]), pressed: state.shape === key })), shape => update({ shape }))),
+    h('div', { class: 'shape-bars' }, buckets.map((band, index) => h('div', {
+      class: 'shape-bar', title: t('shapeBand')(label(band), fmt.int(counts[index])),
+    },
+    h('span', { class: 'shape-plot' },
+      h('span', { class: 'num shape-count' }, counts[index] ? fmt.int(counts[index]) : ''),
+      h('span', { class: 'shape-fill', style: `height:${max ? (counts[index] / max) * 100 : 0}%` })),
+    h('span', { class: 'shape-label' }, label(band))))),
+    h('p', { class: 'hint' }, t('shapeNote')));
+}
+
+function activityCard(totals) {
+  const sessions = Math.max(1, totals.sessions.size);
+  const filesChanged = totals.filesEdited + totals.filesAdded;
+  const stat = (name, value, note) => h('div', { class: 'activity-stat' },
+    h('p', { class: 'small muted' }, name),
+    h('p', { class: 'activity-value num' }, fmt.compact(value)),
+    h('p', { class: 'small muted' }, note));
+  return h('section', { class: 'card activity', 'aria-label': t('workActivity') },
+    sectionHead('02', t('workActivity'), t('activitySub')(fmt.int(totals.sessions.size))),
+    h('div', { class: 'activity-grid' },
+      stat(t('toolCalls'), totals.toolCalls, t('perReply')(fmt.compact(totals.toolCalls / Math.max(1, totals.messages)))),
+      stat(t('filesRead'), totals.filesRead, t('perSession')(fmt.compact(totals.filesRead / sessions))),
+      stat(t('filesChanged'), filesChanged, t('fileChanges')(fmt.int(totals.filesAdded), fmt.int(totals.filesEdited))),
+      stat(t('shellCommands'), totals.terminalCommands, t('perSession')(fmt.compact(totals.terminalCommands / sessions)))),
+    h('p', { class: 'hint activity-note' }, t('activityNote')));
 }
 
 function sessionRow(item, modelTokens, selected) {
@@ -823,10 +907,13 @@ function sessionRow(item, modelTokens, selected) {
   const tokens = className => h('span', { class: `tokens-cell ${className}` },
     h('span', { class: 'num' }, fmt.compact(totalTokens(totals))), composition(totals, 'mini-comp'));
   const cost = className => h('span', { class: `num right ${className}` }, fmt.cost(totals.cost));
+  const replies = className => h('span', { class: `num right ${className}` }, fmt.int(totals.messages));
   // The selected metric is the emphasized last column, the only figure left on phones.
-  const [secondary, primary] = state.metric === 'cost' ? [tokens, cost] : [cost, tokens];
+  const [secondary, primary] = state.metric === 'cost' ? [tokens, cost]
+    : state.metric === 'requests' ? [cost, replies] : [cost, tokens];
   return h('button', {
     type: 'button', class: 'sess-grid sess-row', 'aria-pressed': String(selected), 'data-focus': `session:${item.id}`,
+    title: `${sessionName(meta)} · ${label('project', meta.project)} · ${meta.tool}`,
     onclick: () => {
       update({ session: item.id });
       // Below 1100px the details stack under the list.
@@ -837,10 +924,11 @@ function sessionRow(item, modelTokens, selected) {
     h('span', { class: 'sess-name ellipsis' }, sessionName(meta)),
     h('span', { class: 'block ellipsis muted' }, `${label('project', meta.project)} · ${meta.tool}`)),
   h('span', { class: 'hide-sm num' }, `${fmt.md(localDateKey(meta.start))} ${fmt.clock(meta.start)}`),
-  h('span', { class: 'hide-sm' }, fmt.duration(sessionMinutes(meta))),
+  h('span', { class: 'hide-sm', title: t('activeTimeHelp') }, fmt.duration(activeMinutes(meta))),
   h('span', { class: 'hide-sm num right' }, fmt.int(totals.messages)),
   h('span', { class: 'hide-sm models' },
-    models.slice(0, 2).map(([model]) => h('span', { class: 'model-chip' }, swatch(seriesColor('model', model)), h('span', { class: 'ellipsis' }, label('model', model)))),
+    models.slice(0, 2).map(([model]) => h('span', { class: 'model-chip', title: label('model', model) },
+      swatch(seriesColor('model', model)), h('span', { class: 'model-name' }, label('model', model)))),
     models.length > 2 ? h('span', { class: 'muted' }, `+${models.length - 2}`) : null),
   secondary('hide-sm'),
   h('span', { class: 'hide-sm num right' }, fmt.percent(cacheShare(totals), 0)),
@@ -879,10 +967,13 @@ function sessionDetail(item) {
     h('div', {},
       h('p', { class: 'section-no' }, t('sessionDetails')),
       h('h2', {}, sessionName(meta)),
-      h('p', { class: 'small', style: 'margin-top:6px;color:var(--ink-2)' }, `${meta.tool} · ${fmt.md(localDateKey(meta.start))} ${fmt.clock(meta.start)} – ${end} · ${fmt.duration(sessionMinutes(meta))}`),
+      h('p', { class: 'small', style: 'margin-top:6px;color:var(--ink-2)', title: t('activeTimeHelp') },
+        `${meta.tool} · ${fmt.md(localDateKey(meta.start))} ${fmt.clock(meta.start)} – ${end} · ${t('activeTime')} ${fmt.duration(activeMinutes(meta))}`),
       h('p', { class: 'mono small muted ellipsis', title: projectTitle(meta.project) }, snapshot.projects.has(meta.project) ? meta.project : label('project', meta.project))),
     h('div', { class: 'detail-stats' },
-      [[t('cost'), fmt.cost(totals.cost)], [t('tokens'), fmt.compact(totalTokens(totals))], [t('replies'), fmt.int(totals.messages)], [t('toolCalls'), fmt.int(totals.toolCalls)]]
+      [[t('cost'), fmt.cost(totals.cost)], [t('tokens'), fmt.compact(totalTokens(totals))],
+        [t('replies'), fmt.int(totals.messages)], [t('toolCalls'), fmt.int(totals.toolCalls)],
+        [t('filesRead'), fmt.int(totals.filesRead)], [t('filesEdited'), fmt.int(totals.filesEdited)]]
         .map(([name, value]) => h('div', { class: 'stat' }, h('p', { class: 'small muted' }, name), h('p', {}, value)))),
     h('div', {},
       h('div', { class: 'section-head' }, h('h3', {}, granularity === 'hour' ? t('tokensPerHour') : t('tokensPerDay')), h('span', { class: 'small muted' }, t('stackedByModel'))),
@@ -896,9 +987,14 @@ function sessionDetail(item) {
     h('div', {},
       h('h3', {}, t('models')),
       models.map(([model, modelTotals]) => h('div', { class: 'detail-model' },
-        h('span', { class: 'rank-name' }, swatch(seriesColor('model', model)), h('span', { class: 'ellipsis' }, label('model', model))),
-        h('span', { class: 'num muted' }, `${t('replyCount')(fmt.int(modelTotals.messages))} · ${fmt.compact(totalTokens(modelTotals))}`),
-        h('span', { class: 'num right', style: 'font-weight:600' }, modelTotals.cost > 0 ? fmt.cost(modelTotals.cost) : t('noPrice'))))),
+        h('span', { class: 'rank-name', title: label('model', model) },
+          swatch(seriesColor('model', model)), h('span', { class: 'model-name' }, label('model', model))),
+        [...new Set(rows.filter(row => row.model === model && row.originalModel !== model).map(row => row.originalModel))]
+          .map(original => h('span', { class: 'small muted model-name' }, original)),
+        h('span', { class: 'detail-model-stats' },
+          h('span', { class: 'num muted' }, `${t('replyCount')(fmt.int(modelTotals.messages))} · ${fmt.compact(totalTokens(modelTotals))}`),
+          h('span', { class: 'num muted' }, t('cacheShort')(fmt.percent(cacheShare(modelTotals), 0))),
+          h('span', { class: 'num', style: 'font-weight:600' }, modelTotals.cost > 0 ? fmt.cost(modelTotals.cost) : t('noPrice')))))),
     h('div', {}, h('h3', {}, t('tokenMix')), composition(totals, 'comp'), compositionLegend(totals)),
     h('div', { class: 'detail-id' }, h('span', { class: 'mono small muted ellipsis', title: meta.id }, meta.id), copy),
     h('button', {
@@ -916,13 +1012,17 @@ function breakdownView(view) {
   // Token counts are compact so every column fits; the exact count is the cell's title.
   const tokens = value => (value ? h('td', { title: fmt.int(value) }, fmt.compact(value)) : h('td', {}, '—'));
   const share = totals => h('td', {}, amount(view.totals) > 0 ? fmt.percent(amount(totals) / amount(view.totals)) : '—');
-  const costColumn = ['cost', totals => h('td', {}, fmt.cost(totals.cost))];
-  const tokensColumn = ['totalTokens', totals => tokens(totalTokens(totals))];
-  // The selected metric leads the table and its share follows it.
+  // Each metric has a value column and a share column; the selected metric
+  // leads the table with its share, the other two follow.
+  const metricColumns = {
+    cost: ['cost', totals => h('td', {}, fmt.cost(totals.cost))],
+    tokens: ['totalTokens', totals => tokens(totalTokens(totals))],
+    requests: ['replies', totals => h('td', {}, fmt.int(totals.messages))],
+  };
+  const shareNames = { cost: 'shareOfCost', tokens: 'shareOfTokens', requests: 'shareOfRequests' };
+  const rest = Object.keys(metricColumns).filter(name => name !== state.metric);
   const columns = [
-    ...(state.metric === 'cost'
-      ? [costColumn, ['shareOfCost', share], tokensColumn]
-      : [tokensColumn, ['shareOfTokens', share], costColumn]),
+    metricColumns[state.metric], [shareNames[state.metric], share], ...rest.map(name => metricColumns[name]),
     ['input', totals => tokens(totals.inputTokens)],
     ['cached', totals => tokens(totals.cachedTokens)],
     ['output', totals => tokens(totals.outputTokens)],
@@ -930,7 +1030,11 @@ function breakdownView(view) {
     ['cacheShare', totals => h('td', {}, fmt.percent(cacheShare(totals)))],
     ['averagePrice', totals => h('td', {}, totals.cost > 0 && totalTokens(totals) > 0 ? fmt.cost((totals.cost / totalTokens(totals)) * 1e6) : '—')],
     ['sessions', totals => h('td', {}, fmt.int(totals.sessions.size))],
-    ['replies', totals => h('td', {}, fmt.int(totals.messages))],
+    ['toolCalls', totals => h('td', {}, fmt.int(totals.toolCalls))],
+    ['filesRead', totals => h('td', {}, fmt.int(totals.filesRead))],
+    ['filesChanged', totals => h('td', { title: t('fileChanges')(fmt.int(totals.filesAdded), fmt.int(totals.filesEdited)) },
+      fmt.int(totals.filesEdited + totals.filesAdded))],
+    ['shellCommands', totals => h('td', {}, fmt.int(totals.terminalCommands))],
   ];
   const cells = totals => columns.map(([, cell]) => cell(totals));
   const exportValues = totals => {
@@ -938,8 +1042,11 @@ function breakdownView(view) {
       cost: totals.cost, totalTokens: totalTokens(totals), input: totals.inputTokens,
       cached: totals.cachedTokens, output: totals.outputTokens, reasoning: totals.reasoningTokens,
       cacheShare: cacheShare(totals), sessions: totals.sessions.size, replies: totals.messages,
+      toolCalls: totals.toolCalls, filesRead: totals.filesRead,
+      filesChanged: totals.filesEdited + totals.filesAdded, shellCommands: totals.terminalCommands,
       shareOfCost: amount(view.totals) > 0 ? amount(totals) / amount(view.totals) : '',
       shareOfTokens: amount(view.totals) > 0 ? amount(totals) / amount(view.totals) : '',
+      shareOfRequests: amount(view.totals) > 0 ? amount(totals) / amount(view.totals) : '',
       averagePrice: totals.cost > 0 && totalTokens(totals) > 0 ? totals.cost / totalTokens(totals) * 1e6 : '',
     };
     return columns.map(([name]) => values[name]);
@@ -959,7 +1066,7 @@ function breakdownView(view) {
     if (dim !== 'period') {
       return h('button', {
         type: 'button', class: 'row-link', 'aria-pressed': String(state.filters[dim].has(key)), 'data-focus': `breakdown:${key}`,
-        title: dim === 'project' ? projectTitle(key) : null, onclick: () => toggleFilter(dim, key),
+        title: labelTitle(dim, key), onclick: () => toggleFilter(dim, key),
       }, label(dim, key));
     }
     const text = periodLabel(key, view.granularity, false, view.range);

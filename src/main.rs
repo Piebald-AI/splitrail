@@ -202,7 +202,7 @@ async fn main() {
             }
         }
         Some(Commands::Web(args)) => {
-            if let Err(e) = web::run(args.port).await {
+            if let Err(e) = web::run(args.port, config.aliases).await {
                 eprintln!("Web server error: {e:#}");
                 std::process::exit(1);
             }
