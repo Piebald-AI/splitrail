@@ -3,7 +3,8 @@ use crate::analyzers::claude_code::{
     ClaudeCodeAnalyzer, TokenFingerprint, calculate_cost_from_tokens, claude_projects_dir,
     deduplicate_grouped_messages, deduplicate_messages, extract_and_hash_project_id,
     extract_and_hash_project_id_in, is_claude_transcript_path, merge_message_into,
-    parse_jsonl_file,
+    parent_transcript_path, parse_jsonl_file, read_session_title, subagent_description,
+    subagent_session_name,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use chrono::{TimeZone, Utc};
@@ -164,7 +165,7 @@ fn test_streaming_snapshots_do_not_inflate_identical_fields() {
 fn test_parse_jsonl_file_basic() {
     let cursor = Cursor::new(JSONL_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, _, _, _) = parse_jsonl_file(
+    let (messages, ..) = parse_jsonl_file(
         Path::new("test.jsonl"),
         &mut buf_reader,
         "proj_hash",
@@ -212,7 +213,7 @@ fn test_parse_jsonl_file_basic() {
 fn test_parse_jsonl_file_tool_operations() {
     let cursor = Cursor::new(TOOL_OPERATIONS_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, _, _, _) = parse_jsonl_file(
+    let (messages, ..) = parse_jsonl_file(
         Path::new("tools.jsonl"),
         &mut buf_reader,
         "proj_hash",
@@ -428,7 +429,7 @@ fn test_main_and_subagent_transcripts_add_unique_usage_without_duplicate_inflati
 fn test_deduplicate_messages_by_local_hash() {
     let cursor = Cursor::new(DUPLICATE_MESSAGES_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, _, _, _) = parse_jsonl_file(
+    let (messages, ..) = parse_jsonl_file(
         Path::new("duplicates.jsonl"),
         &mut buf_reader,
         "proj_hash",
@@ -513,7 +514,7 @@ fn test_parse_jsonl_file_with_summary() {
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, summaries, _, _) = parse_jsonl_file(
+    let (messages, summaries, ..) = parse_jsonl_file(
         Path::new("summary.jsonl"),
         &mut buf_reader,
         "proj_hash",
@@ -537,7 +538,7 @@ fn test_parse_jsonl_file_fallback_plain_string_content() {
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, summaries, _, fallback) = parse_jsonl_file(
+    let (messages, summaries, _, fallback, _) = parse_jsonl_file(
         Path::new("fallback_plain.jsonl"),
         &mut buf_reader,
         "proj_hash",
@@ -562,7 +563,7 @@ fn test_parse_jsonl_file_fallback_session_name() {
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, summaries, _, fallback) = parse_jsonl_file(
+    let (messages, summaries, _, fallback, _) = parse_jsonl_file(
         Path::new("fallback.jsonl"),
         &mut buf_reader,
         "proj_hash",
@@ -593,7 +594,7 @@ fn test_parse_jsonl_file_fallback_multibyte() {
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, summaries, _, fallback) = parse_jsonl_file(
+    let (messages, summaries, _, fallback, _) = parse_jsonl_file(
         Path::new("fallback_multibyte.jsonl"),
         &mut buf_reader,
         "proj_hash",
@@ -706,7 +707,7 @@ fn test_parse_jsonl_file_uses_sonnet_5_permanent_pricing() {
 
     let cursor = Cursor::new(jsonl_data);
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, _, _, _) = parse_jsonl_file(
+    let (messages, ..) = parse_jsonl_file(
         Path::new("sonnet_5_pricing.jsonl"),
         &mut buf_reader,
         "proj_hash",
@@ -887,7 +888,7 @@ fn test_parse_agent_session_fallback_name_from_assistant() {
     // The fallback session name should be extracted from the first message with text content.
     let cursor = Cursor::new(AGENT_SESSION_DATA.clone());
     let mut buf_reader = BufReader::new(cursor);
-    let (messages, _, _, fallback_name) = parse_jsonl_file(
+    let (messages, _, _, fallback_name, _) = parse_jsonl_file(
         Path::new("agent-test.jsonl"),
         &mut buf_reader,
         "proj_hash",
@@ -911,4 +912,158 @@ fn test_parse_agent_session_fallback_name_from_assistant() {
         "Fallback name should start with the first message text, got: {}",
         name
     );
+}
+
+#[test]
+fn test_parse_jsonl_file_prefers_latest_rename_over_ai_title_and_summary() {
+    let jsonl_data = r#"{"uuid":"msg-uuid-1","type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2025-01-01T00:00:00Z"}
+{"type":"ai-title","aiTitle":"Generated title","sessionId":"session"}
+{"type":"summary","summary":"Old summary","leafUuid":"msg-uuid-1"}
+{"type":"custom-title","customTitle":"First rename","sessionId":"session"}
+{"type":"custom-title","customTitle":"Second rename","sessionId":"session"}"#;
+
+    let (messages, summaries, _, fallback, title) = parse_jsonl_file(
+        Path::new("titles.jsonl"),
+        Cursor::new(jsonl_data),
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
+
+    assert_eq!(messages.len(), 1);
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(fallback.as_deref(), Some("Hello"));
+    assert_eq!(title.as_deref(), Some("Second rename"));
+}
+
+#[test]
+fn test_parse_jsonl_file_uses_ai_title_when_rename_is_cleared() {
+    let jsonl_data = r#"{"type":"custom-title","customTitle":"Temporary name","sessionId":"session"}
+{"type":"ai-title","aiTitle":"First generated","sessionId":"session"}
+{"type":"ai-title","aiTitle":"Latest generated","sessionId":"session"}
+{"type":"custom-title","customTitle":"  ","sessionId":"session"}"#;
+
+    let (.., title) = parse_jsonl_file(
+        Path::new("ai_title.jsonl"),
+        Cursor::new(jsonl_data),
+        "proj_hash",
+        "conv_hash",
+    )
+    .unwrap();
+
+    assert_eq!(title.as_deref(), Some("Latest generated"));
+}
+
+#[test]
+fn test_read_session_title_ignores_quoted_title_records() {
+    // A tool result that quotes a title record is a user message, not a title.
+    let jsonl_data = br#"{"uuid":"u1","type":"user","message":{"role":"user","content":"{\"type\":\"custom-title\",\"customTitle\":\"Quoted\"}"},"timestamp":"2025-01-01T00:00:00Z"}
+{"type":"ai-title","aiTitle":"Real title","sessionId":"session"}
+"#;
+
+    assert_eq!(
+        read_session_title(jsonl_data).as_deref(),
+        Some("Real title")
+    );
+    assert_eq!(read_session_title(b"{\"type\":\"user\"}\n"), None);
+}
+
+#[test]
+fn test_parent_transcript_path_for_subagents() {
+    let project = Path::new("projects").join("project");
+    assert_eq!(
+        parent_transcript_path(&project.join("session/subagents/agent-1.jsonl")),
+        Some(project.join("session.jsonl"))
+    );
+    assert_eq!(
+        parent_transcript_path(&project.join("session/subagents/workflows/agent-2.jsonl")),
+        Some(project.join("session.jsonl"))
+    );
+    assert_eq!(parent_transcript_path(&project.join("session.jsonl")), None);
+}
+
+#[test]
+fn test_subagent_session_name() {
+    assert_eq!(
+        subagent_session_name("Combat rework", Some("Explore the combat code")),
+        "Combat rework › Explore the combat code"
+    );
+    assert_eq!(
+        subagent_session_name("Combat rework", None),
+        "Combat rework (subagent)"
+    );
+}
+
+#[test]
+fn test_live_sources_named_by_session_title_and_subagents_inherit_it() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let project = temp_dir.path().join(".claude/projects/project");
+    let main = project.join("session.jsonl");
+    let subagent = project.join("session/subagents/agent-1.jsonl");
+    fs::create_dir_all(subagent.parent().unwrap()).unwrap();
+
+    let main_prompt = r#"{"uuid":"main-uuid","type":"user","sessionId":"session","message":{"role":"user","content":"Continue the combat rework"},"timestamp":"2025-08-02T15:00:00.000Z"}"#;
+    let rename = r#"{"type":"custom-title","customTitle":"Combat rework","sessionId":"session"}"#;
+    let subagent_prompt = r#"{"uuid":"sub-uuid","type":"user","isSidechain":true,"sessionId":"session","message":{"role":"user","content":"Explore the combat code"},"timestamp":"2025-08-02T15:01:00.000Z"}"#;
+    fs::write(&main, format!("{main_prompt}\n{rename}\n")).unwrap();
+    fs::write(&subagent, subagent_prompt).unwrap();
+
+    let name_of = |path: &Path| {
+        ClaudeCodeAnalyzer::parse_live_source(&DataSource {
+            path: path.to_path_buf(),
+        })
+        .unwrap()[0]
+            .session_name
+            .clone()
+    };
+
+    assert_eq!(name_of(&main).as_deref(), Some("Combat rework"));
+    assert_eq!(
+        name_of(&subagent).as_deref(),
+        Some("Combat rework › Explore the combat code")
+    );
+
+    // A later rename of the parent reaches its subagents.
+    let second_rename =
+        r#"{"type":"custom-title","customTitle":"Combat rework v2","sessionId":"session"}"#;
+    fs::write(&main, format!("{main_prompt}\n{rename}\n{second_rename}\n")).unwrap();
+    assert_eq!(
+        name_of(&subagent).as_deref(),
+        Some("Combat rework v2 › Explore the combat code")
+    );
+
+    // A subagent's recorded task label beats its first prompt.
+    fs::write(
+        subagent.with_extension("meta.json"),
+        r#"{"agentType":"fork","isFork":true,"description":"Map combat mechanics"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        name_of(&subagent).as_deref(),
+        Some("Combat rework v2 › Map combat mechanics")
+    );
+}
+
+#[test]
+fn test_subagent_description_reads_meta_label() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let transcript = temp_dir.path().join("agent-1.jsonl");
+    assert_eq!(subagent_description(&transcript), None);
+
+    fs::write(
+        transcript.with_extension("meta.json"),
+        r#"{"agentType":"Explore","description":"  Map level-22 rows  "}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        subagent_description(&transcript).as_deref(),
+        Some("Map level-22 rows")
+    );
+
+    fs::write(
+        transcript.with_extension("meta.json"),
+        r#"{"agentType":"Explore","description":""}"#,
+    )
+    .unwrap();
+    assert_eq!(subagent_description(&transcript), None);
 }

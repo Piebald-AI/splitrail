@@ -9,7 +9,9 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::SystemTime;
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
@@ -18,13 +20,21 @@ use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::{fast_hash, hash_text};
 use walkdir::WalkDir;
 
-// Type alias for parse_jsonl_file return type
+// Type alias for parse_jsonl_file return type: messages, summaries, uuids,
+// fallback session name (first prompt), and session title (rename or AI title)
 type ParseResult = (
     Vec<ConversationMessage>,
     HashMap<String, String>,
     Vec<String>,
     Option<String>,
+    Option<String>,
 );
+
+/// Parent transcript titles, keyed by path and invalidated by size and mtime,
+/// so a session's subagents don't each re-read the parent transcript.
+type TitleCacheEntry = (u64, Option<SystemTime>, Option<String>);
+static SESSION_TITLES: LazyLock<parking_lot::Mutex<HashMap<PathBuf, TitleCacheEntry>>> =
+    LazyLock::new(Default::default);
 
 pub(crate) fn claude_projects_dir(
     config_dir: Option<&OsStr>,
@@ -99,13 +109,24 @@ impl ClaudeCodeAnalyzer {
             .unwrap_or_else(|| extract_and_hash_project_id(&source.path));
         let conversation_hash = crate::utils::hash_text(&source.path.to_string_lossy());
         let file = File::open(&source.path)?;
-        let (mut messages, summaries, _uuids, fallback) =
+        let (mut messages, summaries, _uuids, fallback, title) =
             parse_jsonl_file(&source.path, file, &project_hash, &conversation_hash)?;
-        let name = summaries
-            .into_iter()
-            .next()
-            .map(|(_, name)| name)
+        // A subagent transcript carries no title of its own, so it is named after
+        // its parent session plus its task label (or its first prompt) to tell
+        // siblings apart.
+        let parent = parent_transcript_path(&source.path);
+        let label = parent
+            .as_ref()
+            .and_then(|_| subagent_description(&source.path))
             .or(fallback);
+        let name = title
+            .or_else(|| summaries.into_iter().next().map(|(_, name)| name))
+            .or_else(|| {
+                parent
+                    .and_then(|parent| cached_session_title(&parent))
+                    .map(|parent_title| subagent_session_name(&parent_title, label.as_deref()))
+            })
+            .or(label);
         if let Some(name) = name {
             for message in &mut messages {
                 if message.session_name.is_none() {
@@ -468,6 +489,20 @@ struct ClaudeCodeSummaryEntry {
     leaf_uuid: String,
 }
 
+/// Written when the user renames a session; the latest one is the current name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCodeCustomTitleEntry {
+    custom_title: String,
+}
+
+/// Claude Code's generated title for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCodeAiTitleEntry {
+    ai_title: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClaudeCodeFileHistorySnapshotEntry {
@@ -515,6 +550,10 @@ struct ClaudeCodeQueueOperationEntry {
 enum ClaudeCodeEntry {
     #[serde(alias = "summary")]
     Summary(ClaudeCodeSummaryEntry),
+    #[serde(rename = "custom-title")]
+    CustomTitle(ClaudeCodeCustomTitleEntry),
+    #[serde(rename = "ai-title")]
+    AiTitle(ClaudeCodeAiTitleEntry),
     #[serde(rename = "file-history-snapshot")]
     FileHistorySnapshot(ClaudeCodeFileHistorySnapshotEntry),
     #[serde(alias = "user", alias = "assistant", alias = "system")]
@@ -693,6 +732,8 @@ pub fn parse_jsonl_file<R: Read>(
     let mut summaries = HashMap::with_capacity(10);
     let mut all_uuids = Vec::with_capacity(estimated_messages);
     let mut fallback_session_name = None;
+    let mut custom_title = None;
+    let mut ai_title = None;
 
     let mut current_model = None;
     let mut current_project_path = None;
@@ -713,6 +754,12 @@ pub fn parse_jsonl_file<R: Read>(
         match parsed_line {
             Ok(ClaudeCodeEntry::Summary(summary)) => {
                 summaries.insert(summary.leaf_uuid, summary.summary);
+            }
+            Ok(ClaudeCodeEntry::CustomTitle(entry)) => {
+                record_title(&mut custom_title, &entry.custom_title);
+            }
+            Ok(ClaudeCodeEntry::AiTitle(entry)) => {
+                record_title(&mut ai_title, &entry.ai_title);
             }
             Ok(ClaudeCodeEntry::Message(entry)) => {
                 if let Some(cwd) = entry.cwd.as_deref().and_then(normalize_project_path) {
@@ -849,7 +896,96 @@ pub fn parse_jsonl_file<R: Read>(
         };
     }
 
-    Ok((messages, summaries, all_uuids, fallback_session_name))
+    Ok((
+        messages,
+        summaries,
+        all_uuids,
+        fallback_session_name,
+        custom_title.or(ai_title),
+    ))
+}
+
+/// Keep the latest title; an empty one clears an earlier rename.
+fn record_title(slot: &mut Option<String>, title: &str) {
+    let title = title.trim();
+    *slot = (!title.is_empty()).then(|| title.to_string());
+}
+
+/// A transcript's title — the latest rename, else the latest generated title —
+/// read without parsing its messages. Claude Code writes title records as
+/// top-level `{"type":"custom-title",...}` lines, so other lines are skipped
+/// by prefix, including tool output that merely quotes such a record.
+pub(crate) fn read_session_title(bytes: &[u8]) -> Option<String> {
+    let mut custom_title = None;
+    let mut ai_title = None;
+    for line in bytes.split(|&b| b == b'\n') {
+        if !line.starts_with(br#"{"type":"custom-title""#)
+            && !line.starts_with(br#"{"type":"ai-title""#)
+        {
+            continue;
+        }
+        let mut line_buf = line.to_vec();
+        match simd_json::from_slice::<ClaudeCodeEntry>(&mut line_buf) {
+            Ok(ClaudeCodeEntry::CustomTitle(entry)) => {
+                record_title(&mut custom_title, &entry.custom_title)
+            }
+            Ok(ClaudeCodeEntry::AiTitle(entry)) => record_title(&mut ai_title, &entry.ai_title),
+            _ => {}
+        }
+    }
+    custom_title.or(ai_title)
+}
+
+/// The title of the transcript at `path`, cached until the file changes.
+fn cached_session_title(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let (len, modified) = (metadata.len(), metadata.modified().ok());
+    if let Some((cached_len, cached_modified, title)) = SESSION_TITLES.lock().get(path)
+        && (*cached_len, *cached_modified) == (len, modified)
+    {
+        return title.clone();
+    }
+    let title = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| read_session_title(&bytes));
+    SESSION_TITLES
+        .lock()
+        .insert(path.to_path_buf(), (len, modified, title.clone()));
+    title
+}
+
+/// A subagent transcript lives at `<project>/<session id>/subagents/**/<agent>.jsonl`;
+/// its parent session's transcript is `<project>/<session id>.jsonl`.
+pub(crate) fn parent_transcript_path(path: &Path) -> Option<PathBuf> {
+    let subagents = path
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.file_name() == Some(OsStr::new("subagents")))?;
+    let session_dir = subagents.parent()?;
+    let mut file_name = session_dir.file_name()?.to_os_string();
+    file_name.push(".jsonl");
+    Some(session_dir.parent()?.join(file_name))
+}
+
+pub(crate) fn subagent_session_name(parent_title: &str, label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("{parent_title} › {label}"),
+        None => format!("{parent_title} (subagent)"),
+    }
+}
+
+#[derive(Deserialize)]
+struct SubagentMeta {
+    description: Option<String>,
+}
+
+/// The task label Claude Code records for a subagent in `<agent>.meta.json`
+/// beside its transcript, e.g. `"description":"Map level-22 rows to mechanics"`.
+pub(crate) fn subagent_description(transcript: &Path) -> Option<String> {
+    let mut bytes = std::fs::read(transcript.with_extension("meta.json")).ok()?;
+    let meta = simd_json::from_slice::<SubagentMeta>(&mut bytes).ok()?;
+    let description = meta.description?.trim().to_string();
+    (!description.is_empty()).then_some(description)
 }
 
 fn normalize_project_path(raw: &str) -> Option<String> {
