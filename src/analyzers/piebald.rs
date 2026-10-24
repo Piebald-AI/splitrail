@@ -131,7 +131,9 @@ enum TierSource {
     /// effective tier. `message_generations.profile_id` is deliberately not
     /// used: it records the user-visible source profile, not that hidden clone,
     /// and it would miss every chat-specific tier. Per-turn tier history no longer
-    /// exists in the database, so a chat's turns are all priced at its current tier.
+    /// exists in the database, so a chat's turns are all priced at its current tier,
+    /// except where a generation records its own requested tier
+    /// ([`PiebaldLayout::has_requested_service_tier`]), which wins for that row.
     /// That is deliberate, with two consequences: changing a profile's tier reprices
     /// earlier turns of every chat on it, including already-uploaded messages
     /// (same `global_hash`, new cost), and a chat that switched profiles is priced
@@ -167,6 +169,11 @@ struct PiebaldLayout {
     /// Whether `_ksuid_map` exists. Piebald's KSUID migration rewrites integer
     /// primary keys as TEXT KSUIDs and retains this old-to-new map afterwards.
     has_ksuid_map: bool,
+    /// Whether generations record the tier their own request asked for
+    /// (`message_generations.requested_service_tier` plus
+    /// `requested_service_tier_recorded`). Where a row has it, that per-turn fact
+    /// replaces whatever [`TierSource`] would infer; see [`requested_tier_sql`].
+    has_requested_service_tier: bool,
 }
 
 impl PiebaldLayout {
@@ -188,13 +195,14 @@ impl PiebaldLayout {
     /// storage remains, which keeps pricing unchanged for every layout that still
     /// has typed storage.
     fn detect(conn: &Connection) -> Result<Self> {
-        let (typed_parts, profile_settings, generation_configs, custom_fields, has_ksuid_map): (
-            bool,
-            bool,
-            bool,
-            bool,
-            bool,
-        ) = conn.query_row(
+        let (
+            typed_parts,
+            profile_settings,
+            generation_configs,
+            custom_fields,
+            has_ksuid_map,
+            requested_tier_columns,
+        ): (bool, bool, bool, bool, bool, bool) = conn.query_row(
             "SELECT
                  EXISTS(SELECT 1 FROM sqlite_master
                         WHERE type = 'table' AND name = 'message_generations')
@@ -207,7 +215,11 @@ impl PiebaldLayout {
                  EXISTS(SELECT 1 FROM pragma_table_info('profiles')
                         WHERE name = 'custom_override_fields'),
                  EXISTS(SELECT 1 FROM sqlite_master
-                        WHERE type = 'table' AND name = '_ksuid_map')",
+                        WHERE type = 'table' AND name = '_ksuid_map'),
+                 -- Piebald adds both columns in one migration, so the flag column
+                 -- stands for the pair.
+                 EXISTS(SELECT 1 FROM pragma_table_info('message_generations')
+                        WHERE name = 'requested_service_tier_recorded')",
             [],
             |row| {
                 Ok((
@@ -216,6 +228,7 @@ impl PiebaldLayout {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )?;
@@ -235,6 +248,9 @@ impl PiebaldLayout {
                 TierSource::Unrecorded
             },
             has_ksuid_map,
+            // The columns live on `message_generations`, which only the typed-parts
+            // query joins; a legacy layout reads usage from `messages` instead.
+            has_requested_service_tier: typed_parts && requested_tier_columns,
         })
     }
 
@@ -263,6 +279,28 @@ impl PiebaldLayout {
             ),
         )
     }
+}
+
+/// The SQL tier expression for a layout whose generations record their requested
+/// tier, given the expression `inferred` that [`TierSource`] would use alone.
+///
+/// Piebald's engines report the `service_tier` in each request body they send,
+/// and the generation stores it with a flag saying it was recorded. That per-turn
+/// fact is the reason the columns exist: a profile-based [`TierSource`] prices
+/// every turn of a chat at the chat's *current* tier, so switching a chat to
+/// priority repriced its earlier standard turns. A recorded row therefore uses its
+/// own value, and a NULL there means the request carried no tier (standard), not
+/// "unknown". Only rows nobody recorded (written before the columns existed, or by
+/// an engine that never sends a tier) fall back to the inference.
+///
+/// `usage` is the generations alias, a fixed literal from this module.
+fn requested_tier_sql(usage: &str, inferred: &str) -> String {
+    format!(
+        "CASE WHEN {usage}.requested_service_tier_recorded
+              THEN {usage}.requested_service_tier
+              ELSE {inferred}
+         END"
+    )
 }
 
 /// Query messages using the matching layout, retaining user messages without
@@ -322,6 +360,11 @@ fn query_messages(conn: &Connection, layout: PiebaldLayout) -> Result<Vec<Piebal
              END",
         ),
         TierSource::Unrecorded => (String::new(), "NULL"),
+    };
+    let service_tier = if layout.has_requested_service_tier {
+        requested_tier_sql(usage, service_tier)
+    } else {
+        service_tier.to_string()
     };
     let (stable_id, legacy_join) = layout.stable_id_sql("messages", "m");
     // Unparented messages are chat or Launchpad drafts, not conversation turns.
