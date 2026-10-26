@@ -364,11 +364,20 @@ fn post_flip_rows_use_ksuids_and_drafts_are_ignored() {
 /// turn priced at the other one fails here rather than passing by accident. They
 /// have no Flex card, so a leaked `flex` prices as Standard and is caught too.
 fn assert_turns_priced_at(messages: &[ConversationMessage], tier: ServiceTier) {
+    assert_turn_tiers(messages, [tier, tier]);
+}
+
+/// Like [`assert_turns_priced_at`], with a separate tier for each assistant turn:
+/// the gpt-5.5 turn (`m2`) first, then the gpt-5.4 turn (`m3`).
+fn assert_turn_tiers(messages: &[ConversationMessage], tiers: [ServiceTier; 2]) {
     assert_eq!(messages.len(), 4);
-    for (message, model, input, output, write, read) in [
+    for ((message, model, input, output, write, read), tier) in [
         (&messages[1], "gpt-5.5", 900, 230, 50, 100),
         (&messages[2], "gpt-5.4", 500, 110, 0, 0),
-    ] {
+    ]
+    .into_iter()
+    .zip(tiers)
+    {
         let cost_at = |tier| {
             calculate_total_cost_for_service_tier_at(
                 model,
@@ -523,4 +532,93 @@ fn unreadable_rows_fail_the_source_instead_of_vanishing() {
     ))
     .unwrap();
     assert!(PiebaldAnalyzer::new().parse_source(&source).is_err());
+}
+
+/// Apply Piebald's per-generation tier columns to a fixture that already prices
+/// from custom properties. Existing rows take the column defaults, which is how
+/// every generation written before the columns existed looks: unrecorded.
+fn add_requested_service_tier_columns(source: &DataSource) {
+    let conn = Connection::open(&source.path).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE message_generations ADD COLUMN requested_service_tier TEXT;
+         ALTER TABLE message_generations ADD COLUMN requested_service_tier_recorded
+             BOOLEAN NOT NULL DEFAULT 0;",
+    )
+    .unwrap();
+}
+
+/// Record that generation `message_id`'s request carried `tier` (`None`: no tier).
+fn record_requested_tier(source: &DataSource, message_id: &str, tier: Option<&str>) {
+    let conn = Connection::open(&source.path).unwrap();
+    conn.execute(
+        "UPDATE message_generations
+         SET requested_service_tier = ?1, requested_service_tier_recorded = 1
+         WHERE message_id = ?2",
+        rusqlite::params![tier, message_id],
+    )
+    .unwrap();
+}
+
+/// A fixture on today's Piebald layout whose chat currently requests `priority`.
+fn chat_now_on_priority() -> (TempDir, DataSource) {
+    let (directory, source) = ksuid_fixture();
+    fold_generation_configs(&source);
+    drop_profile_settings_tables(&source);
+    set_custom_fields(
+        &source,
+        HIDDEN_CLONE,
+        Some(r#"{"service_tier": "priority"}"#),
+    );
+    add_requested_service_tier_columns(&source);
+    (directory, source)
+}
+
+/// The case the columns exist for: a chat switched to priority after a standard
+/// turn. The chat profile says priority now, but each turn recorded what its own
+/// request asked for, so the earlier turn keeps standard pricing.
+#[test]
+fn recorded_tiers_price_each_turn_as_its_request_asked() {
+    let (_directory, source) = chat_now_on_priority();
+    record_requested_tier(&source, KSUID_MESSAGES[1], Some("priority"));
+    record_requested_tier(&source, KSUID_MESSAGES[2], None);
+
+    let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
+    assert_turn_tiers(&messages, [ServiceTier::Priority, ServiceTier::Standard]);
+    assert_eq!(messages[1].stats.tool_calls, 2);
+    assert_eq!(messages[2].stats.tool_calls, 1);
+    assert_eq!(
+        messages[1].global_hash,
+        hash_text("piebald_2026-05-01T12:00:01Z_2")
+    );
+}
+
+/// A recorded tier also wins in the other direction: a priority turn in a chat
+/// that has since gone back to standard keeps its priority price.
+#[test]
+fn a_recorded_tier_wins_over_a_chat_that_switched_back() {
+    let (_directory, source) = chat_now_on_priority();
+    set_custom_fields(&source, HIDDEN_CLONE, None);
+    record_requested_tier(&source, KSUID_MESSAGES[1], Some("priority"));
+    record_requested_tier(&source, KSUID_MESSAGES[2], Some("priority"));
+
+    let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
+    assert_turns_priced_at(&messages, ServiceTier::Priority);
+}
+
+/// Rows nobody recorded (history from before the columns, or an engine that
+/// never sends a tier) keep the profile inference, even beside recorded rows.
+#[test]
+fn unrecorded_generations_fall_back_to_the_chat_profile() {
+    let (_directory, source) = chat_now_on_priority();
+    let analyzer = PiebaldAnalyzer::new();
+    assert_turns_priced_at(
+        &analyzer.parse_source(&source).unwrap(),
+        ServiceTier::Priority,
+    );
+
+    record_requested_tier(&source, KSUID_MESSAGES[2], None);
+    assert_turn_tiers(
+        &analyzer.parse_source(&source).unwrap(),
+        [ServiceTier::Priority, ServiceTier::Standard],
+    );
 }
