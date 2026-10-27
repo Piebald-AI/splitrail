@@ -218,6 +218,7 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
 
     let mut session_id = fallback_session_id;
     let mut project_id = fallback_project;
+    let mut project_path = None;
     let mut parent_session = None;
     let mut seed_length = None;
     let mut session_name = None;
@@ -274,6 +275,7 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                 session_id = id;
             }
             if let Some(cwd) = event.cwd {
+                project_path = (!cwd.trim().is_empty()).then_some(cwd.clone());
                 project_id = cwd;
             }
             parent_session = event.parent_session;
@@ -321,7 +323,7 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                     application: Application::DeepSeekHarness,
                     date,
                     project_hash: hash_text(&project_id),
-                    project_path: Some(project_id.clone()),
+                    project_path: project_path.clone(),
                     conversation_hash: hash_text(canonical_session),
                     local_hash: Some(message_id.clone()),
                     global_hash: hash_text(&format!("deepseek-harness:{message_id}")),
@@ -374,7 +376,7 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                     application: Application::DeepSeekHarness,
                     date,
                     project_hash: hash_text(&project_id),
-                    project_path: Some(project_id.clone()),
+                    project_path: project_path.clone(),
                     conversation_hash: hash_text(canonical_session),
                     local_hash: Some(message_id.clone()),
                     global_hash: hash_text(&format!("deepseek-harness:{message_id}")),
@@ -548,6 +550,33 @@ mod tests {
             messages[1].session_name.as_deref(),
             Some("DeepSeek Harness title")
         );
+    }
+
+    #[test]
+    fn missing_or_blank_cwd_does_not_set_project_path() {
+        for input in [
+            concat!(
+                r#"{"type":"session","id":"session-1"}"#,
+                "\n",
+                r#"{"type":"assistant/message","time":1786629153000,"data":{"message":{"id":"assistant-1","source":{"kind":"model","model":"deepseek-v4-flash"}},"usage":{}}}"#,
+                "\n",
+            ),
+            concat!(
+                r#"{"type":"session","id":"session-1","cwd":"  "}"#,
+                "\n",
+                r#"{"type":"assistant/message","time":1786629153000,"data":{"message":{"id":"assistant-1","source":{"kind":"model","model":"deepseek-v4-flash"}},"usage":{}}}"#,
+                "\n",
+            ),
+        ] {
+            let messages = parse_session_reader(
+                Path::new("/tmp/workspace/session-1/session.jsonl.zstd"),
+                Cursor::new(input),
+            )
+            .expect("session should parse");
+
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].project_path, None);
+        }
     }
 
     #[test]
