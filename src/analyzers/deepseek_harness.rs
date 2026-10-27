@@ -15,6 +15,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+const DSH_SESSION_FILENAMES: &[&str] = &["session.jsonl.zstd", "session.v4.jsonl.zstd"];
+
 pub struct DeepSeekHarnessAnalyzer;
 
 impl DeepSeekHarnessAnalyzer {
@@ -136,11 +138,15 @@ struct DshUsage {
     reasoning_tokens: u64,
 }
 
+fn is_dsh_session_filename(name: &OsStr) -> bool {
+    DSH_SESSION_FILENAMES
+        .iter()
+        .any(|filename| name == *filename)
+}
+
 fn is_dsh_session_path(path: &Path) -> bool {
     path.is_file()
-        && path
-            .file_name()
-            .is_some_and(|name| name == "session.jsonl.zstd")
+        && path.file_name().is_some_and(is_dsh_session_filename)
         && path
             .parent()
             .and_then(Path::parent)
@@ -315,7 +321,7 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                     application: Application::DeepSeekHarness,
                     date,
                     project_hash: hash_text(&project_id),
-                    project_path: None,
+                    project_path: Some(project_id.clone()),
                     conversation_hash: hash_text(canonical_session),
                     local_hash: Some(message_id.clone()),
                     global_hash: hash_text(&format!("deepseek-harness:{message_id}")),
@@ -368,7 +374,7 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                     application: Application::DeepSeekHarness,
                     date,
                     project_hash: hash_text(&project_id),
-                    project_path: None,
+                    project_path: Some(project_id.clone()),
                     conversation_hash: hash_text(canonical_session),
                     local_hash: Some(message_id.clone()),
                     global_hash: hash_text(&format!("deepseek-harness:{message_id}")),
@@ -424,10 +430,12 @@ impl Analyzer for DeepSeekHarnessAnalyzer {
     }
 
     fn get_data_glob_patterns(&self) -> Vec<String> {
-        Self::data_dir()
-            .map(|dir| format!("{}/*/*/session.jsonl.zstd", dir.to_string_lossy()))
-            .into_iter()
-            .collect()
+        Self::data_dir().map_or_else(Vec::new, |dir| {
+            DSH_SESSION_FILENAMES
+                .iter()
+                .map(|name| format!("{}/*/*/{name}", dir.to_string_lossy()))
+                .collect()
+        })
     }
 
     fn discover_data_sources(&self) -> Result<Vec<DataSource>> {
@@ -492,6 +500,13 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_legacy_and_v4_session_filenames() {
+        assert!(is_dsh_session_filename(OsStr::new("session.jsonl.zstd")));
+        assert!(is_dsh_session_filename(OsStr::new("session.v4.jsonl.zstd")));
+        assert!(!is_dsh_session_filename(OsStr::new("session.jsonl")));
+    }
+
+    #[test]
     fn parses_usage_tools_and_only_direct_user_messages() {
         let input = concat!(
             r#"{"type":"session","id":"session-1","createdAt":1786629150000,"cwd":"/tmp/project"}"#,
@@ -528,6 +543,7 @@ mod tests {
         assert_eq!(messages[1].stats.tool_calls, 2);
         assert_eq!(messages[1].stats.files_read, 1);
         assert_eq!(messages[1].stats.terminal_commands, 1);
+        assert_eq!(messages[1].project_path.as_deref(), Some("/tmp/project"));
         assert_eq!(
             messages[1].session_name.as_deref(),
             Some("DeepSeek Harness title")
