@@ -108,6 +108,33 @@ async fn test_gemini_cli_long_prompt_bills_every_category_at_long_context_rates(
     assert_cost(msg.stats.cost, 0.48);
 }
 
+/// The bracket is chosen from the whole prompt, which counts each cached
+/// token once: a prompt of exactly 200K tokens (150K cached) stays on
+/// `gemini-3.1-pro-preview`'s short-prompt rates, and one more token moves the
+/// whole request to the long-context rates.
+///
+/// ```text
+/// 200_000 prompt:  50_000 x $2.00 + 150_000 x $0.20 + 1_000 x $12.00 = $0.142
+/// 200_001 prompt:  50_001 x $4.00 + 150_000 x $0.40 + 1_000 x $18.00 = $0.278004
+/// ```
+///
+/// Counting the cached tokens a second time when sizing the prompt would push
+/// the first request past the threshold as well.
+#[tokio::test]
+async fn test_gemini_cli_long_context_threshold_counts_cached_tokens_once() {
+    let at_threshold = parse_one_response(
+        "gemini-3.1-pro-preview",
+        r#"{"input": 200000, "output": 1000, "cached": 150000, "thoughts": 0, "tool": 0, "total": 201000}"#,
+    );
+    assert_cost(at_threshold.stats.cost, 0.142);
+
+    let past_threshold = parse_one_response(
+        "gemini-3.1-pro-preview",
+        r#"{"input": 200001, "output": 1000, "cached": 150000, "thoughts": 0, "tool": 0, "total": 201001}"#,
+    );
+    assert_cost(past_threshold.stats.cost, 0.278_004);
+}
+
 /// Google bills every token of a request at the long-context rates once its
 /// prompt passes 200K tokens. That includes `gemini-2.5-pro`, whose registry
 /// tiers are progressive for the per-category calculators. A 250K-token
