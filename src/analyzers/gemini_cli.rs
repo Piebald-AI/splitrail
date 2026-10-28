@@ -1,9 +1,6 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::{
-    ServiceTier, calculate_cache_cost_for_service_tier_at,
-    calculate_input_cost_for_service_tier_at, calculate_output_cost_for_service_tier_at,
-};
+use crate::models::{ServiceTier, calculate_total_cost_for_service_tier_at};
 use crate::types::{Application, ConversationMessage, FileCategory, MessageRole, Stats};
 use crate::utils::{deserialize_utc_timestamp, hash_text};
 use anyhow::Result;
@@ -135,6 +132,18 @@ impl GeminiCliContent {
     }
 }
 
+/// Token counts Gemini CLI records on each `gemini` message.
+///
+/// Gemini CLI copies these straight from the Gemini API's `usageMetadata`
+/// (`chatRecordingService.ts`, unchanged since session recording began):
+/// `input` is `promptTokenCount`, `output` is `candidatesTokenCount`, `cached`
+/// is `cachedContentTokenCount`, `thoughts` is `thoughtsTokenCount`, `tool` is
+/// `toolUsePromptTokenCount`, and `total` is `totalTokenCount`. The fields
+/// therefore carry Google's definitions, which are not disjoint categories:
+///
+/// - `input` is the whole prompt and already includes the `cached` tokens.
+/// - `output` excludes `thoughts`: `total` = `input` + `tool` + `thoughts` +
+///   `output`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GeminiCliTokens {
     #[serde(default)]
@@ -149,6 +158,17 @@ struct GeminiCliTokens {
     tool: u64,
     #[serde(default)]
     total: u64,
+}
+
+impl GeminiCliTokens {
+    /// Prompt tokens that were not served from the context cache.
+    ///
+    /// Saturating, so a malformed record whose `cached` count exceeds its
+    /// prompt clamps to zero instead of panicking in debug builds or wrapping
+    /// to an absurd token count in release builds.
+    fn uncached_input(&self) -> u64 {
+        self.input.saturating_sub(self.cached)
+    }
 }
 
 // Tool extraction and file operation mapping
@@ -245,35 +265,40 @@ fn extract_and_hash_project_id_gemini_cli(file_path: &Path) -> String {
     hash_text(&file_path.to_string_lossy())
 }
 
-// Cost calculation using the centralized model system
+/// Prices one Gemini CLI response the way the Gemini API bills it.
+///
+/// The raw fields overlap (see [`GeminiCliTokens`]), so they are first turned
+/// into disjoint billable amounts:
+///
+/// - Input: the uncached prompt plus the tool-use prompt, at the input rate.
+///   Billing `input` in full would charge every cached token twice, once at
+///   the input rate and again at the cache rate.
+/// - Output: candidates plus thoughts. The Gemini API pricing page bills
+///   output "including thinking tokens", so thoughts are output, not input.
+/// - Cache reads: `cached`, at the cache rate.
+///
+/// These go through the whole-request calculator rather than the
+/// per-category ones because of long-context brackets. `gemini-3.1-pro-preview`
+/// bills input, output, and cache reads at higher rates once the prompt
+/// exceeds 200K tokens. The whole-request calculator rebuilds the prompt size
+/// from uncached input plus cache reads and prices every category in that one
+/// bracket; the per-category calculators would instead pick each bracket from
+/// that category's own count, so a long, mostly cached prompt would bill its
+/// uncached input and output at short-prompt rates.
 fn calculate_gemini_cost(
     tokens: &GeminiCliTokens,
     model_name: &str,
     effective_at: DateTime<Utc>,
 ) -> f64 {
-    let total_input_tokens = tokens.input + tokens.thoughts + tokens.tool;
-
-    let input_cost = calculate_input_cost_for_service_tier_at(
+    calculate_total_cost_for_service_tier_at(
         model_name,
         ServiceTier::Standard,
-        total_input_tokens,
-        Some(effective_at),
-    );
-    let output_cost = calculate_output_cost_for_service_tier_at(
-        model_name,
-        ServiceTier::Standard,
-        tokens.output,
-        Some(effective_at),
-    );
-    let cache_cost = calculate_cache_cost_for_service_tier_at(
-        model_name,
-        ServiceTier::Standard,
-        0,
+        tokens.uncached_input().saturating_add(tokens.tool),
+        tokens.output.saturating_add(tokens.thoughts),
+        0, // Gemini CLI records no cache writes.
         tokens.cached,
         Some(effective_at),
-    ); // Gemini CLI doesn't have cache creation
-
-    input_cost + output_cost + cache_cost
+    )
 }
 
 fn is_gemini_cli_chat_path(path: &Path) -> bool {
@@ -361,7 +386,11 @@ fn messages_from_session(
             } => {
                 let mut stats = extract_tool_stats(&tool_calls);
 
-                stats.input_tokens = tokens.input;
+                // `input` is the whole prompt including the cached part (see
+                // `GeminiCliTokens`). Report only the uncached portion, like
+                // the Qwen Code and Codex analyzers, so the input and cached
+                // columns do not count the same tokens twice.
+                stats.input_tokens = tokens.uncached_input();
                 stats.output_tokens = tokens.output;
                 stats.reasoning_tokens = tokens.thoughts;
                 stats.cache_creation_tokens = 0;
