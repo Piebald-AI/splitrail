@@ -108,6 +108,29 @@ async fn test_gemini_cli_long_prompt_bills_every_category_at_long_context_rates(
     assert_cost(msg.stats.cost, 0.48);
 }
 
+/// Google bills every token of a request at the long-context rates once its
+/// prompt passes 200K tokens. That includes `gemini-2.5-pro`, whose registry
+/// tiers are progressive for the per-category calculators. A 250K-token
+/// prompt with 10K output therefore costs:
+///
+/// ```text
+/// input   250_000 x $2.50  = $0.625
+/// output   10_000 x $15.00 = $0.150
+///                     total  $0.775
+/// ```
+///
+/// Applying the tiers progressively (only the input past 200K at $2.50, and
+/// output at the short-prompt $10) would report $0.475 and undercharge.
+#[tokio::test]
+async fn test_gemini_cli_gemini_2_5_pro_long_prompt_bills_all_tokens_at_long_context_rates() {
+    let msg = parse_one_response(
+        "gemini-2.5-pro",
+        r#"{"input": 250000, "output": 10000, "cached": 0, "thoughts": 0, "tool": 0, "total": 260000}"#,
+    );
+
+    assert_cost(msg.stats.cost, 0.775);
+}
+
 /// The Gemini API never reports more cached tokens than prompt tokens, but a
 /// malformed record that does must not underflow: uncached input clamps to
 /// zero and the cache reads are still billed (400 x $0.10 per 1M).

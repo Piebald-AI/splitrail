@@ -285,6 +285,14 @@ fn extract_and_hash_project_id_gemini_cli(file_path: &Path) -> String {
 /// bracket; the per-category calculators would instead pick each bracket from
 /// that category's own count, so a long, mostly cached prompt would bill its
 /// uncached input and output at short-prompt rates.
+///
+/// The single bracket is also right for older entries such as
+/// `gemini-2.5-pro`, whose registry tiers are progressive for the
+/// per-category calculators. Google bills the whole request at the
+/// long-context rates ("If a query input context is longer than 200K tokens,
+/// all tokens (input and output) are charged at long context rates", Vertex AI
+/// pricing), so charging only the tokens past the threshold at the higher
+/// rate would undercharge.
 fn calculate_gemini_cost(
     tokens: &GeminiCliTokens,
     model_name: &str,
