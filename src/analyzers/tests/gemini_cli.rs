@@ -12,6 +12,167 @@ fn write_session(session_dir: &std::path::Path, body: &str) -> std::path::PathBu
     session_path
 }
 
+/// Parses a session holding one user prompt and one `gemini` response that
+/// records `tokens` (a JSON object), and returns the response message.
+///
+/// The response is timestamped 2026-10-28T17:00:00Z, when `gemini-4-argon` is
+/// on its introductory $2 input / $10 output / $0.10 cached per 1M tokens.
+/// The prompt gets an earlier timestamp, as in a real session: both messages
+/// derive their `global_hash` from the file path and timestamp, so equal
+/// timestamps would make them look like duplicates to global-hash
+/// deduplication.
+fn parse_one_response(model: &str, tokens: &str) -> crate::types::ConversationMessage {
+    let dir = tempdir().unwrap();
+    let project_dir = dir.path().join("tmp").join("project-cost").join("chats");
+    let body = format!(
+        r#"{{
+        "sessionId": "sess-cost",
+        "projectHash": "proj-cost",
+        "startTime": "2026-10-28T16:59:00Z",
+        "lastUpdated": "2026-10-28T17:00:00Z",
+        "messages": [
+            {{"type": "user", "id": "u1", "timestamp": "2026-10-28T16:59:00Z", "content": "Fix the bug"}},
+            {{"type": "gemini", "id": "g1", "timestamp": "2026-10-28T17:00:00Z", "content": "Fixed.",
+              "model": "{model}", "tokens": {tokens}}}
+        ]
+    }}"#
+    );
+    let session_path = write_session(&project_dir, &body);
+
+    GeminiCliAnalyzer::new()
+        .parse_sources_parallel(&[crate::analyzer::DataSource { path: session_path }])
+        .into_iter()
+        .find(|m| m.role == crate::types::MessageRole::Assistant)
+        .expect("the gemini response should parse")
+}
+
+fn assert_cost(actual: f64, expected: f64) {
+    assert!(
+        (actual - expected).abs() < 1e-9,
+        "cost was {actual}, expected {expected}"
+    );
+}
+
+/// Costs one response by Google's definitions of the recorded fields:
+/// `input` (`promptTokenCount`) already contains the 90K `cached` tokens, so
+/// only 10K of it is uncached; thinking tokens are billed at the output rate;
+/// tool-use prompt tokens are billed as input. At Gemini 4 Argon's
+/// introductory rates:
+///
+/// ```text
+/// uncached input  (100_000 - 90_000 + 500) x $2.00  = $0.021
+/// cache reads      90_000                  x $0.10  = $0.009
+/// output          (1_000 + 2_000)          x $10.00 = $0.030
+///                                             total   $0.060
+/// ```
+///
+/// Billing `input` in full plus thoughts as input, with the cache on top,
+/// would report $0.224 for the same response instead.
+#[tokio::test]
+async fn test_gemini_cli_cost_follows_gemini_api_token_definitions() {
+    let msg = parse_one_response(
+        "gemini-4-argon",
+        r#"{"input": 100000, "output": 1000, "cached": 90000, "thoughts": 2000, "tool": 500, "total": 103500}"#,
+    );
+
+    assert_eq!(msg.stats.input_tokens, 10_000);
+    assert_eq!(msg.stats.cached_tokens, 90_000);
+    assert_eq!(msg.stats.output_tokens, 1_000);
+    assert_eq!(msg.stats.reasoning_tokens, 2_000);
+    assert_cost(msg.stats.cost, 0.060);
+}
+
+/// A 300K-token prompt is past `gemini-3.1-pro-preview`'s 200K long-context
+/// threshold even though only 50K of it is uncached, and Google then bills
+/// every category at the long-context rates ($4 input / $18 output / $0.40
+/// cached per 1M tokens):
+///
+/// ```text
+/// uncached input   50_000 x $4.00  = $0.20
+/// cache reads     250_000 x $0.40  = $0.10
+/// output           10_000 x $18.00 = $0.18
+///                             total  $0.48
+/// ```
+///
+/// Choosing each category's bracket from its own count would bill the 50K
+/// uncached input and the 10K output at the short-prompt $2 / $12 rates and
+/// report $0.32 instead.
+#[tokio::test]
+async fn test_gemini_cli_long_prompt_bills_every_category_at_long_context_rates() {
+    let msg = parse_one_response(
+        "gemini-3.1-pro-preview",
+        r#"{"input": 300000, "output": 10000, "cached": 250000, "thoughts": 0, "tool": 0, "total": 310000}"#,
+    );
+
+    assert_eq!(msg.stats.input_tokens, 50_000);
+    assert_cost(msg.stats.cost, 0.48);
+}
+
+/// The bracket is chosen from the whole prompt, which counts each cached
+/// token once: a prompt of exactly 200K tokens (150K cached) stays on
+/// `gemini-3.1-pro-preview`'s short-prompt rates, and one more token moves the
+/// whole request to the long-context rates.
+///
+/// ```text
+/// 200_000 prompt:  50_000 x $2.00 + 150_000 x $0.20 + 1_000 x $12.00 = $0.142
+/// 200_001 prompt:  50_001 x $4.00 + 150_000 x $0.40 + 1_000 x $18.00 = $0.278004
+/// ```
+///
+/// Counting the cached tokens a second time when sizing the prompt would push
+/// the first request past the threshold as well.
+#[tokio::test]
+async fn test_gemini_cli_long_context_threshold_counts_cached_tokens_once() {
+    let at_threshold = parse_one_response(
+        "gemini-3.1-pro-preview",
+        r#"{"input": 200000, "output": 1000, "cached": 150000, "thoughts": 0, "tool": 0, "total": 201000}"#,
+    );
+    assert_cost(at_threshold.stats.cost, 0.142);
+
+    let past_threshold = parse_one_response(
+        "gemini-3.1-pro-preview",
+        r#"{"input": 200001, "output": 1000, "cached": 150000, "thoughts": 0, "tool": 0, "total": 201001}"#,
+    );
+    assert_cost(past_threshold.stats.cost, 0.278_004);
+}
+
+/// Google bills every token of a request at the long-context rates once its
+/// prompt passes 200K tokens. That includes `gemini-2.5-pro`, whose registry
+/// tiers are progressive for the per-category calculators. A 250K-token
+/// prompt with 10K output therefore costs:
+///
+/// ```text
+/// input   250_000 x $2.50  = $0.625
+/// output   10_000 x $15.00 = $0.150
+///                     total  $0.775
+/// ```
+///
+/// Applying the tiers progressively (only the input past 200K at $2.50, and
+/// output at the short-prompt $10) would report $0.475 and undercharge.
+#[tokio::test]
+async fn test_gemini_cli_gemini_2_5_pro_long_prompt_bills_all_tokens_at_long_context_rates() {
+    let msg = parse_one_response(
+        "gemini-2.5-pro",
+        r#"{"input": 250000, "output": 10000, "cached": 0, "thoughts": 0, "tool": 0, "total": 260000}"#,
+    );
+
+    assert_cost(msg.stats.cost, 0.775);
+}
+
+/// The Gemini API never reports more cached tokens than prompt tokens, but a
+/// malformed record that does must not underflow: uncached input clamps to
+/// zero and the cache reads are still billed (400 x $0.10 per 1M).
+#[tokio::test]
+async fn test_gemini_cli_cached_count_above_prompt_clamps_input_to_zero() {
+    let msg = parse_one_response(
+        "gemini-4-argon",
+        r#"{"input": 100, "output": 0, "cached": 400, "thoughts": 0, "tool": 0, "total": 100}"#,
+    );
+
+    assert_eq!(msg.stats.input_tokens, 0);
+    assert_eq!(msg.stats.cached_tokens, 400);
+    assert_cost(msg.stats.cost, 0.000_04);
+}
+
 #[tokio::test]
 async fn test_gemini_cli_reasoning_tokens() {
     let dir = tempdir().unwrap();
@@ -60,7 +221,10 @@ async fn test_gemini_cli_reasoning_tokens() {
         .find(|m| m.role == crate::types::MessageRole::Assistant)
         .unwrap();
     assert_eq!(assistant_msg.stats.reasoning_tokens, 123);
-    assert_eq!(assistant_msg.stats.input_tokens, 10);
+    // `input` is `promptTokenCount`, which includes the 5 cached tokens, so
+    // only 5 of the 10 prompt tokens are reported as (uncached) input.
+    assert_eq!(assistant_msg.stats.input_tokens, 5);
+    assert_eq!(assistant_msg.stats.cached_tokens, 5);
     assert_eq!(assistant_msg.stats.output_tokens, 20);
 }
 
