@@ -1,5 +1,5 @@
 import {
-  OTHER, SESSION_PAGE_SIZE, rowTokens, localDateKey, shiftDate, periodKey, selectRange, inRange, matchesFilters,
+  OTHER, SESSION_PAGE_SIZE, rowTokens, localDateKey, isDateKey, localDateTimeKey, isDateTimeKey, shiftDate, periodKey, selectRange, inRange, matchesFilters,
   granularityOptions, bucketKeys, sumRows, groupRows, totalTokens, cacheShare, colorSlots, stackedSeries,
   weekdayHourGrid, niceStep, topTenthShare, median, percentile, csv, SESSION_SHAPES, histogram, mapModelAliases,
 } from './data.mjs';
@@ -7,8 +7,8 @@ import { messages } from './locales.mjs';
 
 const DIMENSIONS = ['tool', 'model', 'project'];
 const VIEWS = ['overview', 'sessions', 'breakdown'];
-const RANGES = ['today', '7', '30', '90', 'all'];
-const RANGE_LABELS = { today: 'today', 7: 'last7', 30: 'last30', 90: 'last90', all: 'all' };
+const RANGES = ['today', '24h', '7', '30', '90', 'all', 'custom'];
+const RANGE_LABELS = { today: 'today', '24h': 'last24', 7: 'last7', 30: 'last30', 90: 'last90', all: 'all' };
 const METRICS = ['cost', 'tokens', 'requests'];
 const SORTS = ['recent', 'cost', 'tokens', 'requests', 'duration'];
 const SHAPES = ['messages', 'duration', 'toolCalls'];
@@ -30,6 +30,7 @@ const elements = Object.fromEntries(['status', 'refresh', 'language', 'tabs-bar'
 let language = initialLanguage();
 let fmt;
 let state = readHash();
+let customRangeDraft = state.range === 'custom' ? { from: state.from, to: state.to } : null;
 let snapshot = null;
 let loading = false;
 let loadError = null;
@@ -99,6 +100,7 @@ function setLanguage(next, persist) {
     percent: (value, digits = 1) => `${(value * 100).toFixed(digits)}%`,
     md: key => monthDay.format(noon(key)),
     day: key => dayLong.format(noon(key)),
+    dateTime: key => `${dayLong.format(new Date(key))} ${clock.format(new Date(key))}`,
     month: key => monthLong.format(noon(`${key}-01`)),
     clock: date => clock.format(date),
     duration: minutes => (minutes < 60 ? t('minutes')(minutes) : t('hoursMinutes')(Math.floor(minutes / 60), minutes % 60)),
@@ -131,7 +133,7 @@ function compact(value) {
 // The URL hash holds the view state, so reloads and bookmarks restore it.
 function defaultState() {
   return {
-    view: 'overview', range: '30', day: null, metric: 'cost', group: 'model', granularity: null,
+    view: 'overview', range: '30', day: null, from: null, to: null, metric: 'cost', group: 'model', granularity: null,
     sort: 'recent', q: '', session: null, dim: 'project', shape: 'messages',
     filters: { tool: new Set(), model: new Set(), project: new Set() },
   };
@@ -152,7 +154,19 @@ function readHash() {
   choose('dim', BREAKDOWNS);
   choose('shape', SHAPES);
   const day = params.get('day');
-  if (/^\d{4}-\d{2}-\d{2}$/.test(day ?? '') && localDateKey(noon(day)) === day) next.day = day;
+  if (isDateKey(day)) next.day = day;
+  if (next.range === 'custom') {
+    let from = params.get('from');
+    let to = params.get('to');
+    // Date-only bookmarks retain their inclusive end date.
+    if (isDateKey(from)) from += 'T00:00';
+    if (isDateKey(to) && to <= localDateKey(new Date())) {
+      to = localDateTimeKey(new Date(Math.min(new Date(`${shiftDate(to, 1)}T00:00`).getTime(), Date.now())));
+    }
+    if (isDateTimeKey(from) && isDateTimeKey(to) && from < to && to <= localDateTimeKey(new Date())) {
+      Object.assign(next, { from, to });
+    } else next.range = defaultState().range;
+  }
   next.q = params.get('q') ?? '';
   next.session = params.get('session');
   for (const key of DIMENSIONS) next.filters[key] = new Set(params.getAll(key));
@@ -165,6 +179,7 @@ function writeHash() {
   for (const key of ['view', 'range', 'day', 'metric', 'group', 'granularity', 'sort', 'q', 'session', 'dim', 'shape']) {
     if (state[key] && state[key] !== defaults[key]) params.set(key, state[key]);
   }
+  if (state.range === 'custom') for (const key of ['from', 'to']) params.set(key, state[key]);
   for (const key of DIMENSIONS) for (const value of state.filters[key]) params.append(key, value);
   const hash = params.toString();
   if (hash !== location.hash.slice(1)) history.replaceState(null, '', hash ? `#${hash}` : `${location.pathname}${location.search}`);
@@ -281,8 +296,8 @@ const formatAmount = value => (state.metric === 'cost' ? fmt.cost(value)
 const formatAxis = value => (state.metric === 'cost' ? `$${fmt.compact(value)}` : fmt.compact(value));
 
 function compute() {
-  const now = new Date();
-  const range = selectRange(state.range, state.day, now, snapshot.firstDate);
+  const now = state.range === '24h' && !state.day ? snapshot.scannedAt : new Date();
+  const range = selectRange(state.range, state.day, now, snapshot.firstDate, state);
   const granularities = granularityOptions(range.days);
   const granularity = granularities.includes(state.granularity) ? state.granularity : granularities[0];
   const scoped = snapshot.rows.filter(row => inRange(row, range));
@@ -296,13 +311,17 @@ function compute() {
 function rangeLabel(range) {
   if (state.day) return fmt.day(state.day);
   if (state.range === 'today') return t('today');
+  if (state.range === '24h') return t('last24');
+  if (state.range === 'custom') return `${fmt.dateTime(state.from)} – ${fmt.dateTime(state.to)}`;
   if (state.range === 'all') return t('allDays')(fmt.int(range.days));
   return t('lastDays')(range.days);
 }
 
-function comparisonLabel() {
+function comparisonLabel(range) {
   if (state.day) return t('vsPreviousDay');
   if (state.range === 'today') return t('vsYesterday');
+  if (state.range === '24h') return t('vsPrevious24');
+  if (state.range === 'custom') return t('vsPreviousDuration')(fmt.duration((range.end - range.start) / 60000));
   return t('vsPrevious')(state.range);
 }
 
@@ -321,7 +340,7 @@ function points(current, previous, comparison) {
 function periodLabel(key, granularity, short, range) {
   if (granularity === 'hour') {
     const [date, hour] = key.split('T');
-    if (short) return range.days === 1 ? `${hour}:00` : hour === '00' ? fmt.md(date) : `${fmt.md(date)} ${hour}:00`;
+    if (short) return range.days === 1 && !range.recentPeriod ? `${hour}:00` : hour === '00' ? fmt.md(date) : `${fmt.md(date)} ${hour}:00`;
     return `${fmt.day(date)} ${hour}:00–${String(Number(hour) + 1).padStart(2, '0')}:00`;
   }
   if (granularity === 'day') return short ? fmt.md(key) : fmt.day(key);
@@ -396,8 +415,18 @@ function renderFilters(view) {
     title: labelTitle(key, value), onclick: () => toggleFilter(key, value),
   }, h('span', {}, `${t(key)}: ${label(key, value)}`), closeIcon())));
   elements.filters.replaceChildren(...[
-    segmented(t('range'), RANGES.map(range => ({ value: range, label: t(RANGE_LABELS[range]), pressed: !state.day && state.range === range })),
-      range => update({ range, day: null, session: null })),
+    segmented(t('range'), RANGES.filter(range => range !== 'custom').map(range => ({ value: range, label: t(RANGE_LABELS[range]), pressed: !state.day && state.range === range })),
+      range => { customRangeDraft = null; update({ range, day: null, session: null }); }),
+    h('button', {
+      type: 'button', class: 'btn', 'data-focus': 'custom-range', 'aria-expanded': String(!!customRangeDraft), 'aria-pressed': String(!state.day && state.range === 'custom'),
+      onclick: () => {
+        const start = state.range === '24h' && !state.day ? new Date(view.now - 86400000) : new Date(`${view.range.first}T00:00`);
+        const end = state.range === '24h' && !state.day ? view.now : new Date(Math.min(new Date(`${shiftDate(view.range.last, 1)}T00:00`).getTime(), Date.now()));
+        customRangeDraft = { from: state.from ?? localDateTimeKey(start), to: state.to ?? localDateTimeKey(end) };
+        render();
+      },
+    }, t('customRange')),
+    customRangeDraft ? customRangePicker() : null,
     state.day ? h('button', { type: 'button', class: 'chip', 'aria-label': t('clearDrill'), 'data-focus': 'drill', onclick: () => update({ day: null }) },
       h('span', {}, `${fmt.day(state.day)} · ${t('hourly')}`), closeIcon()) : null,
     h('span', { class: 'divider hide-sm', 'aria-hidden': 'true' }),
@@ -410,6 +439,30 @@ function renderFilters(view) {
       h('span', { class: 'small muted' }, t('metric')),
       segmented(t('metric'), METRICS.map(metric => ({ value: metric, label: t(metric), pressed: state.metric === metric })), metric => update({ metric }))),
   ].filter(Boolean));
+}
+
+function customRangePicker() {
+  return h('form', {
+    class: 'custom-range', 'aria-label': t('customRange'),
+    onsubmit: event => {
+      event.preventDefault();
+      const { from, to } = customRangeDraft;
+      const end = event.currentTarget.elements.namedItem('to');
+      if (!isDateTimeKey(from) || !isDateTimeKey(to) || from >= to) {
+        end.setCustomValidity(t('invalidDateRange'));
+        end.reportValidity();
+        return;
+      }
+      update({ range: 'custom', from, to, day: null, session: null });
+    },
+  }, [['from', 'startDate'], ['to', 'endDate']].map(([key, label]) => h('label', {}, t(label), h('input', {
+    type: 'datetime-local', step: 60, class: 'btn', name: key, value: customRangeDraft[key], required: true, max: localDateTimeKey(new Date()), 'data-focus': `range:${key}`,
+    oninput: event => {
+      customRangeDraft[key] = event.target.value;
+      event.target.form.elements.namedItem('to').setCustomValidity('');
+    },
+  }))), h('button', { type: 'submit', class: 'btn', 'data-focus': 'range:apply' }, t('apply')),
+  h('span', { class: 'small muted' }, t('rangeTimeHelp')));
 }
 
 function filterMenu(key, view) {
@@ -492,7 +545,7 @@ function compositionLegend(totals) {
 
 function kpiSection(view) {
   const { totals, prev, range, keys } = view;
-  const comparison = comparisonLabel();
+  const comparison = comparisonLabel(range);
   const index = new Map(keys.map((key, position) => [key, position]));
   const costs = new Array(keys.length).fill(0);
   for (const row of view.rows) {
@@ -500,8 +553,9 @@ function kpiSection(view) {
     if (position !== undefined) costs[position] += row.cost;
   }
   const durations = [...totals.sessions].map(id => snapshot.sessions.get(id)).filter(Boolean).map(activeMinutes);
-  const average = range.days === 1
-    ? (state.day ? t('wholeDay') : t('asOf')(fmt.clock(view.now)))
+  const average = state.range === 'custom' && !state.day
+    ? t('rangeDuration')(fmt.duration((range.end - range.start) / 60000))
+    : range.days === 1 ? (state.day ? t('wholeDay') : t('asOf')(fmt.clock(view.now)))
     : t('dailyAverage')(fmt.cost(totals.cost / range.days), fmt.int(totals.dates.size), fmt.int(range.days));
   const card = (title, value, change, ...notes) => h('div', { class: 'card kpi' },
     h('h2', { class: 'kpi-label' }, title), h('p', { class: 'kpi-value' }, value), h('p', { class: 'delta' }, change), notes);
@@ -1096,6 +1150,7 @@ elements.refresh.addEventListener('click', () => load(true));
 elements.language.addEventListener('change', event => setLanguage(event.target.value, true));
 window.addEventListener('hashchange', () => {
   state = readHash();
+  customRangeDraft = state.range === 'custom' ? { from: state.from, to: state.to } : null;
   sessionLimit = SESSION_PAGE_SIZE;
   render();
 });
