@@ -228,6 +228,24 @@ test('model rankings guard cost-only and reasoning-only rows', () => {
   assert.equal(rankSub('model', 'a', sumRows([row({ cost: 0 })])), 'No price · cache 17%');
 });
 
+test('hourly labels show dates across midnight and retain same-day and session labels', () => {
+  const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const labelSource = source.slice(source.indexOf('function periodLabel('), source.indexOf('function segmented('));
+  const periodLabel = runInNewContext(`${labelSource}\nperiodLabel`, {
+    fmt: { md: key => key, day: key => key }, shiftDate,
+  });
+  const range = selectRange('custom', null, now, '', { from: '2026-01-01T12:15', to: '2026-01-02T12:15' });
+  assert.equal(range.days, 1);
+  assert.equal(bucketKeys(range, 'hour', now).at(-1), '2026-01-02T12');
+  assert.equal(periodLabel('2026-01-01T12', 'hour', true, range), '2026-01-01 12:00');
+  assert.equal(periodLabel('2026-01-02T12', 'hour', true, range), '2026-01-02 12:00');
+  assert.equal(periodLabel('2026-01-02T00', 'hour', true, range), '2026-01-02');
+  const day = selectRange('today', null, now);
+  assert.equal(periodLabel('2026-01-02T12', 'hour', true, day), '12:00');
+  assert.equal(periodLabel('2026-01-02T12', 'hour', true, { days: 1 }), '12:00');
+  assert.equal(periodLabel('2026-01-02T12', 'hour', false, range), '2026-01-02 12:00–13:00');
+});
+
 test('CSV preserves exact values, escapes fields, and neutralizes formula labels', () => {
   assert.equal(csv([['a,b', 'a"b', 'a\nb', '=1+1', '  @x', -2, 1234567]]),
     '"a,b","a""b","a\nb","\'=1+1","\'  @x","-2","1234567"\r\n');

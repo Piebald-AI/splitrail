@@ -340,7 +340,7 @@ function points(current, previous, comparison) {
 function periodLabel(key, granularity, short, range) {
   if (granularity === 'hour') {
     const [date, hour] = key.split('T');
-    if (short) return range.days === 1 && !range.recentPeriod ? `${hour}:00` : hour === '00' ? fmt.md(date) : `${fmt.md(date)} ${hour}:00`;
+    if (short) return range.days === 1 && range.first === range.last ? `${hour}:00` : hour === '00' ? fmt.md(date) : `${fmt.md(date)} ${hour}:00`;
     return `${fmt.day(date)} ${hour}:00–${String(Number(hour) + 1).padStart(2, '0')}:00`;
   }
   if (granularity === 'day') return short ? fmt.md(key) : fmt.day(key);
