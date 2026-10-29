@@ -1344,6 +1344,48 @@ fn populate_defaults(
         false
     );
 
+    // GPT-6.1 Terra is priced at exactly half of GPT-6.1 Sol in every column:
+    // $1 input, $0.05 cached input (the same 5%-of-input cache discount), $1.25
+    // cache writes, and $5 output. It shares the whole-request 272K bracket,
+    // where input and cache rates double and output rises 1.5x ($2 / $0.10 /
+    // $2.50 / $7.50). As with GPT-6.1 Sol, the cache-write column is the
+    // published 30-minute-retention rate; the 12-hour rate is not modeled.
+    // Source: https://developers.openai.com/api/docs/models/gpt-6.1-terra
+    add_model!(
+        "gpt-6.1-terra",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 1.0,
+                    output_per_1m: 5.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 2.0,
+                    output_per_1m: 7.50
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+            tiers: vec![
+                CachingTierWithWrites {
+                    max_tokens: Some(272_000),
+                    cache_write_per_1m: 1.25,
+                    cache_read_per_1m: 0.05
+                },
+                CachingTierWithWrites {
+                    max_tokens: None,
+                    cache_write_per_1m: 2.50,
+                    cache_read_per_1m: 0.10
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+
     add_model!(
         "gpt-6-luna",
         PricingStructure::Tiered(TieredPricing {
@@ -1678,6 +1720,18 @@ fn populate_defaults(
         30.0
     );
     add_tiered_service_tier_pricing_with_cache_writes!(
+        "gpt-6.1-terra",
+        ServiceTier::Priority,
+        2.0,
+        2.50,
+        0.10,
+        10.0,
+        4.0,
+        5.0,
+        0.20,
+        15.0
+    );
+    add_tiered_service_tier_pricing_with_cache_writes!(
         "gpt-6-luna",
         ServiceTier::Priority,
         0.20,
@@ -1713,6 +1767,18 @@ fn populate_defaults(
             2.50,
             0.10,
             7.50
+        );
+        add_tiered_service_tier_pricing_with_cache_writes!(
+            "gpt-6.1-terra",
+            service_tier,
+            0.50,
+            0.625,
+            0.025,
+            2.50,
+            1.0,
+            1.25,
+            0.05,
+            3.75
         );
         add_tiered_service_tier_pricing_with_cache_writes!(
             "gpt-6-luna",
@@ -3924,6 +3990,7 @@ fn populate_defaults(
     add_alias!("gpt-6-astra", "gpt-6-astra");
     add_alias!("gpt-6-sol", "gpt-6-sol");
     add_alias!("gpt-6.1-sol", "gpt-6.1-sol");
+    add_alias!("gpt-6.1-terra", "gpt-6.1-terra");
     add_alias!("gpt-6-luna", "gpt-6-luna");
     add_alias!("gpt-5.6", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol", "gpt-5.6-sol");
@@ -5661,6 +5728,44 @@ mod tests {
 
                 approx_eq(short, short_standard * multiplier);
                 approx_eq(long, long_standard * multiplier);
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_6_1_terra_uses_published_rates_across_contexts_and_service_tiers() {
+        // Same fixture as the GPT-6 Sol and Luna test above. The short row is
+        // 100K each of input, output, cache writes, and cache reads:
+        // $0.10 + $0.50 + $0.125 + $0.005 = $0.73. In the long row, 200K input
+        // plus the larger of the cache writes and reads (how the calculator
+        // sizes a prompt) makes 300K, past the 272K bracket, so every category
+        // moves to the long rate: $0.40 + $0.75 + $0.25 + $0.01 = $1.41.
+        // OpenAI priced Terra at exactly half of GPT-6.1 Sol in every column,
+        // so both totals are half of Sol's $1.46/$2.82 above; pricing Terra as
+        // an alias of Sol would double them. The provider-prefixed name checks
+        // that Priority (Fast), Flex, and Batch overrides survive the prefix.
+        for model in ["gpt-6.1-terra", "openai/gpt-6.1-terra"] {
+            assert!(
+                !get_model_info(model)
+                    .expect("GPT-6.1 Terra should resolve")
+                    .is_estimated
+            );
+
+            for (tier, multiplier) in [
+                (ServiceTier::Standard, 1.0),
+                (ServiceTier::Priority, 2.0),
+                (ServiceTier::Flex, 0.5),
+                (ServiceTier::Batch, 0.5),
+            ] {
+                let short = calculate_total_cost_for_service_tier_at(
+                    model, tier, 100_000, 100_000, 100_000, 100_000, None,
+                );
+                let long = calculate_total_cost_for_service_tier_at(
+                    model, tier, 200_000, 100_000, 100_000, 100_000, None,
+                );
+
+                approx_eq(short, 0.73 * multiplier);
+                approx_eq(long, 1.41 * multiplier);
             }
         }
     }
