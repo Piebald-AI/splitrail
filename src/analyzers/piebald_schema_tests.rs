@@ -623,9 +623,11 @@ fn unrecorded_generations_fall_back_to_the_chat_profile() {
     );
 }
 
-// Usage archives of deleted chats. Each test merges archives into the typed
-// fixture's live history, which `assert_history` pins at exactly four turns, so
-// any archived turn that is wrongly added (or any live turn lost) fails it.
+// Usage archives of deleted chats. Each test puts an archive beside the typed
+// fixture's live database and parses the live database the way the analyzer
+// does, so the path rule is exercised along with the merge. `assert_history`
+// pins the live history at exactly four turns, so any archived turn that is
+// wrongly added (or any live turn lost) fails it.
 
 /// Turn a typed fixture into the archive of another chat that has since been
 /// deleted: chat 2 with messages 11-15, otherwise identical to chat 1's usage.
@@ -640,17 +642,25 @@ fn renumber_as_deleted_chat(source: &DataSource) {
     .unwrap();
 }
 
-/// A fresh archive directory holding a copy of each `(file name, database)` pair.
-fn archive_directory(files: &[(&str, &Path)]) -> TempDir {
-    let directory = tempfile::tempdir().unwrap();
-    for (name, path) in files {
-        std::fs::copy(path, directory.path().join(name)).unwrap();
-    }
-    directory
+/// Copy `database` into place as the usage archive of `live`.
+fn archive_beside(live: &DataSource, database: &Path) {
+    std::fs::copy(database, usage_archive_path(&live.path)).unwrap();
 }
 
-fn live_history(source: &DataSource) -> Vec<ConversationMessage> {
-    parse_database(&source.path).unwrap()
+/// Parse `live` exactly as Splitrail does, archive included.
+fn parse_with_archive(live: &DataSource) -> Vec<ConversationMessage> {
+    PiebaldAnalyzer::new().parse_source(live).unwrap()
+}
+
+/// The archive travels with the database it belongs to, so whatever copies
+/// `app.db*` carries it, and a database elsewhere (a fixture, another
+/// installation) never reads this machine's archive.
+#[test]
+fn the_usage_archive_is_the_file_beside_the_database() {
+    assert_eq!(
+        usage_archive_path(Path::new("/home/someone/.local/share/piebald/app.db")),
+        PathBuf::from("/home/someone/.local/share/piebald/app.db.usage-archive"),
+    );
 }
 
 #[test]
@@ -658,9 +668,9 @@ fn archived_chats_keep_their_usage_after_deletion() {
     let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
     let (_deleted_directory, deleted) = fixture(PiebaldSchema::TypedParts);
     renumber_as_deleted_chat(&deleted);
-    let archives = archive_directory(&[("deleted.db", deleted.path.as_path())]);
+    archive_beside(&live, &deleted.path);
 
-    let merged = merge_archives(live_history(&live), Some(archives.path()));
+    let merged = parse_with_archive(&live);
 
     assert_eq!(merged.len(), 8);
     let (live_turns, archived_turns) = merged.split_at(4);
@@ -693,57 +703,45 @@ fn archived_chats_keep_their_usage_after_deletion() {
 }
 
 /// Archiving happens before deletion, so for a while every archived turn is also
-/// live, and an archive written twice must not double count either.
+/// live, and it must not be counted twice.
 #[test]
-fn turns_still_live_or_archived_twice_are_counted_once() {
+fn turns_both_live_and_archived_are_counted_once() {
     let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
-    let archives = archive_directory(&[
-        ("first.db", live.path.as_path()),
-        ("second.sqlite3", live.path.as_path()),
-    ]);
+    archive_beside(&live, &live.path);
 
-    assert_history(&merge_archives(live_history(&live), Some(archives.path())));
+    assert_history(&parse_with_archive(&live));
 }
 
 #[test]
-fn unreadable_archives_are_skipped_without_hiding_live_usage() {
+fn an_unreadable_archive_is_skipped_without_hiding_live_usage() {
     let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
-    let archives = tempfile::tempdir().unwrap();
-    std::fs::write(archives.path().join("broken.db"), b"not a database").unwrap();
+    std::fs::write(usage_archive_path(&live.path), b"not a database").unwrap();
 
-    assert_history(&merge_archives(live_history(&live), Some(archives.path())));
+    assert_history(&parse_with_archive(&live));
 }
 
-/// A `.partial` file is an archive that is still being written; its usage must
-/// not count until it is renamed into place. Other files are not archives at all.
+/// An archive still being written goes under another name and is renamed into
+/// place, so nothing but the exact archive path is ever read: not a `.partial`
+/// file, and not another database that happens to sit in the same folder.
 #[test]
-fn only_finished_database_files_are_read_as_archives() {
+fn only_the_finished_archive_is_read() {
     let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
     let (_deleted_directory, deleted) = fixture(PiebaldSchema::TypedParts);
     renumber_as_deleted_chat(&deleted);
-    let archives = archive_directory(&[
-        ("deleted.db.partial", deleted.path.as_path()),
-        ("notes.txt", deleted.path.as_path()),
-    ]);
+    let mut partial = usage_archive_path(&live.path).into_os_string();
+    partial.push(".partial");
+    std::fs::copy(&deleted.path, &partial).unwrap();
+    std::fs::copy(&deleted.path, live.path.with_file_name("other.db")).unwrap();
 
-    assert_history(&merge_archives(live_history(&live), Some(archives.path())));
+    assert_history(&parse_with_archive(&live));
 }
 
 #[test]
-fn a_missing_archive_directory_adds_nothing() {
-    let (live_directory, live) = fixture(PiebaldSchema::TypedParts);
-    let absent = live_directory.path().join("no-archives-here");
+fn a_missing_archive_adds_nothing() {
+    let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
+    assert!(!usage_archive_path(&live.path).exists());
 
-    assert_history(&merge_archives(live_history(&live), Some(&absent)));
-}
-
-/// Fixtures live in temporary directories, so parsing one must never pull in the
-/// real archives of whoever runs the tests; only this machine's database does.
-#[test]
-fn archives_are_only_merged_into_this_machines_database() {
-    let (_directory, source) = fixture(PiebaldSchema::TypedParts);
-    assert!(!is_default_database(&source.path));
-    assert!(get_piebald_db_path().is_some_and(|path| is_default_database(&path)));
+    assert_history(&parse_with_archive(&live));
 }
 
 /// Integer message IDs (before the KSUID migration) can be reused once the newest
@@ -762,9 +760,9 @@ fn a_reused_message_id_does_not_hide_an_archived_turn() {
             "UPDATE messages SET id = 4, created_at = '2026-04-30T12:00:00Z' WHERE id = 14;",
         )
         .unwrap();
-    let archives = archive_directory(&[("deleted.db", deleted.path.as_path())]);
+    archive_beside(&live, &deleted.path);
 
-    let turns = deduplicate_turns(merge_archives(live_history(&live), Some(archives.path())));
+    let turns = deduplicate_turns(parse_with_archive(&live));
 
     assert_eq!(turns.len(), 8);
     let sharing_id = turns

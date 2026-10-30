@@ -2,9 +2,9 @@
 //!
 //! <https://piebald.ai>
 //!
-//! Usage of chats that were permanently deleted from Piebald can survive in
-//! archive databases that Splitrail reads together with the live one; see
-//! [`piebald_archive_dir`].
+//! Usage of chats that were permanently deleted from Piebald can survive in a
+//! usage archive beside the database, which Splitrail reads together with the
+//! live one; see [`usage_archive_path`].
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
@@ -38,15 +38,12 @@ fn get_piebald_db_path() -> Option<PathBuf> {
     dirs::data_dir().map(|data_dir| data_dir.join("piebald").join("app.db"))
 }
 
-/// Subdirectory of Splitrail's state directory that holds Piebald usage archives.
-const ARCHIVE_DIR_NAME: &str = "piebald-archive";
+/// Appended to a database's file name to name its usage archive, so Piebald's
+/// `app.db` keeps the usage of its deleted chats in `app.db.usage-archive`.
+const USAGE_ARCHIVE_SUFFIX: &str = ".usage-archive";
 
-/// File extensions read as archive databases. Anything else in the directory is
-/// ignored, including SQLite's `-wal`/`-shm` sidecars and a `.partial` file an
-/// archiver has not finished writing, so a half-written archive is never counted.
-const ARCHIVE_EXTENSIONS: [&str; 3] = ["db", "sqlite", "sqlite3"];
-
-/// Directory of usage archives for chats deleted from Piebald.
+/// The usage archive of the Piebald database at `database`: the file beside it
+/// named after it, with [`USAGE_ARCHIVE_SUFFIX`] appended.
 ///
 /// This analyzer reads Piebald's database live, and permanently deleting a chat
 /// erases its messages together with their token counts. Without an archive, a
@@ -61,102 +58,58 @@ const ARCHIVE_EXTENSIONS: [&str; 3] = ["db", "sqlite", "sqlite3"];
 /// chat was live. Message text and tool output are not needed, so an archive can
 /// leave them out.
 ///
-/// Splitrail owns this directory, next to its Claude Code history store; Piebald
-/// never reads or writes it. Archives are read whenever the live database is
-/// parsed, so a new archive is picked up on the next refresh.
-fn piebald_archive_dir() -> Option<PathBuf> {
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .map(|state| state.join("splitrail").join(ARCHIVE_DIR_NAME))
-}
-
-/// Whether `path` is this machine's own Piebald database.
-///
-/// Archives hold chats deleted from this machine's Piebald, so they are merged
-/// only into its database, never into one at another path (a test fixture, or a
-/// copy of another installation) that never held those chats. Paths are compared
-/// after resolving them, because discovery and the file watcher can name the same
-/// file differently (through a symlinked home directory, for example), and a raw
-/// comparison would then silently drop the archived usage.
-fn is_default_database(path: &Path) -> bool {
-    let Some(default) = get_piebald_db_path() else {
-        return false;
-    };
-    match (std::fs::canonicalize(path), std::fs::canonicalize(&default)) {
-        (Ok(resolved), Ok(default_resolved)) => resolved == default_resolved,
-        // Either file is missing or unreadable, so there is nothing to resolve.
-        _ => path == default,
-    }
-}
-
-/// Archive databases in `directory`, sorted so the merge order, and with it which
-/// copy of a message archived twice is kept, does not depend on directory order.
-/// A missing directory just means nothing has been archived.
-fn archive_databases(directory: &Path) -> Vec<PathBuf> {
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(error) => {
-            crate::utils::warn_once(format!(
-                "Could not list Piebald usage archives in {}: {error}",
-                directory.display()
-            ));
-            return Vec::new();
-        }
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| ARCHIVE_EXTENSIONS.contains(&extension))
-        })
-        .collect();
-    paths.sort();
-    paths
+/// The archive lives beside the database, not in Splitrail's own state directory,
+/// because it is part of that database's history. Whatever copies, backs up or
+/// moves `app.db` with its sidecars (`cp app.db*`, a backup job, a new machine)
+/// carries the archive along. A copy of the database parsed elsewhere, such as a
+/// test fixture or another installation, brings its own archive or none, and
+/// never borrows this machine's. The name cannot collide with SQLite's own
+/// sidecars (`-wal`, `-shm`, `-journal`), and Piebald never reads or writes the
+/// file. Writers should build it under another name and rename it into place,
+/// because it is read whenever the live database is parsed, so a new archive is
+/// picked up on the next refresh.
+fn usage_archive_path(database: &Path) -> PathBuf {
+    let mut name = database.as_os_str().to_os_string();
+    name.push(USAGE_ARCHIVE_SUFFIX);
+    PathBuf::from(name)
 }
 
 /// Append archived turns that `messages`, parsed from the live database, lacks.
 ///
 /// Turns are matched by `global_hash` (creation time plus stable message ID), the
 /// key Splitrail Cloud deduplicates uploads by. A turn that is archived and still
-/// live, as every archived turn is until its chat is deleted, or that sits in two
-/// archives, is therefore counted once, and it uploads under the same identity
-/// after deletion as before. The live copy always wins: it is read first, and it is
-/// the newer record if the chat kept working after it was archived.
+/// live, as every archived turn is until its chat is deleted, is therefore counted
+/// once, and it uploads under the same identity after deletion as before. The live
+/// copy always wins: it is read first, and it is the newer record if the chat kept
+/// working after it was archived.
 ///
-/// An archive that cannot be read is reported and skipped. Failing the whole source
-/// instead would hide every live Piebald turn because of one bad archive file, a
-/// worse outcome than leaving that one archive uncounted.
-fn merge_archives(
+/// No file at `archive` just means nothing has been archived. An archive that
+/// cannot be read is reported and skipped. Failing the whole source instead would
+/// hide every live Piebald turn because of one bad archive, a worse outcome than
+/// leaving the archive uncounted.
+fn merge_archive(
     mut messages: Vec<ConversationMessage>,
-    directory: Option<&Path>,
+    archive: &Path,
 ) -> Vec<ConversationMessage> {
-    let Some(directory) = directory else {
-        return messages;
-    };
-    let archives = archive_databases(directory);
-    if archives.is_empty() {
+    if !archive.is_file() {
         return messages;
     }
-    let mut seen: HashSet<String> = messages
-        .iter()
-        .map(|message| message.global_hash.clone())
-        .collect();
-    for archive in archives {
-        match parse_database(&archive) {
-            Ok(archived) => messages.extend(
+    match parse_database(archive) {
+        Ok(archived) => {
+            let mut seen: HashSet<String> = messages
+                .iter()
+                .map(|message| message.global_hash.clone())
+                .collect();
+            messages.extend(
                 archived
                     .into_iter()
                     .filter(|message| seen.insert(message.global_hash.clone())),
-            ),
-            Err(error) => crate::utils::warn_once(format!(
-                "Skipping unreadable Piebald usage archive {}: {error:#}",
-                archive.display()
-            )),
+            );
         }
+        Err(error) => crate::utils::warn_once(format!(
+            "Skipping unreadable Piebald usage archive {}: {error:#}",
+            archive.display()
+        )),
     }
     messages
 }
@@ -824,11 +777,10 @@ impl Analyzer for PiebaldAnalyzer {
         // as extra sources. The TUI caches one contribution per source file and
         // replaces it when that file changes, so duplicates are only collapsed
         // within a file: a chat that is archived but not yet deleted would be
-        // counted twice if its archive were a separate source.
-        if is_default_database(&source.path) {
-            return Ok(merge_archives(messages, piebald_archive_dir().as_deref()));
-        }
-        Ok(messages)
+        // counted twice if its archive were a separate source. For the same
+        // reason the watcher only treats `app.db` itself as data: the archive is
+        // rewritten right before a deletion, and the deletion changes `app.db`.
+        Ok(merge_archive(messages, &usage_archive_path(&source.path)))
     }
 
     fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
