@@ -745,3 +745,31 @@ fn archives_are_only_merged_into_this_machines_database() {
     assert!(!is_default_database(&source.path));
     assert!(get_piebald_db_path().is_some_and(|path| is_default_database(&path)));
 }
+
+/// Integer message IDs (before the KSUID migration) can be reused once the newest
+/// row is deleted. The archived turn and the newer live turn that took over its ID
+/// are different turns, so both must survive the final deduplication.
+#[test]
+fn a_reused_message_id_does_not_hide_an_archived_turn() {
+    let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
+    let (_deleted_directory, deleted) = fixture(PiebaldSchema::TypedParts);
+    renumber_as_deleted_chat(&deleted);
+    // The deleted chat's last turn held ID 4 before the live chat's newest turn
+    // was given it; only its creation time tells the two apart.
+    Connection::open(&deleted.path)
+        .unwrap()
+        .execute_batch(
+            "UPDATE messages SET id = 4, created_at = '2026-04-30T12:00:00Z' WHERE id = 14;",
+        )
+        .unwrap();
+    let archives = archive_directory(&[("deleted.db", deleted.path.as_path())]);
+
+    let turns = deduplicate_turns(merge_archives(live_history(&live), Some(archives.path())));
+
+    assert_eq!(turns.len(), 8);
+    let sharing_id = turns
+        .iter()
+        .filter(|turn| turn.local_hash.as_deref() == Some("4"))
+        .count();
+    assert_eq!(sharing_id, 2);
+}

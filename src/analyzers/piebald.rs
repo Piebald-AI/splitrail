@@ -761,6 +761,21 @@ fn convert_messages(
     converted
 }
 
+/// Collapse duplicate turns across everything parsed, keeping the first copy.
+///
+/// Identity is `global_hash` (creation time plus stable ID), not the stable ID
+/// alone. Before Piebald's KSUID migration, message IDs were SQLite integer row
+/// IDs, and unless a table declares `AUTOINCREMENT`, SQLite may give the newest
+/// row's ID to the next insert once that row is deleted. A turn kept in an archive
+/// and a later live turn can therefore share a stable ID while being different
+/// turns, and deduplicating by ID would silently drop the archived one. Genuine
+/// copies of one turn share their `global_hash`, so they still collapse. The TUI's
+/// incremental updates already deduplicate by `global_hash`, so this also keeps
+/// both paths in agreement.
+fn deduplicate_turns(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    crate::utils::deduplicate_by_global_hash(messages)
+}
+
 /// Read every conversation turn from one Piebald database: the live `app.db`, or
 /// an archive in the same layout (see [`piebald_archive_dir`]).
 fn parse_database(path: &Path) -> Result<Vec<ConversationMessage>> {
@@ -825,7 +840,7 @@ impl Analyzer for PiebaldAnalyzer {
             .into_iter()
             .flat_map(|(_, messages)| messages)
             .collect();
-        crate::utils::deduplicate_by_local_hash(all_messages)
+        deduplicate_turns(all_messages)
     }
 
     fn get_watch_directories(&self) -> Vec<PathBuf> {
