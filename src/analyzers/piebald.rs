@@ -1,6 +1,10 @@
 //! Piebald analyzer - reads usage data from Piebald's SQLite database.
 //!
 //! <https://piebald.ai>
+//!
+//! Usage of chats that were permanently deleted from Piebald can survive in
+//! archive databases that Splitrail reads together with the live one; see
+//! [`piebald_archive_dir`].
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
@@ -13,8 +17,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 pub struct PiebaldAnalyzer;
 
@@ -34,8 +38,131 @@ fn get_piebald_db_path() -> Option<PathBuf> {
     dirs::data_dir().map(|data_dir| data_dir.join("piebald").join("app.db"))
 }
 
+/// Subdirectory of Splitrail's state directory that holds Piebald usage archives.
+const ARCHIVE_DIR_NAME: &str = "piebald-archive";
+
+/// File extensions read as archive databases. Anything else in the directory is
+/// ignored, including SQLite's `-wal`/`-shm` sidecars and a `.partial` file an
+/// archiver has not finished writing, so a half-written archive is never counted.
+const ARCHIVE_EXTENSIONS: [&str; 3] = ["db", "sqlite", "sqlite3"];
+
+/// Directory of usage archives for chats deleted from Piebald.
+///
+/// This analyzer reads Piebald's database live, and permanently deleting a chat
+/// erases its messages together with their token counts. Without an archive, a
+/// deleted chat's usage would therefore vanish from every total, and if it had
+/// not been uploaded yet it could never reach Splitrail Cloud.
+///
+/// An archive is a SQLite database in Piebald's own layout that holds only the
+/// rows this analyzer reads (chats, messages, generations, tool-call markers, and
+/// the profile, project, and `_ksuid_map` rows they reference) for the chats about
+/// to be deleted. Because it is parsed by exactly the code that parses `app.db`,
+/// an archived turn keeps the identity, date, project, and price it had while its
+/// chat was live. Message text and tool output are not needed, so an archive can
+/// leave them out.
+///
+/// Splitrail owns this directory, next to its Claude Code history store; Piebald
+/// never reads or writes it. Archives are read whenever the live database is
+/// parsed, so a new archive is picked up on the next refresh.
+fn piebald_archive_dir() -> Option<PathBuf> {
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .map(|state| state.join("splitrail").join(ARCHIVE_DIR_NAME))
+}
+
+/// Whether `path` is this machine's own Piebald database.
+///
+/// Archives hold chats deleted from this machine's Piebald, so they are merged
+/// only into its database, never into one at another path (a test fixture, or a
+/// copy of another installation) that never held those chats. Paths are compared
+/// after resolving them, because discovery and the file watcher can name the same
+/// file differently (through a symlinked home directory, for example), and a raw
+/// comparison would then silently drop the archived usage.
+fn is_default_database(path: &Path) -> bool {
+    let Some(default) = get_piebald_db_path() else {
+        return false;
+    };
+    match (std::fs::canonicalize(path), std::fs::canonicalize(&default)) {
+        (Ok(resolved), Ok(default_resolved)) => resolved == default_resolved,
+        // Either file is missing or unreadable, so there is nothing to resolve.
+        _ => path == default,
+    }
+}
+
+/// Archive databases in `directory`, sorted so the merge order, and with it which
+/// copy of a message archived twice is kept, does not depend on directory order.
+/// A missing directory just means nothing has been archived.
+fn archive_databases(directory: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            crate::utils::warn_once(format!(
+                "Could not list Piebald usage archives in {}: {error}",
+                directory.display()
+            ));
+            return Vec::new();
+        }
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| ARCHIVE_EXTENSIONS.contains(&extension))
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Append archived turns that `messages`, parsed from the live database, lacks.
+///
+/// Turns are matched by `global_hash` (creation time plus stable message ID), the
+/// key Splitrail Cloud deduplicates uploads by. A turn that is archived and still
+/// live, as every archived turn is until its chat is deleted, or that sits in two
+/// archives, is therefore counted once, and it uploads under the same identity
+/// after deletion as before. The live copy always wins: it is read first, and it is
+/// the newer record if the chat kept working after it was archived.
+///
+/// An archive that cannot be read is reported and skipped. Failing the whole source
+/// instead would hide every live Piebald turn because of one bad archive file, a
+/// worse outcome than leaving that one archive uncounted.
+fn merge_archives(
+    mut messages: Vec<ConversationMessage>,
+    directory: Option<&Path>,
+) -> Vec<ConversationMessage> {
+    let Some(directory) = directory else {
+        return messages;
+    };
+    let archives = archive_databases(directory);
+    if archives.is_empty() {
+        return messages;
+    }
+    let mut seen: HashSet<String> = messages
+        .iter()
+        .map(|message| message.global_hash.clone())
+        .collect();
+    for archive in archives {
+        match parse_database(&archive) {
+            Ok(archived) => messages.extend(
+                archived
+                    .into_iter()
+                    .filter(|message| seen.insert(message.global_hash.clone())),
+            ),
+            Err(error) => crate::utils::warn_once(format!(
+                "Skipping unreadable Piebald usage archive {}: {error:#}",
+                archive.display()
+            )),
+        }
+    }
+    messages
+}
+
 /// Open Piebald's database in read-only mode.
-fn open_piebald_db(path: &PathBuf) -> Result<Connection> {
+fn open_piebald_db(path: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
     let conn = Connection::open_with_flags(path, flags)?;
@@ -634,6 +761,23 @@ fn convert_messages(
     converted
 }
 
+/// Read every conversation turn from one Piebald database: the live `app.db`, or
+/// an archive in the same layout (see [`piebald_archive_dir`]).
+fn parse_database(path: &Path) -> Result<Vec<ConversationMessage>> {
+    let mut conn = open_piebald_db(path)?;
+    // Pin schema detection and all reads to one snapshot. Piebald may migrate
+    // or stream new usage while Splitrail is running; mixing snapshots could
+    // select a dropped table or combine usage and tool counts from different turns.
+    // This is a deferred read transaction on a read-only connection, never a write.
+    let tx = conn.transaction()?;
+    let layout = PiebaldLayout::detect(&tx)?;
+    let chats = query_chats(&tx, layout)?;
+    let messages = query_messages(&tx, layout)?;
+    let tool_call_counts = query_tool_call_counts(&tx, layout.parts)?;
+    tx.commit()?;
+    Ok(convert_messages(&chats, messages, &tool_call_counts))
+}
+
 #[async_trait]
 impl Analyzer for PiebaldAnalyzer {
     fn display_name(&self) -> &'static str {
@@ -660,18 +804,16 @@ impl Analyzer for PiebaldAnalyzer {
     }
 
     fn parse_source(&self, source: &DataSource) -> Result<Vec<ConversationMessage>> {
-        let mut conn = open_piebald_db(&source.path)?;
-        // Pin schema detection and all reads to one snapshot. Piebald may migrate
-        // or stream new usage while Splitrail is running; mixing snapshots could
-        // select a dropped table or combine usage and tool counts from different turns.
-        // This is a deferred read transaction on a read-only connection, never a write.
-        let tx = conn.transaction()?;
-        let layout = PiebaldLayout::detect(&tx)?;
-        let chats = query_chats(&tx, layout)?;
-        let messages = query_messages(&tx, layout)?;
-        let tool_call_counts = query_tool_call_counts(&tx, layout.parts)?;
-        tx.commit()?;
-        Ok(convert_messages(&chats, messages, &tool_call_counts))
+        let messages = parse_database(&source.path)?;
+        // Archived turns join the live database's own parse instead of arriving
+        // as extra sources. The TUI caches one contribution per source file and
+        // replaces it when that file changes, so duplicates are only collapsed
+        // within a file: a chat that is archived but not yet deleted would be
+        // counted twice if its archive were a separate source.
+        if is_default_database(&source.path) {
+            return Ok(merge_archives(messages, piebald_archive_dir().as_deref()));
+        }
+        Ok(messages)
     }
 
     fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
