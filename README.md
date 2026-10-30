@@ -128,20 +128,22 @@ level = "warn"
 
 ## Keeping usage from deleted Piebald chats
 
-Splitrail reads Piebald's database live, so permanently deleting a chat in Piebald also removes its usage from Splitrail, including from any upload that hasn't happened yet. To keep counting a chat after you delete it, save a usage archive of it first, in Splitrail's state directory:
+Splitrail reads Piebald's database live, so permanently deleting a chat in Piebald also removes its usage from Splitrail, including from any upload that hasn't happened yet. To keep counting a chat after you delete it, save a usage archive of it first. The archive is a single file beside Piebald's database, named after it:
 
-- Linux: `~/.local/state/splitrail/piebald-archive/` (or `$XDG_STATE_HOME/splitrail/piebald-archive/`)
-- macOS: `~/Library/Application Support/splitrail/piebald-archive/`
-- Windows: `%LOCALAPPDATA%\splitrail\piebald-archive\`
+- Linux: `~/.local/share/piebald/app.db.usage-archive` (or `$XDG_DATA_HOME/piebald/app.db.usage-archive`)
+- macOS: `~/Library/Application Support/piebald/app.db.usage-archive`
+- Windows: `%APPDATA%\piebald\app.db.usage-archive`
 
-An archive is a SQLite file (`.db`, `.sqlite`, or `.sqlite3`) in Piebald's database layout. Splitrail reads it with the same code it uses for Piebald's own database and merges the two:
+Because it sits beside `app.db`, whatever copies, backs up, or moves Piebald's database and its `-wal` and `-shm` files can take the archive along too.
 
-- Each message counts once, even while its chat still exists in Piebald or when it appears in several archives.
+An archive is a SQLite file in Piebald's database layout. Splitrail reads it with the same code it uses for Piebald's own database and merges the two:
+
+- Each message counts once, even while its chat still exists in Piebald.
 - Archived messages keep the date, model, project, price, and identity they had while their chat existed, so they upload to Splitrail Cloud exactly as they would have before the deletion.
-- Archives belong to the Piebald installation on the same machine and are merged only with its database.
+- An archive belongs to the database it sits beside. A copy of the database somewhere else uses the archive beside that copy, if there is one.
 - An archive that can't be read is skipped with a warning; it never hides your live usage.
 
-A complete copy of Piebald's database works as an archive, but it doesn't need to be one. Splitrail only needs each chat, its messages and their token counts, its tool-call markers, and the profile and project rows they refer to; message text and tool output can be left out. Write the file under another name (such as `*.db.partial`) and rename it into place when it's complete, because Splitrail reads whatever is in the folder each time it refreshes.
+A complete copy of Piebald's database works as an archive, but it doesn't need to be one. Splitrail only needs each chat, its messages and their token counts, its tool-call markers, and the profile and project rows they refer to; message text and tool output can be left out. To add chats to an existing archive, write the combined file under another name (such as `app.db.usage-archive.partial`) and rename it into place when it's complete, because Splitrail reads the archive each time it refreshes.
 
 ## Development
 
