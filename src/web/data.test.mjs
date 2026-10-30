@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { messages } from './locales.mjs';
 import {
-  OTHER, localDateKey, metricValue, periodKey, selectRange, inRange, matchesFilters, granularityOptions, bucketKeys,
+  OTHER, localDateKey, isDateKey, localDateTimeKey, isDateTimeKey, shiftDate, metricValue, periodKey, selectRange, inRange, matchesFilters, granularityOptions, bucketKeys,
   sumRows, groupRows, totalTokens, cacheShare, colorSlots, stackedSeries, weekdayHourGrid, niceStep, topTenthShare, median, csv,
   percentile, SESSION_SHAPES, histogram, mapModelAliases,
 } from './data.mjs';
@@ -66,6 +66,87 @@ test('buckets keep gaps, stop at the current hour, and match the interval option
   assert.equal(granularityOptions(400)[0], 'week');
   assert.equal(granularityOptions(400).length, 4);
   assert.equal(bucketKeys(selectRange('7', null, now), 'hour', now).length, 6 * 24 + 13);
+});
+
+test('custom times include the start, exclude the end, and compare against the same duration', () => {
+  const dates = { from: '2025-12-30T12:15', to: '2026-01-01T01:45' };
+  const range = selectRange('custom', null, now, '2025-12-01', dates);
+  const start = new Date(dates.from).getTime();
+  const end = new Date(dates.to).getTime();
+  assert.deepEqual(range, {
+    first: '2025-12-30', last: '2026-01-01', firstHour: 12, maxHour: 1, days: 37.5 / 24,
+    start, end, prev: { start: start - (end - start), end: start },
+  });
+  assert.ok(inRange(row({ timestamp: start }), range));
+  assert.ok(inRange(row({ timestamp: end - 60000 }), range));
+  assert.ok(!inRange(row({ timestamp: start - 60000 }), range));
+  assert.ok(!inRange(row({ timestamp: end }), range));
+  assert.ok(inRange(row({ timestamp: start - 60000 }), range.prev));
+  assert.ok(!inRange(row({ timestamp: start }), range.prev));
+  assert.deepEqual(bucketKeys(range, 'day', now), ['2025-12-30', '2025-12-31', '2026-01-01']);
+  const hours = bucketKeys(range, 'hour', now);
+  assert.equal(hours[0], '2025-12-30T12');
+  assert.equal(hours.at(-1), '2026-01-01T01');
+  const drilled = selectRange('custom', '2025-12-31', now, '2025-12-01', dates);
+  assert.equal(drilled.days, 1);
+  assert.equal(drilled.first, '2025-12-31');
+});
+
+test('custom minute boundaries exclude neighboring usage in the same hour', () => {
+  const range = selectRange('custom', null, now, '', { from: '2026-01-01T10:15', to: '2026-01-01T10:18' });
+  const rows = [[-1, 100], [0, 2], [1, 3], [2, 5], [3, 200]].map(([minute, inputTokens]) =>
+    row({ timestamp: range.start + minute * 60000, inputTokens }));
+  const selected = rows.filter(row => inRange(row, range));
+  assert.equal(sumRows(selected).inputTokens, 10);
+  assert.equal(sumRows(selected).messages, 3);
+  assert.equal(sumRows(rows.filter(row => inRange(row, range.prev))).inputTokens, 100);
+});
+
+test('custom whole days, leap days, and DST changes use exact time boundaries', () => {
+  const leapDay = selectRange('custom', null, now, '', { from: '2024-02-29T00:00', to: '2024-03-01T00:00' });
+  assert.equal(leapDay.days, 1);
+  assert.equal(leapDay.last, '2024-02-29');
+  assert.equal(leapDay.prev.end, leapDay.start);
+  assert.equal(bucketKeys(leapDay, 'hour', now).length, 24);
+  const spring = selectRange('custom', null, now, '', { from: '2026-03-07T12:00', to: '2026-03-09T12:00' });
+  assert.equal(spring.end - spring.start, spring.prev.end - spring.prev.start);
+  if (process.env.TZ === 'America/New_York') {
+    assert.equal((spring.end - spring.start) / 3600000, 47);
+    assert.equal(isDateTimeKey('2026-03-08T02:30'), false);
+  }
+  assert.equal(isDateTimeKey('2024-02-29T10:15'), true);
+  for (const value of ['2026-02-30T10:15', '2026-01-01T24:00', '2026-01-01T10:60', '2026-01-01T10:15:01', 'bad']) {
+    assert.equal(isDateTimeKey(value), false);
+  }
+});
+
+test('last 24 hours uses exact snapshot windows with hourly gaps across midnight and year end', () => {
+  const scannedAt = new Date(2026, 0, 1, 0, 30);
+  const range = selectRange('24h', null, scannedAt);
+  assert.deepEqual(range, {
+    first: '2025-12-31', last: '2026-01-01', firstHour: 0, maxHour: 0, days: 1, recentPeriod: 2,
+    prev: { first: '2025-12-30', last: '2025-12-31', firstHour: 0, maxHour: 0, recentPeriod: 1 },
+  });
+  const rows = [
+    row({ date: '2025-12-31', hour: 0, recentPeriod: 1, cost: 9 }),
+    row({ date: '2025-12-31', hour: 0, recentPeriod: 2, cost: 2 }),
+    row({ date: '2025-12-31', hour: 23, recentPeriod: 2, cost: 3 }),
+    row({ date: '2026-01-01', hour: 0, recentPeriod: 2, model: 'b', cost: 4 }),
+    row({ date: '2026-01-01', hour: 0, recentPeriod: 0, cost: 99 }),
+  ];
+  const selected = rows.filter(row => inRange(row, range));
+  assert.equal(sumRows(selected).cost, 9);
+  assert.equal(sumRows(rows.filter(row => inRange(row, range.prev))).cost, 9);
+  assert.equal(sumRows(selected.filter(row => matchesFilters(row, filters({ model: new Set(['a']) })))).cost, 5);
+  const keys = bucketKeys(range, 'hour', scannedAt);
+  assert.equal(keys.length, 25); // Two partial boundary hours surround 23 whole hours.
+  assert.equal(keys[0], '2025-12-31T00');
+  assert.equal(keys.at(-1), '2026-01-01T00');
+  const series = stackedSeries(selected, keys, 'hour', 'model', 'cost', colorSlots(selected, 'model'));
+  assert.equal(series.reduce((sum, item) => sum + item.values.reduce((a, b) => a + b, 0), 0), 9);
+  assert.equal(series[0].values[12], 0);
+  assert.equal(sumRows(rows.filter(row => inRange(row, selectRange('30', '2025-12-31', scannedAt)))).cost, 14);
+  assert.equal(sumRows([]).cost, 0);
 });
 
 test('filters union within a dimension and intersect across dimensions', () => {
@@ -147,6 +228,24 @@ test('model rankings guard cost-only and reasoning-only rows', () => {
   assert.equal(rankSub('model', 'a', sumRows([row({ cost: 0 })])), 'No price · cache 17%');
 });
 
+test('hourly labels show dates across midnight and retain same-day and session labels', () => {
+  const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
+  const labelSource = source.slice(source.indexOf('function periodLabel('), source.indexOf('function segmented('));
+  const periodLabel = runInNewContext(`${labelSource}\nperiodLabel`, {
+    fmt: { md: key => key, day: key => key }, shiftDate,
+  });
+  const range = selectRange('custom', null, now, '', { from: '2026-01-01T12:15', to: '2026-01-02T12:15' });
+  assert.equal(range.days, 1);
+  assert.equal(bucketKeys(range, 'hour', now).at(-1), '2026-01-02T12');
+  assert.equal(periodLabel('2026-01-01T12', 'hour', true, range), '2026-01-01 12:00');
+  assert.equal(periodLabel('2026-01-02T12', 'hour', true, range), '2026-01-02 12:00');
+  assert.equal(periodLabel('2026-01-02T00', 'hour', true, range), '2026-01-02');
+  const day = selectRange('today', null, now);
+  assert.equal(periodLabel('2026-01-02T12', 'hour', true, day), '12:00');
+  assert.equal(periodLabel('2026-01-02T12', 'hour', true, { days: 1 }), '12:00');
+  assert.equal(periodLabel('2026-01-02T12', 'hour', false, range), '2026-01-02 12:00–13:00');
+});
+
 test('CSV preserves exact values, escapes fields, and neutralizes formula labels', () => {
   assert.equal(csv([['a,b', 'a"b', 'a\nb', '=1+1', '  @x', -2, 1234567]]),
     '"a,b","a""b","a\nb","\'=1+1","\'  @x","-2","1234567"\r\n');
@@ -175,8 +274,8 @@ test('bookmarked dates must be valid calendar dates', () => {
   const stateSource = source.slice(source.indexOf('function defaultState('), source.indexOf('function writeHash('));
   const location = { hash: '' };
   const readHash = runInNewContext(`${stateSource}\nreadHash`, {
-    location, URLSearchParams, localDateKey, noon: key => new Date(`${key}T12:00:00`),
-    VIEWS: ['overview', 'sessions', 'breakdown'], RANGES: ['today', '7', '30', '90', 'all'],
+    location, URLSearchParams, localDateKey, isDateKey, localDateTimeKey, isDateTimeKey, shiftDate,
+    VIEWS: ['overview', 'sessions', 'breakdown'], RANGES: ['today', '24h', '7', '30', '90', 'all', 'custom'],
     METRICS: ['cost', 'tokens', 'requests'], DIMENSIONS: ['tool', 'model', 'project'],
     GRANULARITIES: ['hour', 'day', 'week', 'month'], SORTS: ['recent', 'cost', 'tokens', 'requests', 'duration'],
     BREAKDOWNS: ['period', 'project', 'model', 'tool'],
@@ -191,4 +290,26 @@ test('bookmarked dates must be valid calendar dates', () => {
   assert.equal(state.day, '2024-02-29');
   assert.equal(state.view, 'sessions');
   assert.deepEqual([...state.filters.tool], ['one', 'two']);
+  location.hash = '#range=24h';
+  assert.equal(readHash().range, '24h');
+  location.hash = '#range=custom&from=2024-02-28&to=2024-02-29&view=breakdown';
+  const custom = readHash();
+  assert.equal(custom.range, 'custom');
+  assert.equal(custom.from, '2024-02-28T00:00');
+  assert.equal(custom.to, '2024-03-01T00:00');
+  assert.equal(custom.view, 'breakdown');
+  location.hash = '#range=custom&from=2024-02-29T10:15&to=2024-02-29T10:45';
+  assert.equal(readHash().from, '2024-02-29T10:15');
+  assert.equal(readHash().to, '2024-02-29T10:45');
+  for (const query of [
+    '', 'from=2024-02-28', 'to=2024-02-29', 'from=2024-02-30&to=2024-03-01',
+    'from=2024-03-02&to=2024-03-01', 'from=2024-01-01&to=9999-01-01',
+    'from=2024-02-29T10:15&to=2024-02-29T10:15', 'from=2024-02-29T10:45&to=2024-02-29T10:15',
+    'from=2024-02-29T10:15&to=2024-02-29T10:15:01', 'from=2024-02-29T10:15&to=9999-01-01T00:00',
+  ]) {
+    location.hash = `#range=custom&${query}`;
+    assert.equal(readHash().range, '30');
+    assert.equal(readHash().from, null);
+    assert.equal(readHash().to, null);
+  }
 });
