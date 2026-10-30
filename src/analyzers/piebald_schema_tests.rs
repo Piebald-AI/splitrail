@@ -622,3 +622,154 @@ fn unrecorded_generations_fall_back_to_the_chat_profile() {
         [ServiceTier::Priority, ServiceTier::Standard],
     );
 }
+
+// Usage archives of deleted chats. Each test merges archives into the typed
+// fixture's live history, which `assert_history` pins at exactly four turns, so
+// any archived turn that is wrongly added (or any live turn lost) fails it.
+
+/// Turn a typed fixture into the archive of another chat that has since been
+/// deleted: chat 2 with messages 11-15, otherwise identical to chat 1's usage.
+fn renumber_as_deleted_chat(source: &DataSource) {
+    let conn = Connection::open(&source.path).unwrap();
+    conn.execute_batch(
+        "UPDATE chats SET id = 2, title = 'Deleted chat';
+         UPDATE messages SET id = id + 10, parent_chat_id = 2;
+         UPDATE message_generations SET message_id = message_id + 10;
+         UPDATE message_parts SET parent_chat_message_id = parent_chat_message_id + 10;",
+    )
+    .unwrap();
+}
+
+/// A fresh archive directory holding a copy of each `(file name, database)` pair.
+fn archive_directory(files: &[(&str, &Path)]) -> TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    for (name, path) in files {
+        std::fs::copy(path, directory.path().join(name)).unwrap();
+    }
+    directory
+}
+
+fn live_history(source: &DataSource) -> Vec<ConversationMessage> {
+    parse_database(&source.path).unwrap()
+}
+
+#[test]
+fn archived_chats_keep_their_usage_after_deletion() {
+    let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
+    let (_deleted_directory, deleted) = fixture(PiebaldSchema::TypedParts);
+    renumber_as_deleted_chat(&deleted);
+    let archives = archive_directory(&[("deleted.db", deleted.path.as_path())]);
+
+    let merged = merge_archives(live_history(&live), Some(archives.path()));
+
+    assert_eq!(merged.len(), 8);
+    let (live_turns, archived_turns) = merged.split_at(4);
+    assert_history(live_turns);
+    // Both databases order turns by `updated_at`, so the pairs line up. An archived
+    // turn must be priced, dated, and attributed exactly as it was while live.
+    for (live_turn, archived_turn) in live_turns.iter().zip(archived_turns) {
+        assert_eq!(archived_turn.conversation_hash, "2");
+        assert_eq!(archived_turn.session_name.as_deref(), Some("Deleted chat"));
+        assert_eq!(archived_turn.role, live_turn.role);
+        assert_eq!(archived_turn.model, live_turn.model);
+        assert_eq!(archived_turn.date, live_turn.date);
+        assert_eq!(archived_turn.project_hash, live_turn.project_hash);
+        assert_eq!(
+            archived_turn.stats.input_tokens,
+            live_turn.stats.input_tokens
+        );
+        assert_eq!(
+            archived_turn.stats.output_tokens,
+            live_turn.stats.output_tokens
+        );
+        assert_eq!(
+            archived_turn.stats.cache_read_tokens,
+            live_turn.stats.cache_read_tokens
+        );
+        assert_eq!(archived_turn.stats.tool_calls, live_turn.stats.tool_calls);
+        assert_eq!(archived_turn.stats.cost, live_turn.stats.cost);
+        assert_ne!(archived_turn.global_hash, live_turn.global_hash);
+    }
+}
+
+/// Archiving happens before deletion, so for a while every archived turn is also
+/// live, and an archive written twice must not double count either.
+#[test]
+fn turns_still_live_or_archived_twice_are_counted_once() {
+    let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
+    let archives = archive_directory(&[
+        ("first.db", live.path.as_path()),
+        ("second.sqlite3", live.path.as_path()),
+    ]);
+
+    assert_history(&merge_archives(live_history(&live), Some(archives.path())));
+}
+
+#[test]
+fn unreadable_archives_are_skipped_without_hiding_live_usage() {
+    let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
+    let archives = tempfile::tempdir().unwrap();
+    std::fs::write(archives.path().join("broken.db"), b"not a database").unwrap();
+
+    assert_history(&merge_archives(live_history(&live), Some(archives.path())));
+}
+
+/// A `.partial` file is an archive that is still being written; its usage must
+/// not count until it is renamed into place. Other files are not archives at all.
+#[test]
+fn only_finished_database_files_are_read_as_archives() {
+    let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
+    let (_deleted_directory, deleted) = fixture(PiebaldSchema::TypedParts);
+    renumber_as_deleted_chat(&deleted);
+    let archives = archive_directory(&[
+        ("deleted.db.partial", deleted.path.as_path()),
+        ("notes.txt", deleted.path.as_path()),
+    ]);
+
+    assert_history(&merge_archives(live_history(&live), Some(archives.path())));
+}
+
+#[test]
+fn a_missing_archive_directory_adds_nothing() {
+    let (live_directory, live) = fixture(PiebaldSchema::TypedParts);
+    let absent = live_directory.path().join("no-archives-here");
+
+    assert_history(&merge_archives(live_history(&live), Some(&absent)));
+}
+
+/// Fixtures live in temporary directories, so parsing one must never pull in the
+/// real archives of whoever runs the tests; only this machine's database does.
+#[test]
+fn archives_are_only_merged_into_this_machines_database() {
+    let (_directory, source) = fixture(PiebaldSchema::TypedParts);
+    assert!(!is_default_database(&source.path));
+    assert!(get_piebald_db_path().is_some_and(|path| is_default_database(&path)));
+}
+
+/// Integer message IDs (before the KSUID migration) can be reused once the newest
+/// row is deleted. The archived turn and the newer live turn that took over its ID
+/// are different turns, so both must survive the final deduplication.
+#[test]
+fn a_reused_message_id_does_not_hide_an_archived_turn() {
+    let (_live_directory, live) = fixture(PiebaldSchema::TypedParts);
+    let (_deleted_directory, deleted) = fixture(PiebaldSchema::TypedParts);
+    renumber_as_deleted_chat(&deleted);
+    // The deleted chat's last turn held ID 4 before the live chat's newest turn
+    // was given it; only its creation time tells the two apart.
+    Connection::open(&deleted.path)
+        .unwrap()
+        .execute_batch(
+            "UPDATE messages SET id = 4, created_at = '2026-04-30T12:00:00Z' WHERE id = 14;",
+        )
+        .unwrap();
+    let archives = archive_directory(&[("deleted.db", deleted.path.as_path())]);
+
+    let turns = deduplicate_turns(merge_archives(live_history(&live), Some(archives.path())));
+
+    assert_eq!(turns.len(), 8);
+    let sharing_id = turns
+        .iter()
+        .filter(|turn| turn.local_hash.as_deref() == Some("4"))
+        .count();
+    assert_eq!(sharing_id, 2);
+}
