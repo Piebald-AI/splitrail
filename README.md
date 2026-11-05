@@ -81,6 +81,52 @@ The Breakdown tab groups the filtered usage by period, project, model, or tool, 
 
 English is the default language; choose Simplified or Traditional Chinese in the header. The preference is saved locally. The dashboard follows the system's light/dark appearance and adapts to phone widths, with horizontally scrollable charts and tables. Overview also includes a weekday/hour activity heatmap and the largest sessions.
 
+## OpenTelemetry Export
+
+Claude Code can emit OpenTelemetry telemetry itself. The other agents Splitrail reads cannot, so `splitrail otel` exports any agent's usage to an OTLP/HTTP collector as `gen_ai.*` traces and metrics:
+
+```bash
+# one-shot backfill of everything on disk
+splitrail otel export --endpoint http://localhost:4318
+
+# follow transcripts and export as agents work
+splitrail otel serve
+
+# inspect the payload instead of sending it
+splitrail otel export --dry-run --pretty --days 7
+```
+
+Opt-in means opt-in: without an `[otel]` section and without the subcommand, nothing is read, written, or sent. Some agents instrument themselves (Claude Code, OpenCode), so add whichever you want to skip with `exclude_analyzers`:
+
+```toml
+[otel]
+enabled = false                    # start the exporter with the TUI (follow only, no backfill)
+endpoint = "http://localhost:4318" # /v1/traces and /v1/metrics are appended
+service_name = "splitrail"
+include_tool_spans = false         # execute_tool spans, see below
+exclude_analyzers = ["Claude Code"]
+backfill_days = 0                  # 0 = all history
+```
+
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, and the per-signal endpoint variables are also honored, with the command line taking precedence.
+
+Each turn becomes one trace:
+
+```
+invoke_agent Codex CLI            gen_ai.conversation.id
+├── chat gpt-5.6-codex            gen_ai.usage.{input,output,cache_read,cache_write}.input_tokens, splitrail.cost.usd
+├── execute_tool shell            gen_ai.tool.name, gen_ai.tool.call.id
+└── chat gpt-5.6-codex
+```
+
+Trace and span ids are derived from each message's `global_hash`, so re-running a backfill is idempotent and a corrected message reuses its span. Exported hashes are recorded in the system state directory (`splitrail/otel-state.json`), not in your config. If you point Splitrail at a different collector, it says so rather than silently sending nothing.
+
+Token usage is measured; durations are not. Transcripts record when a message was written, not how long the request took, so `chat` spans end at the next event in the session, clamped to two minutes, and say `splitrail.timing = "derived"`. Tool spans use `"recorded"` when the transcript has a result timestamp. No latency metric is emitted, because a histogram of inferred durations is worse than no histogram. Token usage (`gen_ai.client.token.usage`) and cost (`splitrail.cost.usd`) are exported per hour as delta counters, timestamped with the history they describe.
+
+`execute_tool` spans need per-call records, which the Claude Code, Codex CLI, and Gemini CLI analyzers provide; other agents export turn and request spans only. Analyzers opt in through a default-empty `parse_tool_calls` hook, so adding one later does not disturb existing ones.
+
+Prompts, completions, tool arguments, and tool results are never exported. `execute_tool` spans carry a name, an id, and timing only.
+
 ## MCP Server
 
 Splitrail can run as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, allowing AI assistants to query your usage statistics programmatically.

@@ -687,3 +687,28 @@ async fn test_gemini_cli_jsonl_latest_message_version_wins() {
     assert_eq!(assistant.stats.terminal_commands, 1);
     assert!(analyzer.is_valid_data_path(&session_path));
 }
+
+#[test]
+fn gemini_tool_calls_are_reported_from_jsonl_sessions() {
+    let dir = tempdir().unwrap();
+    let session_path = dir.path().join("session.jsonl");
+    std::fs::write(
+        &session_path,
+        concat!(
+            r#"{"id":"g-1","timestamp":"2026-04-28T16:11:38.569Z","type":"gemini","content":"draft","thoughts":[],"model":"gemini-3-flash-preview","toolCalls":[{"id":"call-1","name":"run_shell_command","args":{"command":"rg cache"},"result":[]},{"name":"read_file","args":{"path":"a.rs"}}]}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let calls = crate::analyzers::gemini_cli::tool_calls_from_file(&session_path).unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].name, "run_shell_command");
+    assert_eq!(calls[0].call_id.as_deref(), Some("call-1"));
+    assert_eq!(calls[1].name, "read_file");
+    assert_eq!(calls[1].call_id, None);
+    assert_eq!(
+        calls[0].conversation_hash,
+        crate::utils::hash_text(&session_path.to_string_lossy())
+    );
+}

@@ -252,6 +252,42 @@ pub enum MessageRole {
     Assistant,
 }
 
+/// A single tool invocation, as recorded in an agent's transcript.
+///
+/// This exists for telemetry exporters, not for display: `Stats.tool_calls` is
+/// only a count, and a count cannot produce an `execute_tool` span. Analyzers
+/// opt in by implementing `Analyzer::parse_tool_calls`.
+///
+/// Deliberately content-free: no arguments, no results. Those are sensitive and
+/// large, and the exporter's job is cost and timing, not prompt capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    /// Conversation this call belongs to; matches `ConversationMessage::conversation_hash`.
+    pub conversation_hash: String,
+    /// When the agent issued the call.
+    pub timestamp: DateTime<Utc>,
+    /// Tool name as the agent recorded it (e.g. `Bash`, `shell`, `read_file`).
+    pub name: String,
+    /// The agent's own id for the call, when it records one. Used for stable ids
+    /// and to match results.
+    pub call_id: Option<String>,
+    /// Observed duration, when the transcript records both the call and its
+    /// result. `None` means the span duration will be derived.
+    pub duration_ms: Option<i64>,
+}
+
+impl ToolCall {
+    /// Stable identity for a call: its id when present, otherwise its time and
+    /// name. Used to derive span ids, so it must not depend on iteration order.
+    pub fn key(&self) -> String {
+        match &self.call_id {
+            Some(call_id) if !call_id.trim().is_empty() => call_id.clone(),
+            _ => format!("{}-{}", self.timestamp.timestamp_millis(), self.name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationMessage {

@@ -1067,3 +1067,53 @@ fn test_subagent_description_reads_meta_label() {
     .unwrap();
     assert_eq!(subagent_description(&transcript), None);
 }
+
+#[test]
+fn tool_calls_carry_id_name_and_recorded_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let body = concat!(
+        r#"{"type":"assistant","uuid":"u1","timestamp":"2026-04-01T10:00:00Z","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":10,"output_tokens":2}}}"#,
+        "\n",
+        r#"{"type":"user","uuid":"u2","timestamp":"2026-04-01T10:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#,
+        "\n",
+    );
+    fs::write(&path, body).unwrap();
+
+    let calls = crate::analyzers::claude_code::tool_calls_from_file(&path).unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "Bash");
+    assert_eq!(calls[0].call_id.as_deref(), Some("toolu_1"));
+    assert_eq!(calls[0].duration_ms, Some(3_000));
+    assert_eq!(
+        calls[0].conversation_hash,
+        crate::utils::hash_text(&path.to_string_lossy()),
+        "conversation hash must match what parse_source assigns"
+    );
+}
+
+#[test]
+fn tool_calls_without_a_result_have_no_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let body = concat!(
+        r#"{"type":"assistant","uuid":"u1","timestamp":"2026-04-01T10:00:00Z","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}],"usage":{"input_tokens":10,"output_tokens":2}}}"#,
+        "\n",
+    );
+    fs::write(&path, body).unwrap();
+
+    let calls = crate::analyzers::claude_code::tool_calls_from_file(&path).unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].duration_ms, None);
+}
+
+#[test]
+fn duplicate_tool_use_blocks_are_reported_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let line = r#"{"type":"assistant","uuid":"u1","timestamp":"2026-04-01T10:00:00Z","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}],"usage":{"input_tokens":10,"output_tokens":2}}}"#;
+    fs::write(&path, format!("{line}\n{line}\n")).unwrap();
+
+    let calls = crate::analyzers::claude_code::tool_calls_from_file(&path).unwrap();
+    assert_eq!(calls.len(), 1);
+}

@@ -863,3 +863,43 @@ fn test_fallback_model_respects_codex_home() {
         "gpt-5.5"
     );
 }
+
+#[test]
+fn tool_calls_pair_calls_with_their_outputs() {
+    let mut file = NamedTempFile::new().unwrap();
+    let body = concat!(
+        r#"{"timestamp":"2026-04-01T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call_1","arguments":"{}"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-04-01T10:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"ok"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-04-01T10:00:05Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"call_2","input":"*** Begin Patch"}}"#,
+        "\n",
+    );
+    file.write_all(body.as_bytes()).unwrap();
+
+    let calls = crate::analyzers::codex_cli::tool_calls_from_file(file.path()).unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].name, "shell");
+    assert_eq!(calls[0].call_id.as_deref(), Some("call_1"));
+    assert_eq!(calls[0].duration_ms, Some(2_000));
+    assert_eq!(calls[1].name, "apply_patch");
+    assert_eq!(calls[1].duration_ms, None, "no output recorded yet");
+}
+
+#[test]
+fn non_tool_items_are_ignored() {
+    let mut file = NamedTempFile::new().unwrap();
+    let body = concat!(
+        r#"{"timestamp":"2026-04-01T10:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}"#,
+        "\n",
+        r#"{"timestamp":"2026-04-01T10:00:01Z","type":"event_msg","payload":{"type":"token_count"}}"#,
+        "\n",
+    );
+    file.write_all(body.as_bytes()).unwrap();
+
+    assert!(
+        crate::analyzers::codex_cli::tool_calls_from_file(file.path())
+            .unwrap()
+            .is_empty()
+    );
+}

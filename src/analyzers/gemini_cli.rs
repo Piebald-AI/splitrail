@@ -1,7 +1,7 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
 use crate::models::{ServiceTier, calculate_total_cost_for_service_tier_at};
-use crate::types::{Application, ConversationMessage, FileCategory, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, FileCategory, MessageRole, Stats, ToolCall};
 use crate::utils::{deserialize_utc_timestamp, hash_text};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -434,6 +434,87 @@ fn messages_from_session(
 }
 
 // JSON session parsing (not JSONL)
+/// Collect per-tool-call records from a Gemini CLI session.
+///
+/// Gemini records tool calls on the `gemini` message (`toolCalls`) with a name
+/// and usually an id, but no separate completion timestamp, so durations are
+/// left to the exporter to derive.
+pub(crate) fn tool_calls_from_file(file_path: &Path) -> Result<Vec<ToolCall>> {
+    let conversation_hash = hash_text(&file_path.to_string_lossy());
+    let messages = read_messages_for_tool_calls(file_path)?;
+    let mut calls = Vec::new();
+
+    for message in messages {
+        let GeminiCliMessage::Gemini {
+            timestamp,
+            tool_calls,
+            ..
+        } = message
+        else {
+            continue;
+        };
+        for call in tool_calls {
+            let Some(name) = call.get("name").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let call_id = call
+                .get("id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            calls.push(ToolCall {
+                conversation_hash: conversation_hash.clone(),
+                timestamp,
+                name: name.to_string(),
+                call_id,
+                duration_ms: None,
+            });
+        }
+    }
+
+    Ok(calls)
+}
+
+fn read_messages_for_tool_calls(file_path: &Path) -> Result<Vec<GeminiCliMessage>> {
+    if file_path
+        .extension()
+        .is_some_and(|extension| extension == "jsonl")
+    {
+        let content = std::fs::read_to_string(file_path)?;
+        let mut message_order = Vec::new();
+        let mut latest_messages = HashMap::new();
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            let mut line_bytes = line.as_bytes().to_vec();
+            let value: simd_json::OwnedValue = simd_json::from_slice(&mut line_bytes)?;
+            if let Some(messages) = value
+                .get("$set")
+                .and_then(|set| set.get("messages"))
+                .and_then(|messages| messages.as_array())
+            {
+                for message_value in messages {
+                    let mut message_bytes = simd_json::to_vec(message_value)?;
+                    let message: GeminiCliMessage = simd_json::from_slice(&mut message_bytes)?;
+                    upsert_jsonl_message(&mut message_order, &mut latest_messages, message);
+                }
+                continue;
+            }
+            if value.get("type").is_none() || value.get("id").is_none() {
+                continue;
+            }
+            let mut message_bytes = line.as_bytes().to_vec();
+            let message: GeminiCliMessage = simd_json::from_slice(&mut message_bytes)?;
+            upsert_jsonl_message(&mut message_order, &mut latest_messages, message);
+        }
+        Ok(message_order
+            .into_iter()
+            .filter_map(|id| latest_messages.remove(&id))
+            .collect())
+    } else {
+        let session: GeminiCliSession =
+            simd_json::from_slice(&mut std::fs::read_to_string(file_path)?.into_bytes())?;
+        Ok(session.messages)
+    }
+}
+
 fn parse_json_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>> {
     let session: GeminiCliSession =
         simd_json::from_slice(&mut std::fs::read_to_string(file_path)?.into_bytes())?;
@@ -503,6 +584,13 @@ fn parse_jsonl_session_file(file_path: &Path) -> Result<Vec<ConversationMessage>
 impl Analyzer for GeminiCliAnalyzer {
     fn display_name(&self) -> &'static str {
         "Gemini CLI"
+    }
+
+    fn parse_tool_calls(&self, sources: &[DataSource]) -> Result<Vec<ToolCall>> {
+        Ok(sources
+            .par_iter()
+            .flat_map(|source| tool_calls_from_file(&source.path).unwrap_or_default())
+            .collect())
     }
 
     fn get_data_glob_patterns(&self) -> Vec<String> {

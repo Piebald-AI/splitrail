@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use simd_json::prelude::*;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -13,7 +14,7 @@ use walkdir::WalkDir;
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
 use crate::models::{ServiceTier, calculate_total_cost_for_service_tier_at};
-use crate::types::{Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats, ToolCall};
 use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
 
 use std::sync::OnceLock;
@@ -193,6 +194,16 @@ impl Analyzer for CodexCliAnalyzer {
         parse_codex_cli_jsonl_file(&source.path).map(|(msgs, _model)| msgs)
     }
 
+    /// Tool calls are `response_item` entries: a `function_call` (or
+    /// `custom_tool_call`) carries the call id and name, and the matching
+    /// `*_output` item gives the completion time.
+    fn parse_tool_calls(&self, sources: &[DataSource]) -> Result<Vec<ToolCall>> {
+        Ok(sources
+            .par_iter()
+            .flat_map(|source| tool_calls_from_file(&source.path).unwrap_or_default())
+            .collect())
+    }
+
     // Codex CLI doesn't need deduplication since each session is separate
     fn parse_sources_parallel(&self, sources: &[DataSource]) -> Vec<ConversationMessage> {
         sources
@@ -343,6 +354,80 @@ fn record_tool_call(name: &str, stats: &mut Stats) {
 }
 
 /// Returns (messages, detected_session_model_name)
+/// Collect per-tool-call records from one Codex session file.
+///
+/// Compressed sessions (`*.jsonl.zst`) are decoded the same way the message
+/// parser decodes them, so live and archived sessions behave identically.
+pub(crate) fn tool_calls_from_file(file_path: &Path) -> Result<Vec<ToolCall>> {
+    let conversation_hash = hash_text(&canonical_session_path(file_path).to_string_lossy());
+    let mut buffer = Vec::new();
+    if file_path
+        .extension()
+        .is_some_and(|extension| extension == "zst")
+    {
+        let mut decoder = zstd::stream::read::Decoder::new(File::open(file_path)?)?;
+        // A truncated tail still decodes its complete records.
+        let _ = decoder.read_to_end(&mut buffer);
+    } else {
+        File::open(file_path)?.read_to_end(&mut buffer)?;
+    }
+
+    let mut started: Vec<(String, String, DateTime<Utc>)> = Vec::new();
+    let mut finished: std::collections::HashMap<String, DateTime<Utc>> =
+        std::collections::HashMap::new();
+
+    for line in buffer.split(|byte| *byte == b'\n') {
+        if line.is_empty() || line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let mut line_bytes = line.to_vec();
+        let Ok(wrapper) = simd_json::from_slice::<CodexCliWrapper>(&mut line_bytes) else {
+            continue;
+        };
+        if wrapper.entry_type != "response_item" {
+            continue;
+        }
+        let simd_json::OwnedValue::Object(map) = &wrapper.payload else {
+            continue;
+        };
+        let Some(item_type) = map.get("type").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(call_id) = map.get("call_id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        match item_type {
+            "function_call" | "custom_tool_call" => {
+                if let Some(name) = map.get("name").and_then(|value| value.as_str()) {
+                    started.push((call_id.to_string(), name.to_string(), wrapper.timestamp));
+                }
+            }
+            "function_call_output" | "custom_tool_call_output" => {
+                finished.insert(call_id.to_string(), wrapper.timestamp);
+            }
+            _ => {}
+        }
+    }
+
+    let mut seen = HashSet::with_capacity(started.len());
+    Ok(started
+        .into_iter()
+        .filter(|(call_id, _, _)| seen.insert(call_id.clone()))
+        .map(|(call_id, name, timestamp)| {
+            let duration_ms = finished
+                .get(&call_id)
+                .map(|finished_at| (*finished_at - timestamp).num_milliseconds().max(0));
+            ToolCall {
+                conversation_hash: conversation_hash.clone(),
+                timestamp,
+                name,
+                call_id: Some(call_id),
+                duration_ms,
+            }
+        })
+        .collect())
+}
+
 pub(crate) fn parse_codex_cli_jsonl_file(
     file_path: &Path,
 ) -> Result<(Vec<ConversationMessage>, Option<String>)> {

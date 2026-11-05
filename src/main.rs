@@ -18,6 +18,7 @@ mod config;
 mod contribution_cache;
 mod mcp;
 mod models;
+mod otel;
 mod reqwest_simd_json;
 mod tui;
 mod types;
@@ -74,6 +75,68 @@ enum Commands {
     Mcp,
     /// Show local usage trends in a browser
     Web(WebArgs),
+    /// Export usage to an OpenTelemetry collector
+    Otel(OtelArgs),
+}
+
+#[derive(Args)]
+struct OtelArgs {
+    #[command(subcommand)]
+    subcommand: OtelSubcommands,
+}
+
+#[derive(Subcommand)]
+enum OtelSubcommands {
+    /// Export all usage once, then exit
+    Export(OtelExportArgs),
+    /// Follow agent transcripts and export as they change
+    Serve(OtelServeArgs),
+}
+
+#[derive(Args)]
+struct OtelExportArgs {
+    /// Only export one analyzer, by display name (e.g. "Codex CLI")
+    #[arg(long)]
+    analyzer: Option<String>,
+
+    /// Only export messages from the last N days (0 = all history)
+    #[arg(long)]
+    days: Option<i64>,
+
+    /// Print the OTLP payload instead of sending it
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+
+    /// Pretty-print --dry-run output
+    #[arg(long, default_value_t = false)]
+    pretty: bool,
+
+    /// OTLP endpoint (overrides config and OTEL_EXPORTER_OTLP_ENDPOINT)
+    #[arg(long)]
+    endpoint: Option<String>,
+
+    /// Skip the token and cost metrics
+    #[arg(long, default_value_t = false)]
+    no_metrics: bool,
+}
+
+#[derive(Args)]
+struct OtelServeArgs {
+    /// OTLP endpoint (overrides config and OTEL_EXPORTER_OTLP_ENDPOINT)
+    #[arg(long)]
+    endpoint: Option<String>,
+
+    /// Only follow new activity; do not export existing history first
+    #[arg(long, default_value_t = false)]
+    no_backfill: bool,
+
+    /// How much history the initial sweep covers (0 = all)
+    #[arg(long)]
+    days: Option<i64>,
+
+    /// Skip the token and cost metrics
+    #[arg(long, default_value_t = false)]
+    no_metrics: bool,
 }
 
 #[derive(Args)]
@@ -207,6 +270,35 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Commands::Otel(args)) => {
+            let result = match args.subcommand {
+                OtelSubcommands::Export(export) => {
+                    otel::run_export(otel::ExportOptions {
+                        analyzer: export.analyzer,
+                        days: export.days,
+                        dry_run: export.dry_run,
+                        pretty: export.pretty,
+                        endpoint: export.endpoint,
+                        metrics: !export.no_metrics,
+                    })
+                    .await
+                }
+                OtelSubcommands::Serve(serve) => {
+                    otel::serve::run_serve(otel::serve::ServeOptions {
+                        endpoint: serve.endpoint,
+                        no_backfill: serve.no_backfill,
+                        backfill_days: serve.days,
+                        metrics: !serve.no_metrics,
+                        once: false,
+                    })
+                    .await
+                }
+            };
+            if let Err(e) = result {
+                eprintln!("OTel export error: {e:#}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -279,6 +371,24 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
 
     // Check if auto-upload is enabled and start background upload
     let config = config::Config::load().unwrap_or(None).unwrap_or_default();
+
+    // [otel] enabled runs the exporter alongside the TUI. It follows changes
+    // only; history is left to `splitrail otel export`, so starting the TUI
+    // never turns into an accidental full backfill.
+    if config.otel.enabled {
+        tokio::spawn(async move {
+            let options = otel::serve::ServeOptions {
+                endpoint: None,
+                no_backfill: true,
+                backfill_days: None,
+                metrics: true,
+                once: false,
+            };
+            if let Err(error) = otel::serve::run_serve(options).await {
+                eprintln!("OTel exporter stopped: {error:#}");
+            }
+        });
+    }
     if config.upload.auto_upload {
         if config.is_configured() {
             // For initial auto-upload, load full stats separately (sync, no threadpool for background task)
