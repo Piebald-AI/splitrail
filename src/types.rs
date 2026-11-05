@@ -269,8 +269,8 @@ pub struct ToolCall {
     pub timestamp: DateTime<Utc>,
     /// Tool name as the agent recorded it (e.g. `Bash`, `shell`, `read_file`).
     pub name: String,
-    /// The agent's own id for the call, when it records one. Used for stable ids
-    /// and to match results.
+    /// The agent's id for the call, or a stable `splitrail-` identity synthesized
+    /// from its source position when the transcript has no id.
     pub call_id: Option<String>,
     /// Observed duration, when the transcript records both the call and its
     /// result. `None` means the span duration will be derived.
@@ -312,6 +312,9 @@ pub struct ConversationMessage {
     pub model: Option<String>, // None for user messages
     pub stats: Stats,
     pub role: MessageRole,
+    /// True for tool-result records that must not start a new human turn.
+    #[serde(default)]
+    pub is_tool_result: bool,
     pub uuid: Option<String>,
     pub session_name: Option<String>,
 }
@@ -876,6 +879,7 @@ mod tests {
                 cost: 0.01,
                 ..Stats::default()
             },
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: None,
             session_name: Some("Test Session".into()),

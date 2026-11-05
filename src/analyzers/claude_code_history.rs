@@ -301,6 +301,7 @@ mod tests {
                 input_tokens,
                 ..Stats::default()
             },
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: Some(hash.to_string()),
             session_name: Some("Session prompt".to_string()),

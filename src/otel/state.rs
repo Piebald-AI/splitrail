@@ -27,13 +27,15 @@ const MAX_ENTRIES: usize = 500_000;
 #[derive(Debug, Serialize, Deserialize)]
 struct ExportState {
     version: u32,
-    /// Traces endpoint these hashes were sent to. Switching collectors is
-    /// legitimate, but silently skipping a backfill for a collector that has
-    /// never seen this history is not, so the change is reported.
+    /// Traces endpoint these hashes were sent to.
     #[serde(default)]
     endpoint: String,
-    /// `global_hash` -> message timestamp in milliseconds, kept for pruning.
+    /// Message and namespaced output hashes -> message timestamp in milliseconds.
+    #[serde(default)]
     exported: BTreeMap<String, i64>,
+    /// End of the last accepted metrics interval (Unix nanoseconds).
+    #[serde(default)]
+    metrics_endpoint_ns: Option<i64>,
 }
 
 impl Default for ExportState {
@@ -42,6 +44,7 @@ impl Default for ExportState {
             version: STATE_VERSION,
             endpoint: String::new(),
             exported: BTreeMap::new(),
+            metrics_endpoint_ns: None,
         }
     }
 }
@@ -152,6 +155,24 @@ impl ExportStateHandle {
 
     pub fn is_exported(&self, global_hash: &str) -> bool {
         self.state.is_exported(global_hash)
+    }
+    pub fn metrics_interval(&self, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
+        let previous = self.state.metrics_endpoint_ns.and_then(|ns| {
+            DateTime::from_timestamp(
+                ns.div_euclid(1_000_000_000),
+                ns.rem_euclid(1_000_000_000) as u32,
+            )
+        });
+        let end = previous.map_or(now, |previous| {
+            now.max(previous + chrono::Duration::nanoseconds(1))
+        });
+        let start = previous.unwrap_or_else(|| end - chrono::Duration::nanoseconds(1));
+        (start, end)
+    }
+
+    pub fn record_metrics_endpoint(&mut self, end: DateTime<Utc>) {
+        self.state.metrics_endpoint_ns = end.timestamp_nanos_opt();
+        self.dirty = true;
     }
 
     pub fn record(&mut self, global_hash: &str, timestamp: DateTime<Utc>) {

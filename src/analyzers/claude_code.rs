@@ -872,6 +872,9 @@ pub fn parse_jsonl_file<R: Read>(
                         project_path: current_project_path.clone(),
                         conversation_hash: conversation_hash.to_string(),
                         stats: Stats::default(), // Will be filled below
+                        is_tool_result: role.as_deref() == Some("user")
+                            && matches!(&content, Some(Content::Blocks(blocks))
+                                if !blocks.is_empty() && blocks.iter().all(|block| matches!(block, ContentBlock::ToolResult { .. }))),
                         role: match role.as_deref() {
                             Some("user") => MessageRole::User,
                             _ => MessageRole::Assistant,

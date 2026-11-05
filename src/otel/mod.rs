@@ -119,10 +119,14 @@ pub async fn run_export(options: ExportOptions) -> Result<()> {
 }
 
 /// One analyzer's parsed output, ready to export.
+#[derive(Clone)]
 pub(crate) struct LoadedAnalyzer {
     pub name: String,
     pub messages: Vec<ConversationMessage>,
     pub tool_calls: Vec<ToolCall>,
+    /// Eligibility is separate from context for incremental live exports.
+    pub eligible_hashes: Option<HashSet<String>>,
+    pub eligible_tool_keys: Option<HashSet<String>>,
 }
 
 /// Load messages (and, when asked for, per-call tool records) for each selected
@@ -197,6 +201,8 @@ pub(crate) fn load_messages(
                     name,
                     messages: stats.messages,
                     tool_calls,
+                    eligible_hashes: None,
+                    eligible_tool_keys: None,
                 })
             })
             .collect()
@@ -210,12 +216,11 @@ pub(crate) fn load_messages(
                     .messages
                     .into_iter()
                     .filter(|message| message.date >= cutoff)
-                    .collect::<Vec<_>>(),
+                    .collect(),
                 None => loaded.messages,
             };
             LoadedAnalyzer { messages, ..loaded }
         })
-        .filter(|loaded| !loaded.messages.is_empty())
         .collect())
 }
 
@@ -268,6 +273,9 @@ impl Exporter {
     pub fn traces_endpoint(&self) -> &str {
         &self.traces.endpoint
     }
+    pub(crate) fn tools_enabled(&self) -> bool {
+        self.otel.include_tool_spans
+    }
 
     /// Build, send, and record one batch set of already-loaded messages.
     pub async fn send(
@@ -276,6 +284,7 @@ impl Exporter {
         state: &mut state::ExportStateHandle,
         options: &ExportOptions,
     ) -> Result<ExportSummary> {
+        let groups = coalesce_groups(groups);
         let mut summary = ExportSummary {
             dry_run: options.dry_run,
             ..Default::default()
@@ -283,73 +292,141 @@ impl Exporter {
 
         let mut trace_requests: Vec<encode::ExportTraceRequest> = Vec::new();
         let mut metric_requests: Vec<encode::ExportMetricsRequest> = Vec::new();
+        let mut pending_records: Vec<(String, DateTime<Utc>)> = Vec::new();
+        let mut metric_messages: std::collections::BTreeMap<String, Vec<ConversationMessage>> =
+            std::collections::BTreeMap::new();
         let mut current: Vec<spans::TurnSpans> = Vec::new();
         let mut current_spans = 0usize;
         let batch_size = self.otel.max_batch_size.max(1);
+        for group in &groups {
+            if self.metrics.is_some() {
+                let messages = metric_messages.entry(group.name.clone()).or_default();
+                messages.extend(
+                    group
+                        .messages
+                        .iter()
+                        .filter(|message| {
+                            group
+                                .eligible_hashes
+                                .as_ref()
+                                .is_none_or(|hashes| hashes.contains(&message.global_hash))
+                        })
+                        .filter(|message| {
+                            !state.is_exported(&metrics_state_key(&message.global_hash))
+                        })
+                        .cloned(),
+                );
+            }
+        }
+        let (metric_start, metric_end) = state.metrics_interval(Utc::now());
+        for (analyzer, messages) in metric_messages {
+            if messages.is_empty() {
+                continue;
+            }
+            let points = metrics::build_metrics(&analyzer, &messages, metric_start, metric_end);
+            if !points.is_empty() {
+                metric_requests.push(encode::metrics_request(&self.resource, points));
+                for message in messages {
+                    pending_records.push((metrics_state_key(&message.global_hash), message.date));
+                }
+            }
+        }
 
-        for group in groups {
+        for group in &groups {
             let analyzer_name = &group.name;
             let messages = &group.messages;
             summary.messages_seen += messages.len() as u64;
-            let fresh: Vec<ConversationMessage> = messages
+            let fresh: Vec<&ConversationMessage> = messages
                 .iter()
+                .filter(|message| {
+                    group
+                        .eligible_hashes
+                        .as_ref()
+                        .is_none_or(|hashes| hashes.contains(&message.global_hash))
+                })
                 .filter(|message| !state.is_exported(&message.global_hash))
-                .cloned()
                 .collect();
-            summary.messages_already_exported += (messages.len() - fresh.len()) as u64;
-            if fresh.is_empty() {
-                continue;
-            }
+            summary.messages_already_exported += messages
+                .iter()
+                .filter(|message| {
+                    group
+                        .eligible_hashes
+                        .as_ref()
+                        .is_none_or(|hashes| hashes.contains(&message.global_hash))
+                        && state.is_exported(&message.global_hash)
+                })
+                .count() as u64;
 
-            for message in &fresh {
-                state.record(&message.global_hash, message.date);
-            }
-            summary.messages_exported += fresh.len() as u64;
-
-            if self.metrics.is_some() {
-                let metrics = metrics::build_metrics(analyzer_name, &fresh);
-                if !metrics.is_empty() {
-                    metric_requests.push(encode::metrics_request(&self.resource, metrics));
-                }
-            }
-
-            // Tool calls are exported once each, and only for conversations
-            // whose messages are in this batch: re-parsing one file must not
-            // dump the rest of that analyzer's history.
             let fresh_calls: Vec<ToolCall> = if self.otel.include_tool_spans {
-                let conversations: HashSet<&str> = fresh
+                let conversations: HashSet<&str> = messages
                     .iter()
                     .map(|message| message.conversation_hash.as_str())
                     .collect();
-                let calls: Vec<ToolCall> = group
+                group
                     .tool_calls
                     .iter()
+                    .filter(|call| {
+                        group
+                            .eligible_tool_keys
+                            .as_ref()
+                            .is_none_or(|keys| keys.contains(&tool_state_key(analyzer_name, call)))
+                    })
                     .filter(|call| conversations.contains(call.conversation_hash.as_str()))
                     .filter(|call| !state.is_exported(&tool_state_key(analyzer_name, call)))
                     .cloned()
-                    .collect();
-                for call in &calls {
-                    state.record(&tool_state_key(analyzer_name, call), call.timestamp);
-                }
-                calls
+                    .collect()
             } else {
                 Vec::new()
             };
 
-            let turns = spans::build_turns(
-                analyzer_name,
-                &fresh,
-                &fresh_calls,
-                self.otel.include_tool_spans,
-            );
-            for turn in turns {
-                summary.spans += turn.spans.len() as u64;
-                current_spans += turn.spans.len();
-                current.push(turn);
-                if current_spans >= batch_size {
-                    trace_requests.push(request_for(&self.resource, std::mem::take(&mut current)));
-                    current_spans = 0;
+            if !fresh.is_empty() || !fresh_calls.is_empty() {
+                let turns = spans::build_turns(
+                    analyzer_name,
+                    messages,
+                    &group.tool_calls,
+                    self.otel.include_tool_spans,
+                );
+                let mut fresh_span_ids: HashSet<String> = fresh
+                    .iter()
+                    .map(|message| {
+                        ids::chat_span_id(
+                            analyzer_name,
+                            &message.conversation_hash,
+                            &message.global_hash,
+                        )
+                    })
+                    .collect();
+                fresh_span_ids.extend(fresh_calls.iter().map(|call| {
+                    ids::tool_span_id(analyzer_name, &call.conversation_hash, &call.key())
+                }));
+                for mut turn in turns {
+                    let parent_id = turn
+                        .spans
+                        .first()
+                        .map(|span| span.span_id.clone())
+                        .unwrap_or_default();
+                    turn.spans.retain(|span| {
+                        span.span_id == parent_id || fresh_span_ids.contains(&span.span_id)
+                    });
+                    if turn.spans.len() <= 1 {
+                        continue;
+                    }
+                    summary.spans += turn.spans.len() as u64;
+                    current_spans += turn.spans.len();
+                    current.push(turn);
+                    if current_spans >= batch_size {
+                        trace_requests
+                            .push(request_for(&self.resource, std::mem::take(&mut current)));
+                        current_spans = 0;
+                    }
                 }
+            }
+            summary.messages_exported += fresh.len() as u64;
+            for message in fresh {
+                pending_records.push((message.global_hash.clone(), message.date));
+            }
+            for call in &fresh_calls {
+                pending_records.push((tool_state_key(analyzer_name, call), call.timestamp));
             }
         }
 
@@ -374,8 +451,15 @@ impl Exporter {
         for request in &metric_requests {
             self.client.post_metrics(request).await?;
         }
+        if !metric_requests.is_empty() {
+            state.record_metrics_endpoint(metric_end);
+        }
+        for (key, timestamp) in pending_records {
+            if key.starts_with("metrics:") || !trace_requests.is_empty() {
+                state.record(&key, timestamp);
+            }
+        }
         state.commit()?;
-
         Ok(summary)
     }
 }
@@ -412,11 +496,44 @@ fn render<T: serde::Serialize>(value: &T, pretty: bool) -> Result<String> {
     };
     rendered.context("Failed to serialize OTLP payload")
 }
+fn metrics_state_key(global_hash: &str) -> String {
+    format!("metrics:{global_hash}")
+}
 
-/// State key for a tool call, namespaced so it cannot collide with a message
-/// hash that happens to look similar.
-fn tool_state_key(analyzer: &str, call: &ToolCall) -> String {
-    format!("tool:{analyzer}:{}", call.key())
+pub(crate) fn tool_state_key(analyzer: &str, call: &ToolCall) -> String {
+    format!("tool:{analyzer}:{}:{}", call.conversation_hash, call.key())
+}
+fn coalesce_groups(groups: &[LoadedAnalyzer]) -> Vec<LoadedAnalyzer> {
+    let mut merged = std::collections::BTreeMap::<String, LoadedAnalyzer>::new();
+    for group in groups {
+        let Some(existing) = merged.get_mut(&group.name) else {
+            merged.insert(group.name.clone(), group.clone());
+            continue;
+        };
+        existing.messages.extend(group.messages.iter().cloned());
+        existing.tool_calls.extend(group.tool_calls.iter().cloned());
+        match (&mut existing.eligible_hashes, &group.eligible_hashes) {
+            (Some(current), Some(next)) => current.extend(next.iter().cloned()),
+            (slot, None) => *slot = None,
+            _ => {}
+        }
+        match (&mut existing.eligible_tool_keys, &group.eligible_tool_keys) {
+            (Some(current), Some(next)) => current.extend(next.iter().cloned()),
+            (slot, None) => *slot = None,
+            _ => {}
+        }
+    }
+    for group in merged.values_mut() {
+        let mut seen_messages = HashSet::new();
+        group
+            .messages
+            .retain(|message| seen_messages.insert(message.global_hash.clone()));
+        let mut seen_calls = HashSet::new();
+        group
+            .tool_calls
+            .retain(|call| seen_calls.insert(tool_state_key(&group.name, call)));
+    }
+    merged.into_values().collect()
 }
 
 /// Flatten turns into one OTLP request, keeping every trace intact.
@@ -512,6 +629,7 @@ mod tests {
                 },
             },
             role,
+            is_tool_result: false,
             uuid: None,
             session_name: None,
         }
@@ -525,6 +643,8 @@ mod tests {
                 message(5, MessageRole::Assistant, "a1"),
             ],
             tool_calls: Vec::new(),
+            eligible_hashes: None,
+            eligible_tool_keys: None,
         }]
     }
 
@@ -536,6 +656,16 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         state::set_test_state_path(path.clone());
         path
+    }
+    #[test]
+    fn coalesces_duplicate_analyzer_groups_before_export() {
+        let mut duplicate = groups();
+        duplicate[0]
+            .messages
+            .push(message(0, MessageRole::User, "u1"));
+        let merged = coalesce_groups(&[groups()[0].clone(), duplicate[0].clone()]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].messages.len(), 2);
     }
 
     #[tokio::test]
@@ -609,6 +739,36 @@ mod tests {
         let _ = std::fs::remove_file(state_path);
     }
 
+    #[tokio::test]
+    async fn incremental_reply_keeps_full_turn_context() {
+        let state_path = test_state_path("incremental-context");
+        let (endpoint, captured) = spawn_collector().await;
+        let otel = OtelConfig {
+            endpoint,
+            ..Default::default()
+        };
+        let exporter = Exporter::new(&otel, None, false).expect("exporter");
+        let mut state = state::ExportStateHandle::open("http://127.0.0.1:1").expect("state");
+        exporter
+            .send(&groups(), &mut state, &ExportOptions::default())
+            .await
+            .expect("first send");
+        let mut extended = groups();
+        extended[0]
+            .messages
+            .push(message(9, MessageRole::Assistant, "a2"));
+        let second = exporter
+            .send(&extended, &mut state, &ExportOptions::default())
+            .await
+            .expect("second send");
+        assert_eq!(second.messages_exported, 1);
+        assert_eq!(
+            second.spans, 2,
+            "parent aggregate and only the new child are emitted"
+        );
+        let _ = captured;
+        let _ = std::fs::remove_file(state_path);
+    }
     #[tokio::test]
     async fn second_run_does_not_re_export() {
         let state_path = test_state_path("idempotent");

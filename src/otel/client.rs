@@ -118,14 +118,8 @@ async fn check_partial_success(response: reqwest::Response, signal: &str) {
     let Some(partial) = parsed.get("partialSuccess") else {
         return;
     };
-    let rejected = partial
-        .get("rejectedSpans")
-        .and_then(|value| value.as_i64())
-        .or_else(|| {
-            partial
-                .get("rejectedDataPoints")
-                .and_then(|value| value.as_i64())
-        })
+    let rejected = rejected_count(partial, "rejectedSpans")
+        .or_else(|| rejected_count(partial, "rejectedDataPoints"))
         .unwrap_or(0);
     if rejected > 0 {
         let message = partial
@@ -134,6 +128,13 @@ async fn check_partial_success(response: reqwest::Response, signal: &str) {
             .unwrap_or("no message");
         eprintln!("⚠️  Collector rejected {rejected} {signal} item(s): {message}");
     }
+}
+
+fn rejected_count(partial: &simd_json::OwnedValue, field: &str) -> Option<i64> {
+    let value = partial.get(field)?;
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.parse::<i64>().ok())
 }
 
 #[cfg(test)]
@@ -172,5 +173,21 @@ mod tests {
             resource_spans: Vec::new(),
         };
         assert!(simd_json::to_vec(&request).is_ok());
+    }
+
+    #[test]
+    fn partial_success_rejection_accepts_json_numbers_and_int64_strings() {
+        for body in [
+            r#"{"partialSuccess":{"rejectedSpans":3}}"#,
+            r#"{"partialSuccess":{"rejectedSpans":"3"}}"#,
+            r#"{"partialSuccess":{"rejectedDataPoints":"4"}}"#,
+        ] {
+            let mut bytes = body.as_bytes().to_vec();
+            let parsed = simd_json::from_slice::<simd_json::OwnedValue>(&mut bytes).unwrap();
+            let partial = parsed.get("partialSuccess").unwrap();
+            let rejected = rejected_count(partial, "rejectedSpans")
+                .or_else(|| rejected_count(partial, "rejectedDataPoints"));
+            assert!(rejected.unwrap() > 0);
+        }
     }
 }

@@ -124,7 +124,7 @@ fn segment_turns<'a>(ordered: &[&'a ConversationMessage]) -> Vec<TurnGroup<'a>> 
     for (index, message) in ordered.iter().enumerate() {
         let next_event = ordered.get(index + 1).map(|message| message.date);
         match message.role {
-            MessageRole::User => {
+            MessageRole::User if !message.is_tool_result => {
                 if let Some(turn) = current.take() {
                     turns.push(turn);
                 }
@@ -134,15 +134,14 @@ fn segment_turns<'a>(ordered: &[&'a ConversationMessage]) -> Vec<TurnGroup<'a>> 
                     calls: Vec::new(),
                 });
             }
-            MessageRole::Assistant => match current.as_mut() {
+            MessageRole::User | MessageRole::Assistant => match current.as_mut() {
                 Some(turn) => turn.replies.push(Reply {
                     message,
                     next_event,
                 }),
                 None => {
-                    // Assistant output with no preceding prompt: a resumed
-                    // session, or a transcript whose first user message was
-                    // truncated. Still worth a span.
+                    // A tool-result row or assistant output may be the first
+                    // surviving event in an incremental/resumed transcript.
                     current = Some(TurnGroup {
                         user: None,
                         replies: vec![Reply {
@@ -160,13 +159,6 @@ fn segment_turns<'a>(ordered: &[&'a ConversationMessage]) -> Vec<TurnGroup<'a>> 
         turns.push(turn);
     }
 
-    // Drop turns with nothing to report (a lone prompt, or a stream of
-    // synthetic zero-usage records): they would add nothing to a collector.
-    turns.retain(|turn| {
-        turn.replies
-            .iter()
-            .any(|reply| is_reportable(reply.message))
-    });
     turns
 }
 
@@ -478,10 +470,17 @@ fn usage_attributes(stats: &Stats) -> Vec<KeyValue> {
     if stats.output_tokens > 0 {
         attributes.push(attr_int("gen_ai.usage.output_tokens", stats.output_tokens));
     }
-    if stats.cache_read_tokens > 0 {
+    let cache_read_tokens = if stats.cache_read_tokens > 0 {
+        stats.cache_read_tokens
+    } else {
+        stats
+            .cached_tokens
+            .saturating_sub(stats.cache_creation_tokens)
+    };
+    if cache_read_tokens > 0 {
         attributes.push(attr_int(
             "gen_ai.usage.cache_read.input_tokens",
-            stats.cache_read_tokens,
+            cache_read_tokens,
         ));
     }
     if stats.cache_creation_tokens > 0 {

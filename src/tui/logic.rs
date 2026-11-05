@@ -565,6 +565,7 @@ mod tests {
                 input_tokens,
                 ..Default::default()
             },
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: None,
             session_name: None,

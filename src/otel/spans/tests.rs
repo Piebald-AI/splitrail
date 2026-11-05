@@ -26,6 +26,7 @@ fn message(
         model: model.map(str::to_string),
         stats,
         role,
+        is_tool_result: false,
         uuid: None,
         session_name: None,
     }
@@ -578,4 +579,86 @@ fn tool_only_messages_do_not_become_chat_spans() {
     ];
     let turns = build_turns("Codex CLI", &messages, &[], false);
     assert_eq!(turns[0].spans.len(), 2, "agent plus the real request");
+}
+
+#[test]
+fn tool_only_turn_keeps_its_own_prompt() {
+    let messages = vec![
+        message(0, MessageRole::User, "u1", "conv", None, Stats::default()),
+        message(
+            1,
+            MessageRole::Assistant,
+            "a1",
+            "conv",
+            Some("gpt-5"),
+            usage(5, 2, 0.0),
+        ),
+        message(10, MessageRole::User, "u2", "conv", None, Stats::default()),
+        message(
+            11,
+            MessageRole::Assistant,
+            "pending",
+            "conv",
+            Some("gpt-5"),
+            Stats {
+                tool_calls: 1,
+                ..Stats::default()
+            },
+        ),
+    ];
+    let calls = vec![tool_call(11, "shell", "pending", "conv")];
+    let turns = build_turns("Codex CLI", &messages, &calls, true);
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].spans.len(), 2);
+    assert_eq!(
+        turns[1].trace_id,
+        ids::trace_id_for("Codex CLI", "conv", "hash-u2")
+    );
+    assert_eq!(turns[1].spans.len(), 2);
+    assert_eq!(turns[1].spans[1].name, "execute_tool shell");
+    let standalone = build_turns("Codex CLI", &messages[2..], &calls, true);
+    assert_eq!(standalone[0].trace_id, turns[1].trace_id);
+    assert_eq!(standalone[0].spans[1].span_id, turns[1].spans[1].span_id);
+}
+
+#[test]
+fn aggregate_cache_usage_does_not_count_writes_as_reads() {
+    let cached = message(
+        0,
+        MessageRole::Assistant,
+        "cached",
+        "conv",
+        Some("gemini-2.5-pro"),
+        Stats {
+            cached_tokens: 40,
+            ..Stats::default()
+        },
+    );
+    let turns = build_turns("Gemini CLI", &[cached], &[], false);
+    assert_eq!(
+        attr_int_value(&turns[0].spans[1], "gen_ai.usage.cache_read.input_tokens"),
+        Some(40)
+    );
+
+    let written = message(
+        0,
+        MessageRole::Assistant,
+        "written",
+        "conv",
+        Some("claude-sonnet-4"),
+        Stats {
+            cached_tokens: 20,
+            cache_creation_tokens: 20,
+            ..Stats::default()
+        },
+    );
+    let turns = build_turns("Claude Code", &[written], &[], false);
+    assert_eq!(
+        attr_int_value(&turns[0].spans[1], "gen_ai.usage.cache_read.input_tokens"),
+        None
+    );
+    assert_eq!(
+        attr_int_value(&turns[0].spans[1], "gen_ai.usage.cache_write.input_tokens"),
+        Some(20)
+    );
 }

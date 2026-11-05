@@ -706,9 +706,35 @@ fn gemini_tool_calls_are_reported_from_jsonl_sessions() {
     assert_eq!(calls[0].name, "run_shell_command");
     assert_eq!(calls[0].call_id.as_deref(), Some("call-1"));
     assert_eq!(calls[1].name, "read_file");
-    assert_eq!(calls[1].call_id, None);
     assert_eq!(
         calls[0].conversation_hash,
         crate::utils::hash_text(&session_path.to_string_lossy())
     );
+}
+
+#[test]
+fn idless_calls_in_one_message_have_distinct_stable_span_ids() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"id":"g-1","timestamp":"2026-04-28T16:11:38.569Z","type":"gemini","model":"gemini-3-flash-preview","toolCalls":[{"name":"read_file","args":{"path":"a.rs"}},{"name":"read_file","args":{"path":"b.rs"}}]}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let load_ids = || {
+        crate::analyzers::gemini_cli::tool_calls_from_file(&path)
+            .unwrap()
+            .iter()
+            .map(|call| {
+                crate::otel::ids::tool_span_id("Gemini CLI", &call.conversation_hash, &call.key())
+            })
+            .collect::<Vec<_>>()
+    };
+    let ids = load_ids();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(ids, load_ids());
 }

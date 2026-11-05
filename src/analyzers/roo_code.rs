@@ -219,6 +219,7 @@ fn parse_roo_code_task_directory(
                             global_hash,
                             model: current_model.clone(),
                             stats,
+                            is_tool_result: false,
                             role: MessageRole::Assistant, // API requests are from the assistant
                             uuid: None,
                             session_name: fallback_session_name.clone(),
@@ -270,6 +271,7 @@ fn parse_roo_code_task_directory(
                         global_hash,
                         model: None,
                         stats: Stats::default(), // User messages don't have token costs
+                        is_tool_result: false,
                         role: MessageRole::User,
                         uuid: None,
                         session_name: fallback_session_name.clone(),

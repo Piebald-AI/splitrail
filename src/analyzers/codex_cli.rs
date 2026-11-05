@@ -568,6 +568,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 |model| model.name.clone(),
                             )),
                             stats,
+                            is_tool_result: false,
                             role: MessageRole::Assistant,
                             uuid: None,
                             session_name: session_name
@@ -665,6 +666,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 project_path: project_path.clone(),
                                 model: None,
                                 stats: Stats::default(),
+                                is_tool_result: false,
                                 role: MessageRole::User,
                                 uuid: None,
                                 session_name: effective_name,
@@ -702,6 +704,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 project_hash: project_hash.clone(),
                                 project_path: project_path.clone(),
                                 stats: Stats::default(),
+                                is_tool_result: false,
                                 role: MessageRole::Assistant,
                                 uuid: None,
                                 session_name: session_name
@@ -777,6 +780,7 @@ pub(crate) fn parse_codex_cli_jsonl_file(
                                 project_hash: project_hash.clone(),
                                 project_path: project_path.clone(),
                                 stats,
+                                is_tool_result: false,
                                 role: MessageRole::Assistant,
                                 uuid: None,
                                 session_name: session_name

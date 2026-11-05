@@ -7,13 +7,13 @@
 //! and request spans carry derived timings instead, tagged
 //! `splitrail.timing = "derived"`.
 //!
-//! Data points are emitted per hour as delta aggregation, timestamped with the
-//! history they describe. That keeps a backfill honest: yesterday's tokens land
-//! in yesterday's bucket instead of piling onto the export time.
+//! Data points use exporter-owned, non-overlapping delta intervals. Message
+//! timestamps do not partition series, so backfills and same-time messages are
+//! aggregated into the next export interval.
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 use crate::types::{ConversationMessage, MessageRole, Stats};
 
@@ -79,17 +79,23 @@ impl TokenType {
         match self {
             TokenType::Input => stats.input_tokens,
             TokenType::Output => stats.output_tokens,
-            TokenType::CacheRead => stats.cache_read_tokens,
+            TokenType::CacheRead => {
+                if stats.cache_read_tokens == 0 {
+                    stats
+                        .cached_tokens
+                        .saturating_sub(stats.cache_creation_tokens)
+                } else {
+                    stats.cache_read_tokens
+                }
+            }
             TokenType::CacheWrite => stats.cache_creation_tokens,
         }
     }
 }
 
-/// Everything that identifies one series: the hour it describes plus the
-/// dimensions a dashboard slices on.
+/// Dimensions a dashboard slices on; timestamps are supplied per export.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SeriesKey {
-    hour: DateTime<Utc>,
     analyzer: String,
     model: String,
     token_type: Option<TokenType>,
@@ -123,14 +129,13 @@ impl HistogramAccumulator {
     }
 }
 
-fn hour_start(timestamp: DateTime<Utc>) -> DateTime<Utc> {
-    let seconds = timestamp.timestamp();
-    let hour = seconds - seconds.rem_euclid(3600);
-    DateTime::from_timestamp(hour, 0).unwrap_or(timestamp)
-}
-
-/// Build token-usage and cost metrics for one analyzer's messages.
-pub fn build_metrics(analyzer_name: &str, messages: &[ConversationMessage]) -> Vec<Metric> {
+/// Build delta token-usage and cost metrics for one export interval.
+pub fn build_metrics(
+    analyzer_name: &str,
+    messages: &[ConversationMessage],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Vec<Metric> {
     let mut histograms: BTreeMap<SeriesKey, HistogramAccumulator> = BTreeMap::new();
     let mut costs: BTreeMap<SeriesKey, f64> = BTreeMap::new();
 
@@ -141,7 +146,7 @@ pub fn build_metrics(analyzer_name: &str, messages: &[ConversationMessage]) -> V
         let Some(model) = message.model.clone() else {
             continue;
         };
-        let hour = hour_start(message.date);
+        let _timestamp = message.date;
         for token_type in TokenType::ALL {
             let value = token_type.value(&message.stats);
             if value == 0 {
@@ -149,7 +154,6 @@ pub fn build_metrics(analyzer_name: &str, messages: &[ConversationMessage]) -> V
             }
             histograms
                 .entry(SeriesKey {
-                    hour,
                     analyzer: analyzer_name.to_string(),
                     model: model.clone(),
                     token_type: Some(token_type),
@@ -160,7 +164,6 @@ pub fn build_metrics(analyzer_name: &str, messages: &[ConversationMessage]) -> V
         if message.stats.cost != 0.0 {
             *costs
                 .entry(SeriesKey {
-                    hour,
                     analyzer: analyzer_name.to_string(),
                     model,
                     token_type: None,
@@ -176,8 +179,8 @@ pub fn build_metrics(analyzer_name: &str, messages: &[ConversationMessage]) -> V
             .into_iter()
             .map(|(key, accumulator)| HistogramDataPoint {
                 attributes: base_attributes(&key),
-                start_time_unix_nano: encode::nanos(&key.hour),
-                time_unix_nano: encode::nanos(&(key.hour + Duration::hours(1))),
+                start_time_unix_nano: encode::nanos(&start),
+                time_unix_nano: encode::nanos(&end),
                 count: accumulator.count.to_string(),
                 sum: accumulator.sum,
                 bucket_counts: accumulator
@@ -205,8 +208,8 @@ pub fn build_metrics(analyzer_name: &str, messages: &[ConversationMessage]) -> V
             .into_iter()
             .map(|(key, cost)| NumberDataPoint {
                 attributes: base_attributes(&key),
-                start_time_unix_nano: encode::nanos(&key.hour),
-                time_unix_nano: encode::nanos(&(key.hour + Duration::hours(1))),
+                start_time_unix_nano: encode::nanos(&start),
+                time_unix_nano: encode::nanos(&end),
                 as_double: Some(cost),
                 as_int: None,
             })
@@ -243,7 +246,7 @@ mod tests {
     use super::*;
     use crate::otel::encode::AnyValue;
     use crate::types::{Application, MessageRole};
-    use chrono::TimeZone;
+    use chrono::{Duration, TimeZone};
 
     fn base() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 4, 5, 10, 15, 0).unwrap()
@@ -260,6 +263,7 @@ mod tests {
             global_hash: format!("hash-{offset_minutes}"),
             model: Some("gpt-5.6-codex".to_string()),
             stats,
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: None,
             session_name: None,
@@ -310,7 +314,12 @@ mod tests {
                 ..Stats::default()
             },
         )];
-        let metrics = build_metrics("Codex CLI", &messages);
+        let metrics = build_metrics(
+            "Codex CLI",
+            &messages,
+            base(),
+            base() + Duration::seconds(1),
+        );
         let histogram = histogram(&metrics);
 
         assert_eq!(histogram.data_points.len(), 2);
@@ -345,7 +354,12 @@ mod tests {
                 ..Stats::default()
             },
         )];
-        let metrics = build_metrics("Claude Code", &messages);
+        let metrics = build_metrics(
+            "Claude Code",
+            &messages,
+            base(),
+            base() + Duration::seconds(1),
+        );
         assert_eq!(
             token_types(&histogram(&metrics)),
             vec!["cache_read", "cache_write"]
@@ -353,33 +367,128 @@ mod tests {
     }
 
     #[test]
-    fn separate_hours_produce_separate_points() {
+    fn cached_tokens_fall_back_to_cache_read_when_detailed_count_is_absent() {
+        let metrics = build_metrics(
+            "Codex CLI",
+            &[message(
+                0,
+                Stats {
+                    cached_tokens: 900,
+                    ..Stats::default()
+                },
+            )],
+            base(),
+            base() + Duration::seconds(1),
+        );
+        let cached_histogram = histogram(&metrics);
+        assert_eq!(token_types(&cached_histogram), vec!["cache_read"]);
+        assert_eq!(cached_histogram.data_points[0].sum, 900.0);
+
+        let detailed_wins = build_metrics(
+            "Codex CLI",
+            &[message(
+                0,
+                Stats {
+                    cache_read_tokens: 12,
+                    cached_tokens: 900,
+                    ..Stats::default()
+                },
+            )],
+            base(),
+            base() + Duration::seconds(1),
+        );
+        assert_eq!(histogram(&detailed_wins).data_points[0].sum, 12.0);
+    }
+
+    #[test]
+    fn cached_aggregate_containing_only_writes_does_not_emit_cache_reads() {
+        let metrics = build_metrics(
+            "Cline",
+            &[message(
+                0,
+                Stats {
+                    cached_tokens: 30,
+                    cache_creation_tokens: 30,
+                    ..Stats::default()
+                },
+            )],
+            base(),
+            base() + Duration::seconds(1),
+        );
+        let histogram = histogram(&metrics);
+        assert_eq!(token_types(&histogram), vec!["cache_write"]);
+        assert_eq!(histogram.data_points[0].sum, 30.0);
+    }
+
+    #[test]
+    fn same_hour_incremental_updates_use_non_overlapping_export_intervals() {
+        let start = base() - Duration::seconds(1);
+        let end = base();
+        let first = build_metrics(
+            "Codex CLI",
+            &[message(
+                0,
+                Stats {
+                    input_tokens: 10,
+                    ..Stats::default()
+                },
+            )],
+            start,
+            end,
+        );
+        let second = build_metrics(
+            "Codex CLI",
+            &[message(
+                5,
+                Stats {
+                    input_tokens: 20,
+                    ..Stats::default()
+                },
+            )],
+            end,
+            end + Duration::seconds(1),
+        );
+        let first_point = &histogram(&first).data_points[0];
+        let second_point = &histogram(&second).data_points[0];
+        assert_eq!(first_point.start_time_unix_nano, encode::nanos(&start));
+        assert_eq!(first_point.time_unix_nano, encode::nanos(&end));
+        assert_eq!(second_point.start_time_unix_nano, encode::nanos(&end));
+        assert_eq!(
+            second_point.time_unix_nano,
+            encode::nanos(&(end + Duration::seconds(1)))
+        );
+        assert_eq!(first_point.count, "1");
+        assert_eq!(second_point.count, "1");
+    }
+    #[test]
+    fn backfill_timestamps_do_not_change_export_interval_or_duplicate_series() {
         let messages = vec![
             message(
-                0,
+                120,
                 Stats {
                     input_tokens: 10,
                     ..Stats::default()
                 },
             ),
             message(
-                120,
+                -120,
                 Stats {
                     input_tokens: 20,
                     ..Stats::default()
                 },
             ),
         ];
-        let metrics = build_metrics("Codex CLI", &messages);
-        let histogram = histogram(&metrics);
-        assert_eq!(histogram.data_points.len(), 2);
-
-        let starts: Vec<&str> = histogram
-            .data_points
-            .iter()
-            .map(|point| point.start_time_unix_nano.as_str())
-            .collect();
-        assert_ne!(starts[0], starts[1]);
+        let start = base() - Duration::seconds(1);
+        let end = base();
+        let result = build_metrics("Codex CLI", &messages, start, end);
+        let histogram = histogram(&result);
+        assert_eq!(histogram.data_points.len(), 1);
+        assert_eq!(histogram.data_points[0].sum, 30.0);
+        assert_eq!(
+            histogram.data_points[0].start_time_unix_nano,
+            encode::nanos(&start)
+        );
+        assert_eq!(histogram.data_points[0].time_unix_nano, encode::nanos(&end));
     }
 
     #[test]
@@ -398,11 +507,19 @@ mod tests {
                 )
             },
         ];
-        assert!(build_metrics("Codex CLI", &messages).is_empty());
+        assert!(
+            build_metrics(
+                "Codex CLI",
+                &messages,
+                base(),
+                base() + Duration::seconds(1)
+            )
+            .is_empty()
+        );
     }
 
     #[test]
-    fn cost_is_summed_per_hour() {
+    fn costs_are_aggregated_for_export_interval() {
         let messages = vec![
             message(
                 0,
@@ -419,7 +536,12 @@ mod tests {
                 },
             ),
         ];
-        let metrics = build_metrics("Codex CLI", &messages);
+        let metrics = build_metrics(
+            "Codex CLI",
+            &messages,
+            base(),
+            base() + Duration::seconds(1),
+        );
         let cost = sum(&metrics);
         assert_eq!(cost.data_points.len(), 1);
         assert_eq!(cost.data_points[0].as_double, Some(1.0));
@@ -435,7 +557,12 @@ mod tests {
                 ..Stats::default()
             },
         )];
-        let metrics = build_metrics("Codex CLI", &messages);
+        let metrics = build_metrics(
+            "Codex CLI",
+            &messages,
+            base(),
+            base() + Duration::seconds(1),
+        );
         let point = &histogram(&metrics).data_points[0];
         assert_eq!(
             point.bucket_counts.last().map(String::as_str),
@@ -445,9 +572,23 @@ mod tests {
     }
 
     #[test]
-    fn hour_buckets_are_truncated_to_the_hour() {
-        let start = hour_start(base());
-        assert_eq!(start.timestamp() % 3600, 0);
-        assert!(start <= base());
+    fn export_interval_is_used_for_all_points() {
+        let start = base() - Duration::seconds(1);
+        let end = base();
+        let metrics = build_metrics(
+            "Codex CLI",
+            &[message(
+                5,
+                Stats {
+                    input_tokens: 1,
+                    ..Stats::default()
+                },
+            )],
+            start,
+            end,
+        );
+        let point = &histogram(&metrics).data_points[0];
+        assert_eq!(point.time_unix_nano, encode::nanos(&end));
+        assert_eq!(point.start_time_unix_nano, encode::nanos(&start));
     }
 }

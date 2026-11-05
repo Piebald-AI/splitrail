@@ -880,6 +880,7 @@ mod tests {
                 tool_calls: 3,
                 ..Default::default()
             },
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: None,
             session_name: None,
@@ -1018,6 +1019,7 @@ mod tests {
                 tool_calls: 1,
                 ..Default::default()
             },
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: None,
             session_name: None,

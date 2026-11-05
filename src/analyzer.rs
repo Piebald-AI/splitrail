@@ -1070,6 +1070,7 @@ mod tests {
                 input_tokens: 1,
                 ..Stats::default()
             },
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: None,
             session_name: Some("session".into()),

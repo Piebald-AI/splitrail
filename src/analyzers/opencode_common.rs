@@ -496,6 +496,7 @@ fn to_conversation_message(
         global_hash,
         model: msg.model_name(),
         stats,
+        is_tool_result: false,
         role: if msg.role == "user" {
             MessageRole::User
         } else {

@@ -96,6 +96,7 @@ fn test_deduplicate_messages_resolves_same_local_hash_across_uuids() {
             input_tokens: 10,
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: Some("uuid-a".to_string()),
         session_name: None,
@@ -140,6 +141,7 @@ fn test_streaming_snapshots_do_not_inflate_identical_fields() {
             cached_tokens: 53_554,
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: Some("uuid-partial".to_string()),
         session_name: None,
@@ -469,6 +471,7 @@ fn test_deduplicate_messages_by_local_hash() {
             cached_tokens: 3,
             ..Default::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: Some("uuid1".to_string()),
         session_name: Some("Session 1".to_string()),
@@ -1116,4 +1119,41 @@ fn duplicate_tool_use_blocks_are_reported_once() {
 
     let calls = crate::analyzers::claude_code::tool_calls_from_file(&path).unwrap();
     assert_eq!(calls.len(), 1);
+}
+
+#[test]
+fn tool_results_do_not_start_new_telemetry_turns() {
+    let body = concat!(
+        r#"{"type":"user","uuid":"prompt","timestamp":"2026-04-01T10:00:00Z","message":{"role":"user","content":"inspect"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"call","timestamp":"2026-04-01T10:00:01Z","message":{"role":"assistant","model":"claude-sonnet-4","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}],"usage":{"input_tokens":10,"output_tokens":2}}}"#,
+        "\n",
+        r#"{"type":"user","uuid":"result","timestamp":"2026-04-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"answer","timestamp":"2026-04-01T10:00:03Z","message":{"role":"assistant","model":"claude-sonnet-4","content":"done","usage":{"input_tokens":12,"output_tokens":3}}}"#,
+        "\n",
+        r#"{"type":"user","uuid":"next","timestamp":"2026-04-01T10:00:04Z","message":{"role":"user","content":"continue"}}"#,
+        "\n",
+        r#"{"type":"assistant","uuid":"next-answer","timestamp":"2026-04-01T10:00:05Z","message":{"role":"assistant","model":"claude-sonnet-4","content":"done","usage":{"input_tokens":13,"output_tokens":4}}}"#,
+        "\n",
+    );
+    let (messages, ..) = parse_jsonl_file(
+        Path::new("session.jsonl"),
+        Cursor::new(body),
+        "project",
+        "conversation",
+    )
+    .unwrap();
+    let turns = crate::otel::spans::build_turns("Claude Code", &messages, &[], false);
+    assert_eq!(turns.len(), 2);
+    assert_eq!(
+        turns[0].spans.len(),
+        3,
+        "one human prompt, two billed replies"
+    );
+    assert_eq!(
+        turns[1].spans.len(),
+        2,
+        "the next human prompt starts a new turn"
+    );
 }

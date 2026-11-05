@@ -378,6 +378,7 @@ fn messages_from_session(
                     conversation_hash: conversation_hash.clone(),
                     model: None,
                     stats: Stats::default(),
+                    is_tool_result: false,
                     role: MessageRole::User,
                     uuid: None,
                     session_name: fallback_session_name.clone(),
@@ -421,6 +422,7 @@ fn messages_from_session(
                     project_path: None,
                     conversation_hash: conversation_hash.clone(),
                     stats,
+                    is_tool_result: false,
                     role: MessageRole::Assistant,
                     uuid: None,
                     session_name: fallback_session_name.clone(),
@@ -446,6 +448,7 @@ pub(crate) fn tool_calls_from_file(file_path: &Path) -> Result<Vec<ToolCall>> {
 
     for message in messages {
         let GeminiCliMessage::Gemini {
+            id,
             timestamp,
             tool_calls,
             ..
@@ -453,14 +456,16 @@ pub(crate) fn tool_calls_from_file(file_path: &Path) -> Result<Vec<ToolCall>> {
         else {
             continue;
         };
-        for call in tool_calls {
+        for (index, call) in tool_calls.into_iter().enumerate() {
             let Some(name) = call.get("name").and_then(|value| value.as_str()) else {
                 continue;
             };
             let call_id = call
                 .get("id")
                 .and_then(|value| value.as_str())
-                .map(str::to_string);
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .or_else(|| Some(format!("splitrail-{id}-{index}")));
             calls.push(ToolCall {
                 conversation_hash: conversation_hash.clone(),
                 timestamp,

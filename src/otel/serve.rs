@@ -10,7 +10,7 @@
 //! a user pressing Ctrl-C is not going to change the file again.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -118,30 +118,24 @@ pub async fn run_serve(options: ServeOptions) -> Result<()> {
                             if otel.excludes(&analyzer) {
                                 continue;
                             }
+                            let Some(analyzer_impl) = registry.get_analyzer_by_display_name(&analyzer) else {
+                                continue;
+                            };
+                            let sources = analyzer_impl.discover_data_sources().unwrap_or_default();
+                            if resolve_event_source(analyzer_impl, &sources, &path).is_none() {
+                                continue;
+                            }
                             pending.insert(path, analyzer);
                             saw_event = true;
                         }
                         WatcherEvent::FileDeleted(_, path) => {
-                            // Nothing to retract: a deleted transcript means the
-                            // spans already sent stay sent. Dropping it from the
-                            // pending set avoids parsing a file that is gone.
                             pending.remove(&path);
                         }
-                        WatcherEvent::Error(error) => {
-                            eprintln!("⚠️  watcher: {error}");
-                        }
+                        WatcherEvent::Error(error) => eprintln!("⚠️  watcher: {error}"),
                     }
                 }
                 if saw_event || !pending.is_empty() {
-                    let summary = flush_pending(
-                        &exporter,
-                        &registry,
-                        &mut state,
-                        &mut pending,
-                        settle,
-                        &options,
-                    )
-                    .await?;
+                    let summary = flush_pending(&exporter, &registry, &mut state, &mut pending, settle, &options).await?;
                     if !summary.is_empty() {
                         touched_since_flush = true;
                     }
@@ -184,60 +178,85 @@ async fn flush_pending(
         Utc::now() - chrono::Duration::from_std(settle).unwrap_or(chrono::Duration::zero());
     let mut groups: Vec<super::LoadedAnalyzer> = Vec::new();
     let mut still_pending = BTreeSet::new();
-    let drained: Vec<(PathBuf, String)> = pending
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-
-    for (path, analyzer_name) in drained {
-        let Some(analyzer) = registry.get_analyzer_by_display_name(&analyzer_name) else {
+    for (path, analyzer_name) in pending.iter() {
+        let Some(analyzer) = registry.get_analyzer_by_display_name(analyzer_name) else {
             continue;
         };
-        let messages = match parse_one_file(analyzer, &path) {
-            Ok(messages) => messages,
-            Err(error) => {
-                eprintln!("⚠️  {analyzer_name} {}: {error}", path.display());
-                continue;
-            }
+        let sources = analyzer.discover_data_sources()?;
+        let Some(source) = resolve_event_source(analyzer, &sources, path) else {
+            continue;
         };
-
-        let (settled, fresh): (Vec<_>, Vec<_>) = messages
-            .into_iter()
-            .partition(|message| message.date <= cutoff);
+        let source_set = if analyzer.requires_full_reload_for_source_change() {
+            sources.clone()
+        } else {
+            vec![source]
+        };
+        let stats = analyzer.get_stats_with_sources(source_set.clone())?;
+        let messages = stats.messages;
+        let (settled, fresh): (Vec<_>, Vec<_>) =
+            messages.iter().partition(|message| message.date <= cutoff);
         if !fresh.is_empty() {
-            still_pending.insert(path);
+            still_pending.insert(path.clone());
         }
-        if !settled.is_empty() {
+        let eligible_hashes = settled
+            .iter()
+            .map(|message| message.global_hash.clone())
+            .collect();
+        let tool_calls = if exporter.tools_enabled() {
+            analyzer.parse_tool_calls(&source_set)?
+        } else {
+            Vec::new()
+        };
+        let eligible_tool_keys = tool_calls
+            .iter()
+            .filter(|call| call.timestamp <= cutoff)
+            .map(|call| super::tool_state_key(analyzer_name, call))
+            .collect();
+        if !messages.is_empty() || !tool_calls.is_empty() {
             groups.push(super::LoadedAnalyzer {
-                name: analyzer_name,
-                messages: settled,
-                tool_calls: Vec::new(),
+                name: analyzer_name.clone(),
+                messages,
+                tool_calls,
+                eligible_hashes: Some(eligible_hashes),
+                eligible_tool_keys: Some(eligible_tool_keys),
             });
         }
     }
-
     *pending = pending
         .iter()
         .filter(|(path, _)| still_pending.contains(*path))
         .map(|(path, analyzer)| (path.clone(), analyzer.clone()))
         .collect();
-
     if groups.is_empty() {
         return Ok(super::ExportSummary::default());
     }
-
     exporter
         .send(&groups, state, &export_options(options))
         .await
 }
 
-fn parse_one_file(
+fn resolve_event_source(
     analyzer: &dyn Analyzer,
-    path: &std::path::Path,
-) -> Result<Vec<crate::types::ConversationMessage>> {
-    analyzer.parse_source(&DataSource {
-        path: path.to_path_buf(),
-    })
+    sources: &[DataSource],
+    event_path: &Path,
+) -> Option<DataSource> {
+    if let Some(source) = sources
+        .iter()
+        .filter(|source| event_path.starts_with(&source.path))
+        .max_by_key(|source| source.path.components().count())
+    {
+        return Some(source.clone());
+    }
+    if analyzer.is_valid_data_path(event_path) {
+        return Some(DataSource {
+            path: event_path.to_path_buf(),
+        });
+    }
+    sources
+        .iter()
+        .filter(|source| source.path.starts_with(event_path))
+        .max_by_key(|source| source.path.components().count())
+        .cloned()
 }
 
 #[cfg(test)]

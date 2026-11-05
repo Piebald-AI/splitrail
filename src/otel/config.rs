@@ -39,6 +39,7 @@ fn default_max_retries() -> u32 {
 
 /// `[otel]` section of the configuration file.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
 pub struct OtelConfig {
     /// Whether the TUI should run the exporter in the background. The
     /// subcommands work regardless; this only controls automatic start.
@@ -144,11 +145,16 @@ impl OtelConfig {
 
     fn resolve_signal(&self, signal: &str, endpoint_override: Option<&str>) -> OtlpTarget {
         let signal_env = format!("OTEL_EXPORTER_OTLP_{}_ENDPOINT", signal.to_uppercase());
-        let endpoint = endpoint_override
-            .map(str::to_string)
-            .or_else(|| env_non_empty(&signal_env))
-            .or_else(|| env_non_empty("OTEL_EXPORTER_OTLP_ENDPOINT"))
-            .unwrap_or_else(|| self.endpoint.clone());
+        let signal_endpoint = endpoint_override
+            .map(|value| (value.to_string(), false))
+            .or_else(|| env_non_empty(&signal_env).map(|value| (value, true)));
+        let (endpoint, verbatim) = signal_endpoint.unwrap_or_else(|| {
+            (
+                env_non_empty("OTEL_EXPORTER_OTLP_ENDPOINT")
+                    .unwrap_or_else(|| self.endpoint.clone()),
+                false,
+            )
+        });
 
         let mut headers: HashMap<String, String> = self.headers.clone();
         for (key, value) in parse_env_headers() {
@@ -156,7 +162,11 @@ impl OtelConfig {
         }
 
         OtlpTarget {
-            endpoint: signal_url(&endpoint, signal),
+            endpoint: if verbatim {
+                endpoint
+            } else {
+                signal_url(&endpoint, signal)
+            },
             headers,
             service_name: env_non_empty("OTEL_SERVICE_NAME")
                 .unwrap_or_else(|| self.service_name.clone()),
@@ -266,6 +276,44 @@ mod tests {
         };
         assert!(config.excludes("claude code"));
         assert!(!config.excludes("Codex CLI"));
+    }
+
+    #[test]
+    fn partial_config_inherits_all_defaults() {
+        let config: OtelConfig = toml::from_str("enabled = true").unwrap();
+        let defaults = OtelConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.protocol, defaults.protocol);
+        assert_eq!(config.endpoint, defaults.endpoint);
+        assert_eq!(config.service_name, defaults.service_name);
+        assert_eq!(config.interval_secs, defaults.interval_secs);
+    }
+
+    #[test]
+    fn signal_specific_env_endpoint_is_verbatim() {
+        unsafe {
+            std::env::set_var(
+                "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                "https://collector.test/custom/traces?tenant=x",
+            );
+            std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        }
+        let target = OtelConfig::default().resolve_traces(None);
+        assert_eq!(
+            target.endpoint,
+            "https://collector.test/custom/traces?tenant=x"
+        );
+        unsafe {
+            std::env::remove_var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
+        }
+    }
+
+    #[test]
+    fn common_endpoint_keeps_signal_path_semantics() {
+        assert_eq!(
+            signal_url("https://collector.test/custom", "traces"),
+            "https://collector.test/custom/v1/traces"
+        );
     }
 
     #[test]
