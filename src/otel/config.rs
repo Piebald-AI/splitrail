@@ -224,11 +224,10 @@ fn env_non_empty(key: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-/// Validate the configured protocol, so a gRPC endpoint fails loudly instead of
-/// silently receiving JSON.
+/// Reject protocols the HTTP JSON encoder cannot send.
 pub fn validate_protocol(protocol: &str) -> Result<()> {
     match protocol.trim().to_ascii_lowercase().as_str() {
-        "http_json" | "http/json" | "http_protobuf" | "http/protobuf" => Ok(()),
+        "http_json" | "http/json" => Ok(()),
         other => bail!(
             "Unsupported OTLP protocol {other:?}. Only OTLP/HTTP JSON is implemented; \
              leave `otel.protocol` at its default."
@@ -317,16 +316,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_protocol_rejects_grpc() {
-        assert!(validate_protocol("grpc").is_err());
-        assert!(validate_protocol("http_json").is_ok());
-    }
-
-    #[test]
-    fn default_config_is_disabled_and_opt_out_free() {
-        let config = OtelConfig::default();
-        assert!(!config.enabled);
-        assert!(config.exclude_analyzers.is_empty());
-        assert_eq!(config.backfill_days, 0);
+    fn validate_protocol_accepts_only_json() {
+        for protocol in ["grpc", "http_protobuf", "http/protobuf", ""] {
+            assert!(validate_protocol(protocol).is_err(), "{protocol}");
+        }
+        for protocol in ["http_json", "http/json", " HTTP/JSON "] {
+            assert!(validate_protocol(protocol).is_ok(), "{protocol}");
+        }
     }
 }

@@ -375,8 +375,9 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
     // [otel] enabled runs the exporter alongside the TUI. It follows changes
     // only; history is left to `splitrail otel export`, so starting the TUI
     // never turns into an accidental full backfill.
-    if config.otel.enabled {
-        tokio::spawn(async move {
+    let (otel_shutdown, otel_follower) = if config.otel.enabled {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
             let options = otel::serve::ServeOptions {
                 endpoint: None,
                 no_backfill: true,
@@ -384,11 +385,16 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
                 metrics: true,
                 once: false,
             };
-            if let Err(error) = otel::serve::run_serve(options).await {
-                eprintln!("OTel exporter stopped: {error:#}");
-            }
+            otel::serve::run_serve_with_shutdown(options, async {
+                let _ = shutdown_rx.await;
+                Ok(())
+            })
+            .await
         });
-    }
+        (Some(shutdown_tx), Some(handle))
+    } else {
+        (None, None)
+    };
     if config.upload.auto_upload {
         if config.is_configured() {
             // For initial auto-upload, load full stats separately (sync, no threadpool for background task)
@@ -433,6 +439,16 @@ async fn run_default(format_options: utils::NumberFormatOptions) {
         stats_manager,
     ) {
         eprintln!("Error displaying TUI: {e}");
+    }
+    if let Some(shutdown) = otel_shutdown {
+        let _ = shutdown.send(());
+    }
+    if let Some(follower) = otel_follower {
+        match follower.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("OTel exporter stopped with error: {error:#}"),
+            Err(error) => eprintln!("OTel exporter task failed: {error}"),
+        }
     }
 }
 

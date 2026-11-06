@@ -126,13 +126,13 @@ pub fn attr_double(key: impl Into<String>, value: f64) -> KeyValue {
     }
 }
 
-/// Nanoseconds since the Unix epoch, as the string OTLP JSON requires.
-pub fn nanos(timestamp: &DateTime<Utc>) -> String {
+/// Non-negative nanoseconds since the Unix epoch, or `None` outside the
+/// timestamp range supported by this exporter.
+pub fn nanos(timestamp: &DateTime<Utc>) -> Option<String> {
     timestamp
         .timestamp_nanos_opt()
-        .unwrap_or_default()
-        .max(0)
-        .to_string()
+        .filter(|nanos| *nanos >= 0)
+        .map(|nanos| nanos.to_string())
 }
 
 /// Resource attributes shared by every span in a run.
@@ -277,7 +277,19 @@ mod tests {
     #[test]
     fn timestamps_are_nanos_as_strings() {
         let at = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
-        assert_eq!(nanos(&at), "1767323045000000000");
+        assert_eq!(nanos(&at).as_deref(), Some("1767323045000000000"));
+    }
+
+    #[test]
+    fn timestamp_range_preserves_epoch_and_rejects_invalid_dates() {
+        assert_eq!(nanos(&DateTime::UNIX_EPOCH).as_deref(), Some("0"));
+        for at in [
+            DateTime::UNIX_EPOCH - chrono::Duration::nanoseconds(1),
+            DateTime::<Utc>::MAX_UTC,
+            DateTime::<Utc>::MIN_UTC,
+        ] {
+            assert_eq!(nanos(&at), None);
+        }
     }
 
     #[test]

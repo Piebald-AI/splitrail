@@ -108,7 +108,7 @@ exclude_analyzers = ["Claude Code"]
 backfill_days = 0                  # 0 = all history
 ```
 
-`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, and the per-signal endpoint variables are also honored, with the command line taking precedence. Per-signal endpoint URLs are used unchanged, including custom paths and query strings. Omitted `[otel]` settings use their defaults.
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, and the per-signal endpoint variables are also honored, with the command line taking precedence. Per-signal endpoint URLs are used unchanged, including custom paths and query strings. `splitrail config show` displays the resolved traces endpoint when export is enabled. Omitted `[otel]` settings use their defaults. Only `http_json` and `http/json` protocols are supported; protobuf and gRPC settings are rejected.
 
 Each turn becomes one trace:
 
@@ -121,11 +121,13 @@ invoke_agent Codex CLI            gen_ai.conversation.id
 
 Trace ids stay anchored to the turn's human prompt as new replies arrive; tool results do not start new turns. Request and tool spans have stable ids, including calls without an agent-provided id. Exported messages, tools, and metrics are tracked separately in the system state directory (`splitrail/otel-state.json`), so enabling metrics or tool spans later backfills those outputs without replaying previously sent request spans. If you point Splitrail at a different collector, it warns that you must delete the state file to resend existing history.
 
-Token usage is measured; durations are not. Transcripts record when a message was written, not how long the request took, so `chat` spans end at the next event in the session, clamped to two minutes, and say `splitrail.timing = "derived"`. Tool spans use `"recorded"` when the transcript has a result timestamp. No latency metric is emitted, because a histogram of inferred durations is worse than no histogram. Token usage (`gen_ai.client.token.usage`) is a delta histogram and cost (`splitrail.cost.usd`) is a delta counter. Both use non-overlapping export-time intervals, including when backfilling older history; the spans retain the original transcript timestamps.
+The follower retries files after discovery, parsing, or export failures. Export state advances only after the batch's POSTs succeed. `--no-backfill` exports only messages and tool calls timestamped at or after follower startup, while retaining older messages as turn context. Ctrl-C and TUI exit flush pending activity without waiting for the settle window; shutdown failures are reported.
+
+Token usage is measured; durations are not. Transcripts record when a message was written, not how long the request took, so `chat` spans end at the next event in the session, clamped to two minutes, and say `splitrail.timing = "derived"`. Tool spans use `"recorded"` when the transcript has a result timestamp. No latency metric is emitted, because a histogram of inferred durations is worse than no histogram. Token usage (`gen_ai.client.token.usage`) is a delta histogram and cost (`splitrail.cost.usd`) is a delta sum. Both use non-overlapping export-time intervals, including when backfilling older history; the spans retain the original transcript timestamps. Billed messages without a model still contribute metrics under `unknown`. Records with pre-1970 timestamps or dates outside the exporter's signed 64-bit nanosecond range are skipped, as are spans whose end falls outside that range.
 
 `execute_tool` spans need per-call records, which the Claude Code, Codex CLI, and Gemini CLI analyzers provide; other agents export turn and request spans only. Analyzers opt in through a default-empty `parse_tool_calls` hook, so adding one later does not disturb existing ones.
 
-Prompts, completions, tool arguments, and tool results are never exported. `execute_tool` spans carry a name, an id, and timing only.
+Prompts, completions, tool arguments, and tool results are never exported. Session names are omitted because some analyzers derive them from prompts. `execute_tool` spans carry a name, an id, and timing only.
 
 ## MCP Server
 

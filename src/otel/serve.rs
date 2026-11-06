@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
+use std::future::Future;
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::config::Config;
@@ -57,6 +58,16 @@ fn settle_duration(config_value: u64) -> Duration {
 
 /// Run the live exporter until interrupted.
 pub async fn run_serve(options: ServeOptions) -> Result<()> {
+    run_serve_with_shutdown(options, async { Ok(tokio::signal::ctrl_c().await?) }).await
+}
+
+/// Run the live exporter until the caller requests shutdown.
+pub async fn run_serve_with_shutdown(
+    options: ServeOptions,
+    shutdown: impl Future<Output = Result<()>>,
+) -> Result<()> {
+    let startup_cutoff = Utc::now();
+    tokio::pin!(shutdown);
     let config = Config::load()?.unwrap_or_default();
     let otel = config.otel.clone();
     let exporter = Exporter::new(&otel, options.endpoint.as_deref(), options.metrics)?;
@@ -93,60 +104,63 @@ pub async fn run_serve(options: ServeOptions) -> Result<()> {
     let watcher = FileWatcher::new(&registry)?;
     let mut pending: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut touched_since_flush = false;
-
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            result = &mut shutdown => {
+                result?;
+                drain_events(&watcher, &otel, &mut pending);
                 println!("\nStopping; flushing {} pending file(s).", pending.len());
                 flush_pending(
-                    &exporter,
-                    &registry,
-                    &mut state,
-                    &mut pending,
-                    Duration::ZERO,
-                    &options,
-                )
-                .await?;
+                    &exporter, &registry, &mut state, &mut pending,
+                    Duration::ZERO, &options,
+                    options.no_backfill.then_some(startup_cutoff),
+                ).await?;
+                anyhow::ensure!(pending.is_empty(), "OTel shutdown left {} file(s) pending after parse or discovery failures", pending.len());
                 state.commit()?;
                 return Ok(());
-            }
+            },
             _ = tokio::time::sleep(TICK) => {
-                let mut saw_event = false;
-                while let Some(event) = watcher.try_recv() {
-                    match event {
-                        WatcherEvent::FileChanged(analyzer, path) => {
-                            if otel.excludes(&analyzer) {
-                                continue;
-                            }
-                            let Some(analyzer_impl) = registry.get_analyzer_by_display_name(&analyzer) else {
-                                continue;
-                            };
-                            let sources = analyzer_impl.discover_data_sources().unwrap_or_default();
-                            if resolve_event_source(analyzer_impl, &sources, &path).is_none() {
-                                continue;
-                            }
-                            pending.insert(path, analyzer);
-                            saw_event = true;
-                        }
-                        WatcherEvent::FileDeleted(_, path) => {
-                            pending.remove(&path);
-                        }
-                        WatcherEvent::Error(error) => eprintln!("⚠️  watcher: {error}"),
-                    }
-                }
+                let saw_event = drain_events(&watcher, &otel, &mut pending);
                 if saw_event || !pending.is_empty() {
-                    let summary = flush_pending(&exporter, &registry, &mut state, &mut pending, settle, &options).await?;
-                    if !summary.is_empty() {
-                        touched_since_flush = true;
+                    match flush_pending(
+                        &exporter, &registry, &mut state, &mut pending, settle, &options,
+                        options.no_backfill.then_some(startup_cutoff),
+                    ).await {
+                        Ok(summary) if !summary.is_empty() => touched_since_flush = true,
+                        Ok(_) => {}
+                        Err(error) => eprintln!("⚠️  OTel follower: {error:#}"),
                     }
                 }
                 if touched_since_flush && pending.is_empty() {
                     state.commit()?;
                     touched_since_flush = false;
                 }
-            }
+            },
         }
     }
+}
+
+fn drain_events(
+    watcher: &FileWatcher,
+    otel: &super::OtelConfig,
+    pending: &mut BTreeMap<PathBuf, String>,
+) -> bool {
+    let mut saw_event = false;
+    while let Some(event) = watcher.try_recv() {
+        match event {
+            WatcherEvent::FileChanged(analyzer, path) => {
+                if !otel.excludes(&analyzer) {
+                    pending.insert(path, analyzer);
+                    saw_event = true;
+                }
+            }
+            WatcherEvent::FileDeleted(_, path) => {
+                pending.remove(&path);
+            }
+            WatcherEvent::Error(error) => eprintln!("⚠️  watcher: {error}"),
+        }
+    }
+    saw_event
 }
 
 fn export_options(options: &ServeOptions) -> ExportOptions {
@@ -160,8 +174,6 @@ fn export_options(options: &ServeOptions) -> ExportOptions {
     }
 }
 
-/// Re-parse the pending files, export settled messages, and keep files whose
-/// newest message is still fresh for another tick.
 async fn flush_pending(
     exporter: &Exporter,
     registry: &crate::analyzer::AnalyzerRegistry,
@@ -169,6 +181,7 @@ async fn flush_pending(
     pending: &mut BTreeMap<PathBuf, String>,
     settle: Duration,
     options: &ServeOptions,
+    startup_cutoff: Option<chrono::DateTime<Utc>>,
 ) -> Result<super::ExportSummary> {
     if pending.is_empty() {
         return Ok(super::ExportSummary::default());
@@ -182,34 +195,59 @@ async fn flush_pending(
         let Some(analyzer) = registry.get_analyzer_by_display_name(analyzer_name) else {
             continue;
         };
-        let sources = analyzer.discover_data_sources()?;
+        let sources = match analyzer.discover_data_sources() {
+            Ok(sources) => sources,
+            Err(error) => {
+                eprintln!("⚠️  OTel discovery: {error:#}");
+                still_pending.insert(path.clone());
+                continue;
+            }
+        };
         let Some(source) = resolve_event_source(analyzer, &sources, path) else {
+            still_pending.insert(path.clone());
             continue;
         };
         let source_set = if analyzer.requires_full_reload_for_source_change() {
-            sources.clone()
+            sources
         } else {
             vec![source]
         };
-        let stats = analyzer.get_stats_with_sources(source_set.clone())?;
+        let stats = match analyzer.get_stats_with_sources(source_set.clone()) {
+            Ok(stats) => stats,
+            Err(error) => {
+                eprintln!("⚠️  OTel parse: {error:#}");
+                still_pending.insert(path.clone());
+                continue;
+            }
+        };
         let messages = stats.messages;
-        let (settled, fresh): (Vec<_>, Vec<_>) =
-            messages.iter().partition(|message| message.date <= cutoff);
-        if !fresh.is_empty() {
+        if messages.iter().any(|message| message.date > cutoff) {
             still_pending.insert(path.clone());
         }
-        let eligible_hashes = settled
+        let eligible_hashes = messages
             .iter()
+            .filter(|message| {
+                message.date <= cutoff && eligible_since_startup(message.date, startup_cutoff)
+            })
             .map(|message| message.global_hash.clone())
             .collect();
         let tool_calls = if exporter.tools_enabled() {
-            analyzer.parse_tool_calls(&source_set)?
+            match analyzer.parse_tool_calls(&source_set) {
+                Ok(calls) => calls,
+                Err(error) => {
+                    eprintln!("⚠️  OTel tool parsing: {error:#}");
+                    still_pending.insert(path.clone());
+                    continue;
+                }
+            }
         } else {
             Vec::new()
         };
         let eligible_tool_keys = tool_calls
             .iter()
-            .filter(|call| call.timestamp <= cutoff)
+            .filter(|call| {
+                call.timestamp <= cutoff && eligible_since_startup(call.timestamp, startup_cutoff)
+            })
             .map(|call| super::tool_state_key(analyzer_name, call))
             .collect();
         if !messages.is_empty() || !tool_calls.is_empty() {
@@ -222,17 +260,15 @@ async fn flush_pending(
             });
         }
     }
-    *pending = pending
-        .iter()
-        .filter(|(path, _)| still_pending.contains(*path))
-        .map(|(path, analyzer)| (path.clone(), analyzer.clone()))
-        .collect();
-    if groups.is_empty() {
-        return Ok(super::ExportSummary::default());
-    }
-    exporter
-        .send(&groups, state, &export_options(options))
-        .await
+    let summary = if groups.is_empty() {
+        super::ExportSummary::default()
+    } else {
+        exporter
+            .send(&groups, state, &export_options(options))
+            .await?
+    };
+    pending.retain(|path, _| still_pending.contains(path));
+    Ok(summary)
 }
 
 fn resolve_event_source(
@@ -259,9 +295,30 @@ fn resolve_event_source(
         .cloned()
 }
 
+fn eligible_since_startup(
+    timestamp: chrono::DateTime<Utc>,
+    startup_cutoff: Option<chrono::DateTime<Utc>>,
+) -> bool {
+    startup_cutoff.is_none_or(|startup| timestamp >= startup)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_cutoff_excludes_older_records_and_includes_boundary() {
+        let startup = Utc::now();
+        assert!(!eligible_since_startup(
+            startup - chrono::Duration::nanoseconds(1),
+            Some(startup)
+        ));
+        assert!(eligible_since_startup(startup, Some(startup)));
+        assert!(eligible_since_startup(
+            startup - chrono::Duration::days(1),
+            None
+        ));
+    }
 
     #[test]
     fn settle_window_defaults_when_unset() {

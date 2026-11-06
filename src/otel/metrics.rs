@@ -136,17 +136,27 @@ pub fn build_metrics(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Vec<Metric> {
+    let (Some(start_nanos), Some(end_nanos)) = (encode::nanos(&start), encode::nanos(&end)) else {
+        return Vec::new();
+    };
     let mut histograms: BTreeMap<SeriesKey, HistogramAccumulator> = BTreeMap::new();
     let mut costs: BTreeMap<SeriesKey, f64> = BTreeMap::new();
 
     for message in messages {
-        if message.role != MessageRole::Assistant {
+        if message.role != MessageRole::Assistant
+            || message
+                .date
+                .timestamp_nanos_opt()
+                .is_none_or(|nanos| nanos < 0)
+        {
             continue;
         }
-        let Some(model) = message.model.clone() else {
-            continue;
-        };
-        let _timestamp = message.date;
+        let model = message
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or("unknown")
+            .to_string();
         for token_type in TokenType::ALL {
             let value = token_type.value(&message.stats);
             if value == 0 {
@@ -179,8 +189,8 @@ pub fn build_metrics(
             .into_iter()
             .map(|(key, accumulator)| HistogramDataPoint {
                 attributes: base_attributes(&key),
-                start_time_unix_nano: encode::nanos(&start),
-                time_unix_nano: encode::nanos(&end),
+                start_time_unix_nano: start_nanos.clone(),
+                time_unix_nano: end_nanos.clone(),
                 count: accumulator.count.to_string(),
                 sum: accumulator.sum,
                 bucket_counts: accumulator
@@ -208,8 +218,8 @@ pub fn build_metrics(
             .into_iter()
             .map(|(key, cost)| NumberDataPoint {
                 attributes: base_attributes(&key),
-                start_time_unix_nano: encode::nanos(&start),
-                time_unix_nano: encode::nanos(&end),
+                start_time_unix_nano: start_nanos.clone(),
+                time_unix_nano: end_nanos.clone(),
                 as_double: Some(cost),
                 as_int: None,
             })
@@ -450,12 +460,18 @@ mod tests {
         );
         let first_point = &histogram(&first).data_points[0];
         let second_point = &histogram(&second).data_points[0];
-        assert_eq!(first_point.start_time_unix_nano, encode::nanos(&start));
-        assert_eq!(first_point.time_unix_nano, encode::nanos(&end));
-        assert_eq!(second_point.start_time_unix_nano, encode::nanos(&end));
+        assert_eq!(
+            first_point.start_time_unix_nano,
+            encode::nanos(&start).unwrap()
+        );
+        assert_eq!(first_point.time_unix_nano, encode::nanos(&end).unwrap());
+        assert_eq!(
+            second_point.start_time_unix_nano,
+            encode::nanos(&end).unwrap()
+        );
         assert_eq!(
             second_point.time_unix_nano,
-            encode::nanos(&(end + Duration::seconds(1)))
+            encode::nanos(&(end + Duration::seconds(1))).unwrap()
         );
         assert_eq!(first_point.count, "1");
         assert_eq!(second_point.count, "1");
@@ -486,9 +502,12 @@ mod tests {
         assert_eq!(histogram.data_points[0].sum, 30.0);
         assert_eq!(
             histogram.data_points[0].start_time_unix_nano,
-            encode::nanos(&start)
+            encode::nanos(&start).unwrap()
         );
-        assert_eq!(histogram.data_points[0].time_unix_nano, encode::nanos(&end));
+        assert_eq!(
+            histogram.data_points[0].time_unix_nano,
+            encode::nanos(&end).unwrap()
+        );
     }
 
     #[test]
@@ -572,23 +591,64 @@ mod tests {
     }
 
     #[test]
-    fn export_interval_is_used_for_all_points() {
-        let start = base() - Duration::seconds(1);
-        let end = base();
-        let metrics = build_metrics(
-            "Codex CLI",
-            &[message(
-                5,
+    fn missing_models_keep_billed_usage_and_cost() {
+        for model in [None, Some(String::new())] {
+            let mut reply = message(
+                0,
                 Stats {
-                    input_tokens: 1,
+                    input_tokens: 17,
+                    cost: 0.25,
                     ..Stats::default()
                 },
-            )],
-            start,
-            end,
+            );
+            reply.model = model;
+            let metrics =
+                build_metrics("Codex CLI", &[reply], base(), base() + Duration::seconds(1));
+            let tokens = histogram(&metrics);
+            assert_eq!(tokens.data_points[0].sum, 17.0);
+            assert_eq!(sum(&metrics).data_points[0].as_double, Some(0.25));
+            assert!(
+                tokens.data_points[0]
+                    .attributes
+                    .iter()
+                    .any(|attribute| attribute.key == "gen_ai.request.model"
+                        && attribute.value == AnyValue::StringValue("unknown".to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_dates_do_not_contribute_to_metrics() {
+        let mut valid = message(
+            0,
+            Stats {
+                input_tokens: 7,
+                ..Stats::default()
+            },
         );
-        let point = &histogram(&metrics).data_points[0];
-        assert_eq!(point.time_unix_nano, encode::nanos(&end));
-        assert_eq!(point.start_time_unix_nano, encode::nanos(&start));
+        valid.date = DateTime::UNIX_EPOCH;
+        let mut invalid = message(
+            1,
+            Stats {
+                input_tokens: 1000,
+                cost: 1.0,
+                ..Stats::default()
+            },
+        );
+        for date in [
+            DateTime::UNIX_EPOCH - Duration::nanoseconds(1),
+            DateTime::<Utc>::MAX_UTC,
+        ] {
+            invalid.date = date;
+            let metrics = build_metrics(
+                "Codex CLI",
+                &[invalid.clone(), valid.clone()],
+                base(),
+                base() + Duration::seconds(1),
+            );
+            assert_eq!(histogram(&metrics).data_points[0].sum, 7.0);
+            assert!(metrics.iter().all(|metric| metric.name != COST_METRIC));
+            assert!(build_metrics("Codex CLI", &[valid.clone()], date, base()).is_empty());
+        }
     }
 }

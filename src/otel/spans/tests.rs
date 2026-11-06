@@ -144,12 +144,13 @@ fn chat_spans_are_children_of_the_turn_and_start_at_the_reply() {
 
     assert_eq!(
         chat.start_time_unix_nano,
-        crate::otel::encode::nanos(&at(7))
+        crate::otel::encode::nanos(&at(7)).unwrap()
     );
     // The session ends with the reply, so the derived duration is the minimum.
     assert_eq!(
         chat.end_time_unix_nano,
         crate::otel::encode::nanos(&at(7).checked_add_signed(Duration::milliseconds(1)).unwrap())
+            .unwrap()
     );
     assert_eq!(
         attr_str_value(chat, "gen_ai.provider.name"),
@@ -185,7 +186,10 @@ fn derived_duration_follows_the_next_message_and_is_clamped() {
     let end = start
         .checked_add_signed(Duration::milliseconds(MAX_DERIVED_CHAT_MS))
         .unwrap();
-    assert_eq!(first.end_time_unix_nano, crate::otel::encode::nanos(&end));
+    assert_eq!(
+        first.end_time_unix_nano,
+        crate::otel::encode::nanos(&end).unwrap()
+    );
 }
 
 #[test]
@@ -496,7 +500,7 @@ fn recorded_tool_duration_is_used_verbatim() {
     assert_eq!(attr_str_value(tool, "splitrail.timing"), Some("recorded"));
     assert_eq!(
         tool.start_time_unix_nano,
-        crate::otel::encode::nanos(&at(6))
+        crate::otel::encode::nanos(&at(6)).unwrap()
     );
     assert_eq!(
         tool.end_time_unix_nano,
@@ -505,6 +509,7 @@ fn recorded_tool_duration_is_used_verbatim() {
                 .checked_add_signed(Duration::milliseconds(2500))
                 .unwrap()
         )
+        .unwrap()
     );
 }
 
@@ -661,4 +666,110 @@ fn aggregate_cache_usage_does_not_count_writes_as_reads() {
         attr_int_value(&turns[0].spans[1], "gen_ai.usage.cache_write.input_tokens"),
         Some(20)
     );
+}
+
+#[test]
+fn equal_time_prompt_precedes_reply_even_when_hash_sorts_last() {
+    let prompt = message(0, MessageRole::User, "z", "conv", None, Stats::default());
+    let reply = message(
+        0,
+        MessageRole::Assistant,
+        "a",
+        "conv",
+        Some("gpt-4o"),
+        usage(3, 2, 0.0),
+    );
+    let turns = build_turns("Codex CLI", &[reply, prompt.clone()], &[], false);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turns[0].trace_id,
+        ids::trace_id_for("Codex CLI", "conv", &prompt.global_hash)
+    );
+    assert_eq!(turns[0].spans.len(), 2);
+    assert!(attr(&turns[0].spans[0], "splitrail.turn.origin").is_none());
+}
+
+#[test]
+fn unbilled_prompt_keeps_its_tool_call_out_of_the_previous_turn() {
+    let messages = [
+        message(0, MessageRole::User, "u1", "conv", None, Stats::default()),
+        message(
+            1,
+            MessageRole::Assistant,
+            "a1",
+            "conv",
+            None,
+            usage(1, 1, 0.0),
+        ),
+        message(2, MessageRole::User, "u2", "conv", None, Stats::default()),
+    ];
+    let turns = build_turns(
+        "Codex CLI",
+        &messages,
+        &[tool_call(3, "shell", "call", "conv")],
+        true,
+    );
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].spans.len(), 2);
+    assert_eq!(
+        turns[1].trace_id,
+        ids::trace_id_for("Codex CLI", "conv", &messages[2].global_hash)
+    );
+    assert_eq!(turns[1].spans[1].name, "execute_tool shell");
+}
+
+#[test]
+fn session_name_cannot_leak_prompt_text_into_spans() {
+    let mut reply = message(
+        1,
+        MessageRole::Assistant,
+        "a",
+        "conv",
+        None,
+        usage(1, 1, 0.0),
+    );
+    reply.session_name = Some("secret prompt text".to_string());
+    let turns = build_turns("Codex CLI", &[reply], &[], false);
+    let payload = simd_json::to_string(&turns[0].spans).unwrap();
+    assert!(!payload.contains("secret prompt text"));
+    assert!(
+        turns[0]
+            .spans
+            .iter()
+            .all(|span| attr(span, "splitrail.session.name").is_none())
+    );
+}
+
+#[test]
+fn invalid_message_and_tool_timestamps_are_skipped_without_epoch_fallback() {
+    let mut reply = message(
+        0,
+        MessageRole::Assistant,
+        "a",
+        "conv",
+        None,
+        usage(1, 1, 0.0),
+    );
+    for date in [
+        DateTime::UNIX_EPOCH - Duration::nanoseconds(1),
+        DateTime::<Utc>::MAX_UTC,
+    ] {
+        reply.date = date;
+        assert!(build_turns("Codex CLI", &[reply.clone()], &[], false).is_empty());
+        let mut call = tool_call(1, "shell", "bad", "conv");
+        call.timestamp = date;
+        let prompt = message(0, MessageRole::User, "u", "conv", None, Stats::default());
+        assert!(build_turns("Codex CLI", &[prompt], &[call], true).is_empty());
+    }
+    reply.date = DateTime::UNIX_EPOCH;
+    let turns = build_turns("Codex CLI", &[reply], &[], false);
+    assert_eq!(turns[0].spans[1].start_time_unix_nano, "0");
+}
+
+#[test]
+fn tool_duration_outside_timestamp_range_is_skipped() {
+    let prompt = message(0, MessageRole::User, "u", "conv", None, Stats::default());
+    let mut call = tool_call(1, "shell", "bad-end", "conv");
+    call.duration_ms = Some(i64::MAX);
+    assert!(build_turns("Codex CLI", &[prompt], &[call], true).is_empty());
 }

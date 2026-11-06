@@ -66,6 +66,13 @@ pub fn build_turns(
     let mut calls_by_conversation: HashMap<&str, Vec<&ToolCall>> = HashMap::new();
     if include_tool_spans {
         for call in tool_calls {
+            if call
+                .timestamp
+                .timestamp_nanos_opt()
+                .is_none_or(|nanos| nanos < 0)
+            {
+                continue;
+            }
             calls_by_conversation
                 .entry(call.conversation_hash.as_str())
                 .or_default()
@@ -75,9 +82,19 @@ pub fn build_turns(
 
     let mut turns = Vec::new();
     for (conversation, mut ordered) in by_conversation {
+        ordered.retain(|message| {
+            message
+                .date
+                .timestamp_nanos_opt()
+                .is_some_and(|nanos| nanos >= 0)
+        });
         ordered.sort_by(|a, b| {
             a.date
                 .cmp(&b.date)
+                .then_with(|| {
+                    (a.role != MessageRole::User || a.is_tool_result)
+                        .cmp(&(b.role != MessageRole::User || b.is_tool_result))
+                })
                 .then_with(|| a.global_hash.cmp(&b.global_hash))
         });
 
@@ -223,7 +240,7 @@ fn build_turn(
     for reply in &replies {
         let start = reply.message.date;
         let end = derived_end(start, reply.next_event);
-        chat_spans.push(chat_span(
+        let Some(span) = chat_span(
             analyzer_name,
             conversation,
             &conversation_id,
@@ -232,7 +249,10 @@ fn build_turn(
             reply.message,
             start,
             end,
-        ));
+        ) else {
+            continue;
+        };
+        chat_spans.push(span);
         turn_input = turn_input.saturating_add(reply.message.stats.input_tokens);
         turn_output = turn_output.saturating_add(reply.message.stats.output_tokens);
         turn_cost += reply.message.stats.cost;
@@ -243,19 +263,19 @@ fn build_turn(
     let mut tool_spans = Vec::new();
     if include_tool_spans {
         for call in &group.calls {
-            let (start, end, timing) = match call.duration_ms {
-                Some(duration) if duration > 0 => (
-                    call.timestamp,
-                    call.timestamp + Duration::milliseconds(duration),
-                    "recorded",
-                ),
-                _ => (
-                    call.timestamp,
-                    call.timestamp + Duration::milliseconds(MIN_DURATION_MS),
-                    "derived",
-                ),
+            let duration = call.duration_ms.filter(|duration| *duration > 0);
+            let start = call.timestamp;
+            let Some(end) = start
+                .checked_add_signed(Duration::milliseconds(duration.unwrap_or(MIN_DURATION_MS)))
+            else {
+                continue;
             };
-            tool_spans.push(tool_span(
+            let timing = if duration.is_some() {
+                "recorded"
+            } else {
+                "derived"
+            };
+            let Some(span) = tool_span(
                 analyzer_name,
                 conversation,
                 &conversation_id,
@@ -265,12 +285,18 @@ fn build_turn(
                 start,
                 end,
                 timing,
-            ));
+            ) else {
+                continue;
+            };
+            tool_spans.push(span);
             turn_start = Some(turn_start.map_or(start, |current| current.min(start)));
             turn_end = Some(turn_end.map_or(end, |current| current.max(end)));
         }
     }
 
+    if chat_spans.is_empty() && tool_spans.is_empty() {
+        return None;
+    }
     let turn_start = turn_start.unwrap_or(first.date);
     let turn_end = turn_end.unwrap_or(turn_start);
 
@@ -286,7 +312,7 @@ fn build_turn(
         turn_output,
         turn_cost,
         group.user.is_some(),
-    ));
+    )?);
     spans.append(&mut chat_spans);
     spans.append(&mut tool_spans);
 
@@ -342,7 +368,7 @@ fn chat_span(
     message: &ConversationMessage,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
-) -> Span {
+) -> Option<Span> {
     let name = match &message.model {
         Some(model) => format!("chat {model}"),
         None => "chat".to_string(),
@@ -362,24 +388,19 @@ fn chat_span(
         attributes.push(attr_str("gen_ai.response.model", model));
     }
     attributes.extend(usage_attributes(&message.stats));
-    if let Some(session_name) = &message.session_name
-        && !session_name.trim().is_empty()
-    {
-        attributes.push(attr_str("splitrail.session.name", session_name));
-    }
 
-    Span {
+    Some(Span {
         trace_id: trace_id.to_string(),
         span_id: ids::chat_span_id(analyzer_name, conversation, &message.global_hash),
         parent_span_id: Some(parent_span_id.to_string()),
         name,
         kind: SPAN_KIND_CLIENT,
-        start_time_unix_nano: encode::nanos(&start),
-        end_time_unix_nano: encode::nanos(&end),
+        start_time_unix_nano: encode::nanos(&start)?,
+        end_time_unix_nano: encode::nanos(&end)?,
         attributes,
         status: None,
         events: Vec::new(),
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -393,7 +414,7 @@ fn tool_span(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     timing: &str,
-) -> Span {
+) -> Option<Span> {
     let mut attributes = vec![
         attr_str("gen_ai.operation.name", "execute_tool"),
         attr_str("gen_ai.tool.name", call.name.clone()),
@@ -405,18 +426,18 @@ fn tool_span(
         attributes.push(attr_str("gen_ai.tool.call.id", call_id.clone()));
     }
 
-    Span {
+    Some(Span {
         trace_id: trace_id.to_string(),
         span_id: ids::tool_span_id(analyzer_name, conversation, &call.key()),
         parent_span_id: Some(parent_span_id.to_string()),
         name: format!("execute_tool {}", call.name),
         kind: SPAN_KIND_CLIENT,
-        start_time_unix_nano: encode::nanos(&start),
-        end_time_unix_nano: encode::nanos(&end),
+        start_time_unix_nano: encode::nanos(&start)?,
+        end_time_unix_nano: encode::nanos(&end)?,
         attributes,
         status: None,
         events: Vec::new(),
-    }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -431,7 +452,7 @@ fn agent_span(
     output_tokens: u64,
     cost: f64,
     has_prompt: bool,
-) -> Span {
+) -> Option<Span> {
     let mut attributes = vec![
         attr_str("gen_ai.operation.name", "invoke_agent"),
         attr_str("gen_ai.agent.name", analyzer_name),
@@ -448,18 +469,18 @@ fn agent_span(
         attributes.push(attr_str("splitrail.turn.origin", "transcript"));
     }
 
-    Span {
+    Some(Span {
         trace_id: trace_id.to_string(),
         span_id: span_id.to_string(),
         parent_span_id: None,
         name: format!("invoke_agent {analyzer_name}"),
         kind: SPAN_KIND_CLIENT,
-        start_time_unix_nano: encode::nanos(&start),
-        end_time_unix_nano: encode::nanos(&end),
+        start_time_unix_nano: encode::nanos(&start)?,
+        end_time_unix_nano: encode::nanos(&end)?,
         attributes,
         status: None,
         events: Vec::new(),
-    }
+    })
 }
 
 fn usage_attributes(stats: &Stats) -> Vec<KeyValue> {

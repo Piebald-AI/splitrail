@@ -418,7 +418,7 @@ pub fn show_config() -> Result<()> {
             println!(
                 "   OTel Export: {}",
                 if config.otel.enabled {
-                    format!("Enabled ({})", config.otel.endpoint)
+                    format!("Enabled ({})", config.otel.resolve_traces(None).endpoint)
                 } else {
                     "Disabled".to_string()
                 }
