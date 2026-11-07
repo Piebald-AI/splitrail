@@ -809,6 +809,8 @@ fn portable_project_paths_preserve_history_and_identities() {
     assert_history(&PiebaldAnalyzer::new().parse_source(&source).unwrap());
 }
 
+/// Missing or foreign workspace bindings must not remove turns, change their
+/// token counts, or substitute a different checkout's local path.
 #[test]
 fn portable_paths_respect_installation_checkout_and_environment() {
     let (_directory, source) = portable_workspace_fixture();
@@ -888,4 +890,29 @@ fn portable_paths_merge_legacy_archives_without_changing_turn_identity() {
     let (_archive_directory, archive) = ksuid_fixture();
     archive_beside(&source, &archive.path);
     assert_history(&PiebaldAnalyzer::new().parse_source(&source).unwrap());
+}
+
+/// A trimmed archive may retain either half of workspace storage. Neither
+/// incomplete pair may make its conversation history disappear during parsing.
+#[test]
+fn portable_archives_missing_either_worktree_table_keep_usage() {
+    for missing in ["project_worktrees", "cross_device_worktree_paths"] {
+        let (_directory, source) = portable_workspace_fixture();
+        let conn = Connection::open(&source.path).unwrap();
+        // This is a fixed fixture table name, never external SQL input.
+        conn.execute_batch(&format!(
+            "UPDATE chats SET worktree_id = 'checkout'; DROP TABLE {missing};"
+        ))
+        .unwrap();
+        let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
+        assert_eq!(messages.len(), 4, "{missing}");
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.project_path.is_none()),
+            "{missing}"
+        );
+        assert_eq!(messages[1].stats.input_tokens, 900, "{missing}");
+        assert_eq!(messages[1].stats.tool_calls, 2, "{missing}");
+    }
 }

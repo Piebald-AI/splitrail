@@ -173,7 +173,8 @@ fn project_path_sql(conn: &Connection) -> Result<(String, String)> {
         "SELECT
             EXISTS(SELECT 1 FROM pragma_table_info('projects') WHERE name = 'directory'),
             EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cross_device_project_paths'),
-            EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cross_device_worktree_paths'),
+            EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cross_device_worktree_paths')
+                AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_worktrees'),
             EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'),
             EXISTS(SELECT 1 FROM pragma_table_info('chats') WHERE name = 'worktree_id'),
             EXISTS(SELECT 1 FROM pragma_table_info('chats') WHERE name = 'environment_id')",
@@ -201,6 +202,8 @@ fn project_path_sql(conn: &Connection) -> Result<(String, String)> {
     if worktree_id {
         // An explicitly selected checkout must never fall back to its project
         // root: that is a different directory. Validate project ownership too.
+        // Usage-only archives may omit either worktree table, so the join is
+        // available only when both exist; otherwise preserve usage with NULL.
         let worktree_path = if worktrees {
             joins.push_str(
                 " LEFT JOIN project_worktrees path_worktree
