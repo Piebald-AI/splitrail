@@ -160,13 +160,81 @@ struct PiebaldMessage {
     updated_at: String,
 }
 
+/// Build the path projection and joins for the database's workspace layout.
+///
+/// Older databases and usage archives store `projects.directory` directly. Newer
+/// databases keep paths per installation. Only this database's installation may
+/// supply a local path: another computer's mapping, or a remote environment's
+/// path, would incorrectly group usage with a directory on this computer.
+/// Missing mappings leave the path NULL without dropping the chat's usage.
+fn project_path_sql(conn: &Connection) -> Result<(String, String)> {
+    let (legacy, projects, worktrees, settings, worktree_id, environment_id):
+        (bool, bool, bool, bool, bool, bool) = conn.query_row(
+        "SELECT
+            EXISTS(SELECT 1 FROM pragma_table_info('projects') WHERE name = 'directory'),
+            EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cross_device_project_paths'),
+            EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cross_device_worktree_paths'),
+            EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'),
+            EXISTS(SELECT 1 FROM pragma_table_info('chats') WHERE name = 'worktree_id'),
+            EXISTS(SELECT 1 FROM pragma_table_info('chats') WHERE name = 'environment_id')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+    )?;
+    if legacy {
+        return Ok((
+            "p.directory".into(),
+            "LEFT JOIN projects p ON p.id = c.project_id".into(),
+        ));
+    }
+    // Some usage-only archives omit workspace storage. Do not require settings
+    // or invent a path in that case; accounting must still include their turns.
+    if !projects || !settings {
+        return Ok(("NULL".into(), String::new()));
+    }
+    let mut joins = String::from(
+        "LEFT JOIN cross_device_project_paths project_path
+            ON project_path.project_id = c.project_id
+            AND project_path.installation_id = (
+                SELECT value FROM settings WHERE key = 'workspace.installation_id')",
+    );
+    let mut path = String::from("project_path.path");
+    if worktree_id {
+        // An explicitly selected checkout must never fall back to its project
+        // root: that is a different directory. Validate project ownership too.
+        let worktree_path = if worktrees {
+            joins.push_str(
+                " LEFT JOIN project_worktrees path_worktree
+                    ON path_worktree.id = c.worktree_id
+                    AND path_worktree.project_id = c.project_id
+                  LEFT JOIN cross_device_worktree_paths worktree_path
+                    ON worktree_path.worktree_id = path_worktree.id
+                    AND worktree_path.installation_id = (
+                        SELECT value FROM settings WHERE key = 'workspace.installation_id')",
+            );
+            "worktree_path.path"
+        } else {
+            "NULL"
+        };
+        path = format!("CASE WHEN c.worktree_id IS NOT NULL THEN {worktree_path} ELSE {path} END");
+    }
+    if environment_id {
+        // A remote absolute path is not a host filesystem path. Keep its usage,
+        // but do not mislabel it with the host's mapping of the same project.
+        path = format!(
+            "CASE WHEN c.environment_id IS NULL OR c.environment_id = 'local' THEN {path} ELSE NULL END"
+        );
+    }
+    Ok((path, joins))
+}
+
 /// Query all chats from the database.
 fn query_chats(conn: &Connection, layout: PiebaldLayout) -> Result<Vec<PiebaldChat>> {
     let (stable_id, legacy_join) = layout.stable_id_sql("chats", "c");
+    let (project_path, path_joins) = project_path_sql(conn)?;
     let sql = format!(
-        "SELECT CAST(c.id AS TEXT), {stable_id}, c.title, c.model, p.directory
+        "SELECT CAST(c.id AS TEXT), {stable_id}, c.title, c.model, {project_path}
          FROM chats c
-         LEFT JOIN projects p ON p.id = c.project_id
+         {path_joins}
          {legacy_join}
          ORDER BY c.created_at"
     );
@@ -730,7 +798,7 @@ fn deduplicate_turns(messages: Vec<ConversationMessage>) -> Vec<ConversationMess
 }
 
 /// Read every conversation turn from one Piebald database: the live `app.db`, or
-/// an archive in the same layout (see [`piebald_archive_dir`]).
+/// an archive in the same layout (see [`usage_archive_path`]).
 fn parse_database(path: &Path) -> Result<Vec<ConversationMessage>> {
     let mut conn = open_piebald_db(path)?;
     // Pin schema detection and all reads to one snapshot. Piebald may migrate

@@ -771,3 +771,121 @@ fn a_reused_message_id_does_not_hide_an_archived_turn() {
         .count();
     assert_eq!(sharing_id, 2);
 }
+
+/// Move only workspace storage forward, leaving message and pricing fixtures
+/// unchanged so the path migration cannot hide an accounting regression.
+fn portable_workspace_fixture() -> (TempDir, DataSource) {
+    let (directory, source) = ksuid_fixture();
+    Connection::open(&source.path)
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE projects DROP COLUMN directory;
+         ALTER TABLE chats ADD COLUMN worktree_id TEXT;
+         ALTER TABLE chats ADD COLUMN environment_id TEXT;
+         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO settings VALUES ('workspace.installation_id', 'this-installation');
+         CREATE TABLE cross_device_project_paths (
+             project_id TEXT, installation_id TEXT, path TEXT,
+             UNIQUE(project_id, installation_id));
+         CREATE TABLE project_worktrees (id TEXT PRIMARY KEY, project_id TEXT);
+         CREATE TABLE cross_device_worktree_paths (
+             worktree_id TEXT, installation_id TEXT, path TEXT,
+             UNIQUE(worktree_id, installation_id));
+         INSERT INTO cross_device_project_paths VALUES
+             ('38MTKprojectKsuid0000000001', 'other-installation', '/other/computer'),
+             ('38MTKprojectKsuid0000000001', 'this-installation', '/tmp/piebald-project');
+         INSERT INTO project_worktrees VALUES ('checkout', '38MTKprojectKsuid0000000001');
+         INSERT INTO cross_device_worktree_paths VALUES
+             ('checkout', 'other-installation', '/other/checkout'),
+             ('checkout', 'this-installation', '/tmp/checkout');",
+        )
+        .unwrap();
+    (directory, source)
+}
+
+#[test]
+fn portable_project_paths_preserve_history_and_identities() {
+    let (_directory, source) = portable_workspace_fixture();
+    assert_history(&PiebaldAnalyzer::new().parse_source(&source).unwrap());
+}
+
+#[test]
+fn portable_paths_respect_installation_checkout_and_environment() {
+    let (_directory, source) = portable_workspace_fixture();
+    let conn = Connection::open(&source.path).unwrap();
+    // Each mutation keeps the same four real turns. A missing or remote path
+    // must clear attribution, never remove usage or borrow another checkout.
+    for (change, expected) in [
+        (
+            "UPDATE chats SET worktree_id = 'checkout'",
+            Some("/tmp/checkout"),
+        ),
+        (
+            "DELETE FROM cross_device_worktree_paths WHERE installation_id = 'this-installation'",
+            None,
+        ),
+        (
+            "UPDATE chats SET worktree_id = NULL, environment_id = 'ssh-target'",
+            None,
+        ),
+        (
+            "UPDATE chats SET environment_id = 'local'",
+            Some("/tmp/piebald-project"),
+        ),
+        (
+            "UPDATE chats SET environment_id = NULL; DELETE FROM settings",
+            None,
+        ),
+        (
+            "INSERT INTO settings VALUES ('workspace.installation_id', 'unmapped-installation')",
+            None,
+        ),
+        (
+            "UPDATE settings SET value = 'this-installation'; UPDATE chats SET worktree_id = 'missing'",
+            None,
+        ),
+        (
+            "UPDATE chats SET worktree_id = 'checkout'; UPDATE project_worktrees SET project_id = 'different-project'",
+            None,
+        ),
+        (
+            "UPDATE chats SET worktree_id = NULL; DELETE FROM cross_device_project_paths WHERE installation_id = 'this-installation'",
+            None,
+        ),
+        ("UPDATE chats SET project_id = NULL", None),
+    ] {
+        conn.execute_batch(change).unwrap();
+        let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
+        assert_eq!(messages.len(), 4, "{change}");
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.project_path.as_deref() == expected),
+            "{change}"
+        );
+        assert_eq!(messages[1].stats.input_tokens, 900, "{change}");
+        assert_eq!(messages[1].stats.tool_calls, 2, "{change}");
+    }
+}
+
+#[test]
+fn portable_paths_without_workspace_metadata_keep_usage() {
+    let (_directory, source) = portable_workspace_fixture();
+    let conn = Connection::open(&source.path).unwrap();
+    conn.execute_batch("DROP TABLE settings; DROP TABLE cross_device_project_paths; DROP TABLE cross_device_worktree_paths;").unwrap();
+    let messages = PiebaldAnalyzer::new().parse_source(&source).unwrap();
+    assert_eq!(messages.len(), 4);
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.project_path.is_none())
+    );
+}
+
+#[test]
+fn portable_paths_merge_legacy_archives_without_changing_turn_identity() {
+    let (_directory, source) = portable_workspace_fixture();
+    let (_archive_directory, archive) = ksuid_fixture();
+    archive_beside(&source, &archive.path);
+    assert_history(&PiebaldAnalyzer::new().parse_source(&source).unwrap());
+}
