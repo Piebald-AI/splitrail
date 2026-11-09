@@ -48,4 +48,25 @@ ignore = [
     # separate, larger change due to upstream API churn between rmcp 0.12
     # and 1.x).
     "RUSTSEC-2026-0189",
+
+    # RUSTSEC-2026-0462: rmcp's Streamable HTTP clients read non-streaming
+    # response bodies into memory with no size limit, so a malicious MCP
+    # server can exhaust the client's memory. Fixed in rmcp >= 3.9.0.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0462
+    #
+    # Not applicable to splitrail:
+    #   * The affected code is rmcp's HTTP *client* transport, compiled only
+    #     with the `transport-streamable-http-client-reqwest` or
+    #     `transport-streamable-http-client-unix-socket` features.
+    #   * Splitrail is an MCP *server* over stdio. We enable `server`,
+    #     `macros`, and `transport-io`; `cargo tree -e features -i rmcp`
+    #     shows only those plus `transport-async-rw`, `base64`, and
+    #     `default`, so no HTTP client is compiled in.
+    #   * Splitrail never connects to an MCP server, so no server can send it
+    #     a response body in the first place.
+    #
+    # Re-evaluate together with RUSTSEC-2026-0189 above: if splitrail enables
+    # an HTTP-based MCP transport or MCP client, or once rmcp is upgraded to
+    # >= 3.9.0, after which both ignores can be removed.
+    "RUSTSEC-2026-0462",
 ]
