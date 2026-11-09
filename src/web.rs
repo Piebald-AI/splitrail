@@ -24,9 +24,12 @@ use projects::Projects;
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct HourlyUsage {
+struct MinuteUsage {
     date: String,
     hour: u8,
+    timestamp: i64,
+    // At scanned_at: 0 is outside the last 48h, 1 the previous 24h, 2 the latest 24h.
+    recent_period: u8,
     model: String,
     project: String,
     tool: String,
@@ -74,7 +77,7 @@ struct ProjectInfo {
 #[serde(rename_all = "camelCase")]
 struct UsageSnapshot {
     scanned_at: DateTime<Utc>,
-    rows: Vec<HourlyUsage>,
+    rows: Vec<MinuteUsage>,
     sessions: Vec<SessionInfo>,
     projects: Vec<ProjectInfo>,
 }
@@ -89,7 +92,7 @@ fn active_minutes(timestamps: &mut [DateTime<Utc>]) -> u32 {
     u32::try_from((seconds.max(60) + 59) / 60).unwrap_or(u32::MAX)
 }
 
-fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
+fn usage_snapshot(stats: &MultiAnalyzerStats, scanned_at: DateTime<Utc>) -> UsageSnapshot {
     let messages = || {
         stats.analyzer_stats.iter().flat_map(|analyzer| {
             analyzer
@@ -121,8 +124,8 @@ fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
         dirs::home_dir().as_deref(),
     );
 
-    type HourKey = (String, u8, String, String, String, String);
-    let mut hours: BTreeMap<HourKey, HourlyUsage> = BTreeMap::new();
+    type HourKey = (String, u8, u8, String, String, String, String);
+    let mut hours: BTreeMap<HourKey, BTreeMap<i64, MinuteUsage>> = BTreeMap::new();
     let mut sessions: HashMap<(&str, &str), SessionInfo> = HashMap::new();
     for (tool, message) in messages() {
         let project = projects.id(&message.project_hash, message.project_path.as_deref());
@@ -155,19 +158,34 @@ fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
         let local_time = message.date.with_timezone(&Local);
         let date = local_time.format("%Y-%m-%d").to_string();
         let hour = local_time.hour() as u8;
+        let timestamp = message.date.timestamp_millis().div_euclid(60_000) * 60_000;
+        let age = scanned_at - message.date;
+        let recent_period = if age < chrono::Duration::zero() || age >= chrono::Duration::hours(48)
+        {
+            0
+        } else if age < chrono::Duration::hours(24) {
+            2
+        } else {
+            1
+        };
         let model = message.model.as_deref().unwrap_or("Unknown model");
         let row = hours
             .entry((
                 date.clone(),
                 hour,
+                recent_period,
                 model.to_string(),
                 project.to_string(),
                 tool.to_string(),
                 message.conversation_hash.clone(),
             ))
-            .or_insert_with(|| HourlyUsage {
+            .or_default()
+            .entry(timestamp)
+            .or_insert_with(|| MinuteUsage {
                 date,
                 hour,
+                timestamp,
+                recent_period,
                 model: model.to_string(),
                 project: project.to_string(),
                 tool: tool.to_string(),
@@ -195,20 +213,25 @@ fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
             .saturating_add(message.stats.terminal_commands);
     }
 
-    let rows: Vec<HourlyUsage> = hours
+    let rows: Vec<MinuteUsage> = hours
         .into_values()
-        .filter(|row| {
-            row.input_tokens > 0
-                || row.output_tokens > 0
-                || row.cached_tokens > 0
-                || row.reasoning_tokens > 0
-                || row.cost > 0.0
-                || row.tool_calls > 0
-                || row.files_read > 0
-                || row.files_edited > 0
-                || row.files_added > 0
-                || row.terminal_commands > 0
+        // Keep the original hour-level eligibility, including zero-usage replies
+        // in active hours, while retaining each minute for precise filtering.
+        .filter(|minutes| {
+            minutes.values().any(|row| {
+                row.input_tokens > 0
+                    || row.output_tokens > 0
+                    || row.cached_tokens > 0
+                    || row.reasoning_tokens > 0
+                    || row.cost > 0.0
+                    || row.tool_calls > 0
+                    || row.files_read > 0
+                    || row.files_edited > 0
+                    || row.files_added > 0
+                    || row.terminal_commands > 0
+            })
         })
+        .flat_map(BTreeMap::into_values)
         .collect();
     let used_sessions: HashSet<&str> = rows.iter().map(|row| row.session.as_str()).collect();
     let mut sessions: Vec<SessionInfo> = sessions
@@ -239,7 +262,7 @@ fn usage_snapshot(stats: &MultiAnalyzerStats) -> UsageSnapshot {
         })
         .collect();
     UsageSnapshot {
-        scanned_at: Utc::now(),
+        scanned_at,
         rows,
         sessions,
         projects,
@@ -398,7 +421,7 @@ struct UsageQuery {
 fn load_usage() -> Result<UsageSnapshot> {
     create_analyzer_registry()
         .load_all_stats_parallel_scoped()
-        .map(|stats| usage_snapshot(&stats))
+        .map(|stats| usage_snapshot(&stats, Utc::now()))
 }
 
 async fn usage(State(state): State<Arc<UsageState>>, Query(query): Query<UsageQuery>) -> Response {
@@ -540,7 +563,7 @@ mod tests {
 
     fn snapshot_with_input(input_tokens: u64) -> UsageSnapshot {
         UsageSnapshot {
-            rows: vec![HourlyUsage {
+            rows: vec![MinuteUsage {
                 input_tokens,
                 ..Default::default()
             }],
@@ -918,7 +941,7 @@ mod tests {
                 analyzer_name: "Codex CLI".into(),
             }],
         };
-        let snapshot = usage_snapshot(&stats);
+        let snapshot = usage_snapshot(&stats, Utc::now());
         assert_eq!(snapshot.rows.len(), 4);
         let hour = message.date.with_timezone(&Local).hour() as u8;
         let row = snapshot
@@ -957,7 +980,7 @@ mod tests {
         }
         let mut multi_tool = stats;
         multi_tool.analyzer_stats.push(other_tool);
-        let snapshot = usage_snapshot(&multi_tool);
+        let snapshot = usage_snapshot(&multi_tool, Utc::now());
         assert_eq!(snapshot.sessions.len(), 4);
         let other = snapshot
             .sessions
@@ -982,20 +1005,116 @@ mod tests {
             cost: 0.5,
             ..Default::default()
         };
-        let snapshot = usage_snapshot(&MultiAnalyzerStats {
-            analyzer_stats: vec![AgenticCodingToolStats {
-                daily_stats: BTreeMap::new(),
-                num_conversations: 1,
-                messages: vec![unknown],
-                analyzer_name: "Codex CLI".into(),
-            }],
-        });
+        let snapshot = usage_snapshot(
+            &MultiAnalyzerStats {
+                analyzer_stats: vec![AgenticCodingToolStats {
+                    daily_stats: BTreeMap::new(),
+                    num_conversations: 1,
+                    messages: vec![unknown],
+                    analyzer_name: "Codex CLI".into(),
+                }],
+            },
+            Utc::now(),
+        );
         assert_eq!(snapshot.rows.len(), 1);
         assert_eq!(snapshot.rows[0].project, "hash");
         assert_eq!(snapshot.rows[0].model, "Unknown model");
         assert_eq!(snapshot.rows[0].input_tokens, 0);
         assert_eq!(snapshot.rows[0].cost, 0.5);
         assert_eq!(snapshot.sessions.len(), 1);
+    }
+
+    #[test]
+    fn recent_windows_split_boundary_minutes_without_changing_full_totals() {
+        let scanned_at = Utc.with_ymd_and_hms(2026, 1, 2, 12, 30, 0).unwrap();
+        let offsets = [
+            (-48, -1),
+            (-48, 0),
+            (-48, 1),
+            (-24, -1),
+            (-24, 0),
+            (-24, 1),
+            (0, -1),
+            (0, 0),
+            (0, 1),
+        ];
+        let messages = offsets
+            .into_iter()
+            .enumerate()
+            .map(|(index, (hours, seconds))| ConversationMessage {
+                application: Application::CodexCli,
+                date: scanned_at
+                    + chrono::Duration::hours(hours)
+                    + chrono::Duration::seconds(seconds),
+                project_hash: "project".into(),
+                project_path: None,
+                conversation_hash: "session".into(),
+                local_hash: None,
+                global_hash: index.to_string(),
+                model: Some("model".into()),
+                stats: Stats {
+                    input_tokens: index as u64 + 1,
+                    cost: 1.0,
+                    files_read: 2,
+                    ..Default::default()
+                },
+                role: MessageRole::Assistant,
+                uuid: None,
+                session_name: None,
+            })
+            .collect();
+        let stats = MultiAnalyzerStats {
+            analyzer_stats: vec![AgenticCodingToolStats {
+                daily_stats: BTreeMap::new(),
+                num_conversations: 1,
+                messages,
+                analyzer_name: "Codex CLI".into(),
+            }],
+        };
+        let snapshot = usage_snapshot(&stats, scanned_at);
+        assert_eq!(snapshot.scanned_at, scanned_at);
+        for (period, input_tokens) in [(0, 12), (1, 12), (2, 21)] {
+            let rows: Vec<_> = snapshot
+                .rows
+                .iter()
+                .filter(|row| row.recent_period == period)
+                .collect();
+            assert_eq!(
+                rows.iter().map(|row| row.input_tokens).sum::<u64>(),
+                input_tokens
+            );
+            assert_eq!(rows.iter().map(|row| row.messages).sum::<u32>(), 3);
+            assert_eq!(rows.iter().map(|row| row.files_read).sum::<u64>(), 6);
+        }
+        let boundary = (scanned_at - chrono::Duration::hours(24)).timestamp_millis();
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .filter(|row| { row.timestamp == boundary })
+                .count(),
+            2
+        );
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| row.input_tokens)
+                .sum::<u64>(),
+            45
+        );
+        assert_eq!(snapshot.rows.iter().map(|row| row.cost).sum::<f64>(), 9.0);
+        assert_eq!(snapshot.sessions.len(), 1);
+        let refreshed = usage_snapshot(&stats, scanned_at + chrono::Duration::seconds(2));
+        assert_eq!(
+            refreshed
+                .rows
+                .iter()
+                .filter(|row| row.recent_period == 2)
+                .map(|row| row.input_tokens)
+                .sum::<u64>(),
+            24
+        );
     }
 
     #[test]
@@ -1031,13 +1150,83 @@ mod tests {
             }],
         };
 
-        let snapshot = usage_snapshot(&stats);
-        assert_eq!(snapshot.rows.len(), 1);
-        assert_eq!(snapshot.rows[0].files_read, 6);
-        assert_eq!(snapshot.rows[0].files_edited, 3);
-        assert_eq!(snapshot.rows[0].files_added, 3);
-        assert_eq!(snapshot.rows[0].terminal_commands, 3);
+        let snapshot = usage_snapshot(&stats, Utc::now());
+        assert_eq!(snapshot.rows.len(), 3);
+        assert_eq!(
+            snapshot.rows.iter().map(|row| row.files_read).sum::<u64>(),
+            6
+        );
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| row.files_edited)
+                .sum::<u64>(),
+            3
+        );
+        assert_eq!(
+            snapshot.rows.iter().map(|row| row.files_added).sum::<u64>(),
+            3
+        );
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| row.terminal_commands)
+                .sum::<u64>(),
+            3
+        );
+        let first = stats.analyzer_stats[0].messages[0].date.timestamp_millis();
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(|row| row.timestamp)
+                .collect::<Vec<_>>(),
+            [first, first + 2 * 60_000, first + 10 * 60_000]
+        );
         assert_eq!(snapshot.sessions[0].active_minutes, 2);
+
+        let mut boundary_stats = stats.clone();
+        let mut before = message_at(0);
+        before.date += chrono::Duration::milliseconds(59_999);
+        let mut after = message_at(1);
+        after.date += chrono::Duration::milliseconds(59_999);
+        boundary_stats.analyzer_stats[0].messages = vec![before, message_at(1), after];
+        let boundary_snapshot = usage_snapshot(&boundary_stats, Utc::now());
+        assert_eq!(boundary_snapshot.rows.len(), 2);
+        assert_eq!(boundary_snapshot.rows[0].timestamp, first);
+        assert_eq!(boundary_snapshot.rows[0].messages, 1);
+        assert_eq!(boundary_snapshot.rows[1].timestamp, first + 60_000);
+        assert_eq!(boundary_snapshot.rows[1].messages, 2);
+        assert_eq!(boundary_snapshot.rows[1].input_tokens, 20);
+
+        let mut mixed_stats = stats.clone();
+        let mut empty_minute = message_at(3);
+        empty_minute.stats = Stats::default();
+        let mut empty_hour = message_at(0);
+        empty_hour.date += chrono::Duration::hours(1);
+        empty_hour.stats = Stats::default();
+        mixed_stats.analyzer_stats[0]
+            .messages
+            .extend([empty_minute, empty_hour]);
+        let mixed = usage_snapshot(&mixed_stats, Utc::now());
+        assert_eq!(
+            mixed.rows.len(),
+            4,
+            "Keep zero-usage replies within an active hour"
+        );
+        assert_eq!(mixed.rows.iter().map(|row| row.messages).sum::<u32>(), 4);
+        assert_eq!(
+            mixed.rows.iter().map(|row| row.input_tokens).sum::<u64>(),
+            30
+        );
+        assert!(
+            mixed
+                .rows
+                .iter()
+                .all(|row| row.timestamp < first + 3_600_000)
+        );
 
         for activity in [
             Stats {
@@ -1064,7 +1253,7 @@ mod tests {
             let mut stats = stats.clone();
             stats.analyzer_stats[0].messages.truncate(1);
             stats.analyzer_stats[0].messages[0].stats = activity;
-            let snapshot = usage_snapshot(&stats);
+            let snapshot = usage_snapshot(&stats, Utc::now());
             assert_eq!(snapshot.rows.len(), 1, "activity-only row must be retained");
             assert_eq!(snapshot.sessions.len(), 1);
         }

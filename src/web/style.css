@@ -50,6 +50,7 @@ button { background: none; border: 0; margin: 0; padding: 0; cursor: pointer; te
 .btn:hover { background: var(--hover); }
 .btn:disabled { opacity: 0.55; cursor: wait; }
 .btn[aria-expanded="true"] { border-color: var(--ink-2); }
+.btn[aria-pressed="true"] { background: var(--selected); color: var(--on-selected); }
 select.btn { padding-right: 6px; }
 
 .tabs-bar { background: var(--surface); border-bottom: 1px solid var(--line); }
@@ -60,6 +61,9 @@ select.btn { padding-right: 6px; }
 .tab-badge { font-size: 12px; font-weight: 400; color: var(--muted); }
 
 .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding-top: 14px; padding-bottom: 14px; }
+.custom-range { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.custom-range label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.custom-range input { width: 220px; color: var(--ink); }
 .seg { display: inline-flex; gap: 2px; max-width: 100%; overflow-x: auto; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
 .seg button { min-height: 28px; padding: 4px 10px; border-radius: 5px; font-size: 13px; color: var(--ink-2); white-space: nowrap; }
 .seg button:hover { background: var(--hover); color: var(--ink); }
@@ -94,7 +98,7 @@ select.btn { padding-right: 6px; }
 
 .kpis { display: grid; grid-template-columns: minmax(0, 1.7fr) repeat(4, minmax(0, 1fr)); gap: 12px; }
 .kpi { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px 16px; }
-.kpi-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.kpi-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 12px; }
 .kpi-label { font-size: 13px; font-weight: 500; color: var(--ink-2); }
 .hero-body { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 20px; }
 .hero-value { font-size: 52px; font-weight: 650; line-height: 1; letter-spacing: -0.035em; }

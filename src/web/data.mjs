@@ -1,5 +1,5 @@
-// Pure aggregation over hourly usage rows (one per local date, hour, tool,
-// model, project, and session). Everything the dashboard shows derives here.
+// Pure aggregation over minute usage rows, split at recent 24h boundaries.
+// Everything the dashboard shows derives here.
 
 export const OTHER = '\u0000other';
 export const SESSION_PAGE_SIZE = 50;
@@ -44,6 +44,18 @@ export function localDateKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
+export function isDateKey(key) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(key ?? '') && localDateKey(new Date(`${key}T12:00:00`)) === key;
+}
+
+export function localDateTimeKey(date) {
+  return `${localDateKey(date)}T${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+export function isDateTimeKey(key) {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(key ?? '') && localDateTimeKey(new Date(key)) === key;
+}
+
 export function shiftDate(key, days) {
   const date = new Date(`${key}T12:00:00`);
   date.setDate(date.getDate() + days);
@@ -59,12 +71,30 @@ export function periodKey(date, hour, granularity) {
   return localDateKey(monday);
 }
 
-// Inclusive local dates for a preset ('today', '7', '30', '90', 'all') or a
-// drilled-into day, plus the equal-length period before it. "Today" compares
-// with yesterday up to the current hour.
-export function selectRange(range, day, now, firstDate) {
+// Custom times use [start, end); presets and drilled-into days use local dates.
+// Each compares with the equal-length period before it, except all history.
+export function selectRange(range, day, now, firstDate, { from, to } = {}) {
   const today = localDateKey(now);
   if (day) return { first: day, last: day, days: 1, prev: { first: shiftDate(day, -1), last: shiftDate(day, -1) } };
+  if (range === 'custom') {
+    const start = new Date(from).getTime();
+    const end = new Date(to).getTime();
+    const last = new Date(end - 1);
+    return {
+      first: localDateKey(new Date(start)), last: localDateKey(last),
+      firstHour: new Date(start).getHours(), maxHour: last.getHours(),
+      start, end, days: (end - start) / 86400000,
+      prev: { start: start - (end - start), end: start },
+    };
+  }
+  if (range === '24h') {
+    const start = new Date(now - 24 * 3600000);
+    const previousStart = new Date(now - 48 * 3600000);
+    return {
+      first: localDateKey(start), last: today, firstHour: start.getHours(), maxHour: now.getHours(), days: 1, recentPeriod: 2,
+      prev: { first: localDateKey(previousStart), last: localDateKey(start), firstHour: previousStart.getHours(), maxHour: start.getHours(), recentPeriod: 1 },
+    };
+  }
   if (range === 'today') {
     const yesterday = shiftDate(today, -1);
     return { first: today, last: today, days: 1, prev: { first: yesterday, last: yesterday, maxHour: now.getHours() } };
@@ -80,6 +110,8 @@ export function selectRange(range, day, now, firstDate) {
 }
 
 export function inRange(row, range) {
+  if (range.recentPeriod !== undefined) return row.recentPeriod === range.recentPeriod;
+  if (range.start !== undefined) return row.timestamp >= range.start && row.timestamp < range.end;
   return row.date >= range.first && row.date <= range.last && (range.maxHour === undefined || row.hour <= range.maxHour);
 }
 
@@ -102,8 +134,9 @@ export function bucketKeys(range, granularity, now) {
   const today = localDateKey(now);
   const keys = [];
   for (let date = range.first; date <= range.last; date = shiftDate(date, 1)) {
-    const lastHour = granularity !== 'hour' ? 0 : date === today ? now.getHours() : 23;
-    for (let hour = 0; hour <= lastHour; hour++) {
+    const firstHour = granularity === 'hour' && date === range.first ? range.firstHour ?? 0 : 0;
+    const lastHour = granularity !== 'hour' ? 0 : date === range.last && range.maxHour !== undefined ? range.maxHour : date === today ? now.getHours() : 23;
+    for (let hour = firstHour; hour <= lastHour; hour++) {
       const key = periodKey(date, hour, granularity);
       if (keys.at(-1) !== key) keys.push(key);
     }
