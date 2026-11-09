@@ -218,11 +218,19 @@ impl CopilotCliLiveContext {
 }
 
 fn calculate_copilot_cli_cost(stats: &Stats, model_name: &str, effective_at: DateTime<Utc>) -> f64 {
-    let actual_input_tokens = stats.input_tokens.saturating_sub(stats.cache_read_tokens);
+    // Copilot CLI's `inputTokens` is the whole prompt, with cache reads and
+    // cache writes inside it: a real GPT-6 Luna shutdown logged 19,341 input
+    // and 19,338 written, leaving the same 3-token tail OpenAI's API shows.
+    // Removing both bills each token once, and lets the calculator size the
+    // prompt (plain + writes + reads) for whole-request brackets correctly.
+    let plain_input_tokens = stats
+        .input_tokens
+        .saturating_sub(stats.cache_read_tokens)
+        .saturating_sub(stats.cache_creation_tokens);
     calculate_total_cost_for_service_tier_at(
         model_name,
         ServiceTier::Standard,
-        actual_input_tokens,
+        plain_input_tokens,
         stats.output_tokens,
         stats.cache_creation_tokens,
         stats.cache_read_tokens,
