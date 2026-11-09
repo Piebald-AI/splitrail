@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.13.0] - 2026-11-09
 - feat(web): add active time, replies, and work activity insights (#283) - @jimyag
+- Add last-24-hour and custom minute-precision usage ranges (#293) - @jimyag
 - fix(deepseek-harness): support v4 session files (#289) - @jimyag
+- feat(otel): export usage as OTLP traces and metrics (#297) - @mcowgeratsigma
 - Name Claude Code sessions by their renames and generated titles (#285) - @Sindusk
 - Restore Piebald usage tracking after the portable-workspace migration (#298) - @mike1858
 - Add Claude Fable 5.2 pricing (#302) - @mike1858
