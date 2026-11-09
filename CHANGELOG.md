@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.0] - 2026-11-09
+- feat(web): add active time, replies, and work activity insights (#283) - @jimyag
+- Add last-24-hour and custom minute-precision usage ranges (#293) - @jimyag
+- fix(deepseek-harness): support v4 session files (#289) - @jimyag
+- feat(otel): export usage as OTLP traces and metrics (#297) - @mcowgeratsigma
+- Name Claude Code sessions by their renames and generated titles (#285) - @Sindusk
+- Restore Piebald usage tracking after the portable-workspace migration (#298) - @mike1858
+- Add Claude Fable 5.2 pricing (#302) - @mike1858
+- Bill OpenAI cache writes once and derive the ones ChatGPT reports as zero (#300) - @mike1858
+- Price Piebald turns at the tier each request recorded (#286) - @mike1858
+- Bill Gemini CLI cached tokens once and thinking tokens as output (#291) - @mike1858
+- Keep counting usage of deleted Piebald chats from archives (#294) - @mike1858
+- Read the Piebald usage archive from beside its database (#295) - @mike1858
+- Preserve Piebald usage when archives omit a worktree table (#299) - @mike1858
+- Keep Piebald usage loading when no service-tier table exists (#284) - @mike1858
+- Add GPT-6.1 Terra pricing (#292) - @mike1858
+- Add Gemini 4 Carbon pricing (#290) - @mike1858
+- Update rusqlite to 0.41 and ignore rmcp's HTTP-client advisory (#301) - @mike1858
+- Update zstd to 0.14.3 for new advisories (#288) - @mike1858
+- Update rustls-webpki and webpki-root-certs for new advisories (#287) - @mike1858
+
 ## [3.12.0] - 2026-10-15
 - feat(web): add localhost usage dashboard (#276) - @jimyag
 - feat(web): add sessions and breakdown dashboard views (#277) - @jimyag
