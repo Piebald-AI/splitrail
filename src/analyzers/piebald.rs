@@ -1060,6 +1060,9 @@ mod tests {
             cache_read: 28_999,
         };
         assert_eq!(split("gpt-6.1-sol", 41_785, 28_999, 12_783), api_row);
+        // A reported write that differs from the derived one is kept as reported.
+        let r = split("gpt-6.1-sol", 1_000, 300, 200);
+        assert_eq!((r.input, r.cache_write, r.cache_read), (500, 200, 300));
 
         let pro_row = PromptTokens {
             input: 3,
