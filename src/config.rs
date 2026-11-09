@@ -1,4 +1,5 @@
 use crate::models::ModelInfo;
+use crate::otel::OtelConfig;
 use crate::utils::LogLevel;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub tui: TuiConfig,
+    #[serde(default)]
+    pub otel: OtelConfig,
     #[serde(default)]
     pub models: HashMap<String, ModelInfo>,
     #[serde(default)]
@@ -169,6 +172,7 @@ impl Default for Config {
             },
             logging: LoggingConfig::default(),
             tui: TuiConfig::default(),
+            otel: OtelConfig::default(),
             models: HashMap::new(),
             aliases: HashMap::new(),
         }
@@ -411,6 +415,14 @@ pub fn show_config() -> Result<()> {
             println!("   TUI Color Costs: {}", config.tui.color_costs);
             println!("   TUI Show Header: {}", config.tui.show_header);
             println!("   Log Level: {}", config.logging.level);
+            println!(
+                "   OTel Export: {}",
+                if config.otel.enabled {
+                    format!("Enabled ({})", config.otel.resolve_traces(None).endpoint)
+                } else {
+                    "Disabled".to_string()
+                }
+            );
             if !config.models.is_empty() {
                 println!("   Custom Models: {}", config.models.len());
             }
@@ -515,6 +527,30 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
         }
         "log-level" => {
             config.logging.level = value.parse().map_err(anyhow::Error::msg)?;
+        }
+        "otel-enabled" => {
+            config.otel.enabled = value
+                .parse::<bool>()
+                .context("Invalid boolean value. Use 'true' or 'false'")?;
+        }
+        "otel-endpoint" => {
+            config.otel.endpoint = value.to_string();
+        }
+        "otel-service-name" => {
+            config.otel.service_name = value.to_string();
+        }
+        "otel-include-tool-spans" => {
+            config.otel.include_tool_spans = value
+                .parse::<bool>()
+                .context("Invalid boolean value. Use 'true' or 'false'")?;
+        }
+        "otel-exclude-analyzers" => {
+            config.otel.exclude_analyzers = value
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect();
         }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }

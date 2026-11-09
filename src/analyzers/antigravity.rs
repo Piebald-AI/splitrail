@@ -649,6 +649,7 @@ impl Analyzer for AntigravityCliAnalyzer {
                 global_hash,
                 model,
                 stats,
+                is_tool_result: false,
                 role,
                 uuid: None,
                 session_name: session_name.clone(),

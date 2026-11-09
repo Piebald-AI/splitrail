@@ -279,6 +279,7 @@ async fn test_get_messages_later_than() {
         global_hash: "g1".to_string(),
         model: None,
         stats: Stats::default(),
+        is_tool_result: false,
         role: MessageRole::User,
         uuid: None,
         session_name: None,
@@ -321,6 +322,7 @@ fn test_aggregate_by_date_basic() {
             cost: 0.01,
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -352,6 +354,7 @@ fn test_aggregate_by_date_preserves_subcent_costs() {
             cost: 0.004,
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -384,6 +387,7 @@ fn test_aggregate_by_date_gap_filling() {
         global_hash: "g1".to_string(),
         model: Some("model".to_string()),
         stats: Stats::default(),
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -442,6 +446,7 @@ fn test_aggregate_by_date_counts_assistant_without_model_as_ai_message() {
             output_tokens: 84,
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -481,6 +486,7 @@ fn test_filter_zero_cost_messages_all_zero_cost() {
             cost: 0.0,
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -515,6 +521,7 @@ fn test_filter_zero_cost_messages_no_zero_cost() {
             cost: 0.01,
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -554,6 +561,7 @@ fn test_filter_zero_cost_messages_mixed() {
             input_tokens: 100,
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -608,6 +616,7 @@ fn test_filter_zero_cost_messages_near_zero() {
             cost: 1e-9, // Very small but above epsilon (1e-10)
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -662,6 +671,7 @@ fn test_filter_zero_cost_messages_negative_cost() {
             cost: -1e-11, // Negative but within epsilon
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -703,6 +713,7 @@ fn test_deduplicate_by_global_hash() {
         global_hash: "same_hash".to_string(), // Same hash
         model: Some("model".to_string()),
         stats: Stats::default(),
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -745,6 +756,7 @@ fn test_deduplicate_by_local_hash() {
         global_hash: "g1".to_string(),
         model: Some("model".to_string()),
         stats: Stats::default(),
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -783,6 +795,7 @@ fn test_deduplicate_keeps_messages_without_local_hash() {
         global_hash: "g1".to_string(),
         model: Some("model".to_string()),
         stats: Stats::default(),
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,

@@ -37,6 +37,7 @@ fn make_test_message(conversation_hash: &str) -> ConversationMessage {
         global_hash: format!("global-{conversation_hash}"),
         model: Some("test-model".to_string()),
         stats: Stats::default(),
+        is_tool_result: false,
         role: MessageRole::User,
         uuid: None,
         session_name: None,

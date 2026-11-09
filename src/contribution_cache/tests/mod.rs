@@ -59,6 +59,7 @@ pub fn make_message(
             tool_calls,
             ..Default::default()
         },
+        is_tool_result: false,
         role: if model.is_some() {
             MessageRole::Assistant
         } else {

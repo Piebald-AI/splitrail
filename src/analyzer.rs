@@ -13,7 +13,7 @@ use crate::contribution_cache::{
 };
 use crate::types::{
     AgenticCodingToolStats, AnalyzerStatsView, ConversationMessage, DailyStats, ModelCounts,
-    SharedAnalyzerView, TuiStats,
+    SharedAnalyzerView, ToolCall, TuiStats,
 };
 
 /// VSCode GUI forks that might have extensions installed
@@ -243,6 +243,20 @@ pub trait Analyzer: Send + Sync {
     /// Remove analyzer-owned persistent state for a source that was deleted.
     fn remove_source_state(&self, _path: &Path) -> Result<()> {
         Ok(())
+    }
+
+    /// Optional per-tool-call records, for exporters that want `execute_tool`
+    /// spans.
+    ///
+    /// Default: none. `Stats.tool_calls` is only a count, so an analyzer opts in
+    /// here when its transcripts carry per-call data: name, timestamp, the
+    /// agent's call id, and where available the result timestamp (which makes a
+    /// real duration possible).
+    ///
+    /// Implementations must not return tool arguments or results. Those are
+    /// sensitive and large; the exporter wants timing and identity, not content.
+    fn parse_tool_calls(&self, _sources: &[DataSource]) -> Result<Vec<ToolCall>> {
+        Ok(Vec::new())
     }
 
     /// Whether a source change can alter contributions owned by other source paths.
@@ -1056,6 +1070,7 @@ mod tests {
                 input_tokens: 1,
                 ..Stats::default()
             },
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: None,
             session_name: Some("session".into()),
