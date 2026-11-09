@@ -226,13 +226,15 @@ pub struct DatedPricing {
     pub time_of_day_pricing: Option<TimeOfDayPricing>,
 }
 
-/// How a provider reports input tokens relative to cache reads.
+/// How a provider reports input tokens relative to cached tokens.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputTokenSemantics {
     /// Reported input tokens exclude cache reads and can be added to cached tokens.
     #[default]
     ExcludesCache,
-    /// Reported input tokens include cache reads; subtract cache reads before normalizing.
+    /// Reported input tokens are the whole prompt, cache reads and cache writes
+    /// included (OpenAI's `input_tokens`). Split them with
+    /// [`split_openai_prompt_tokens`] before pricing.
     IncludesCacheRead,
 }
 
@@ -4437,6 +4439,99 @@ fn pricing_for_service_tier(
         .unwrap_or(standard)
 }
 
+/// Uncached prompt tokens that OpenAI does not write to its prompt cache.
+///
+/// This is measured, not documented. Across 332 OpenAI platform-API responses
+/// for GPT-6 Sol and GPT-6.1 Sol (October and November 2026, as recorded by
+/// Piebald), `input_tokens - cached_tokens - cache_write_tokens` was 3 every
+/// time, and the next request in the same conversation read back the previous
+/// prompt minus 3 tokens. The tail is probably the assistant-turn header that
+/// follows the conversation and gets rebuilt by the next request, but that
+/// explanation is a guess; only the number is observed.
+const OPENAI_UNWRITTEN_PROMPT_TAIL_TOKENS: u64 = 3;
+
+/// One request's prompt split into the buckets that are billed at different
+/// rates. The buckets never overlap, so they always add up to the whole prompt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptTokens {
+    /// Uncached input, billed at the plain input rate.
+    pub input: u64,
+    /// Tokens written to the prompt cache, billed at the cache-write rate.
+    pub cache_write: u64,
+    /// Tokens served from the prompt cache, billed at the cache-read rate.
+    pub cache_read: u64,
+}
+
+/// Whether a rate card prices cache writes separately from plain input.
+fn caching_bills_writes(caching: &CachingSupport) -> bool {
+    matches!(
+        caching,
+        CachingSupport::Anthropic { .. }
+            | CachingSupport::OpenAIWithWrites { .. }
+            | CachingSupport::TieredWithWrites(_)
+    )
+}
+
+/// Split an OpenAI-style usage report into separate billing buckets.
+///
+/// OpenAI's `input_tokens` is the whole prompt: cached reads and cache writes
+/// are parts of it, not additions to it. The calculators take the three parts
+/// separately, so this subtracts them out.
+///
+/// Cache writes need extra care because only some sources report them:
+///
+/// - The OpenAI platform API reports `cache_write_tokens`, and so far it has
+///   always equalled the uncached part of the prompt minus
+///   [`OPENAI_UNWRITTEN_PROMPT_TAIL_TOKENS`].
+/// - The ChatGPT subscription backend (Codex CLI signed in with ChatGPT, and
+///   ChatGPT-login providers in other tools) sends `cache_write_tokens: 0` on
+///   every response, even though the same request on the API would be billed
+///   for its writes.
+///
+/// A non-zero `reported_cache_write_tokens` is therefore used as reported, and
+/// a zero is replaced by the uncached prompt minus that tail. On every API
+/// response seen so far both rules give the same number, so sources that do
+/// report writes come out unchanged. A missing report should be passed as 0.
+///
+/// Writes are only derived when the model's rate card for this service tier
+/// and date has a cache-write price. Without one, OpenAI bills the uncached
+/// prompt as plain input, so it stays in [`PromptTokens::input`].
+///
+/// Counts that cannot all be true (a read larger than the prompt, or a write
+/// larger than the uncached part) are clamped so the buckets still add up to
+/// `prompt_tokens`, which is what selects whole-request pricing brackets.
+pub fn split_openai_prompt_tokens(
+    model_name: &str,
+    service_tier: ServiceTier,
+    effective_at: Option<DateTime<Utc>>,
+    prompt_tokens: u64,
+    cache_read_tokens: u64,
+    reported_cache_write_tokens: u64,
+) -> PromptTokens {
+    let cache_read = cache_read_tokens.min(prompt_tokens);
+    let uncached = prompt_tokens - cache_read;
+
+    let bills_writes = get_model_info(model_name).is_some_and(|model_info| {
+        caching_bills_writes(
+            pricing_for_service_tier(&model_info, service_tier, effective_at).caching,
+        )
+    });
+
+    let cache_write = if !bills_writes {
+        0
+    } else if reported_cache_write_tokens > 0 {
+        reported_cache_write_tokens.min(uncached)
+    } else {
+        uncached.saturating_sub(OPENAI_UNWRITTEN_PROMPT_TAIL_TOKENS)
+    };
+
+    PromptTokens {
+        input: uncached - cache_write,
+        cache_write,
+        cache_read,
+    }
+}
+
 fn input_cost_for_pricing(pricing: &PricingStructure, input_tokens: u64) -> f64 {
     match pricing {
         PricingStructure::Flat { input_per_1m, .. } => {
@@ -4680,13 +4775,16 @@ pub fn calculate_total_cost_for_service_tier_at(
     match get_model_info(model_name) {
         Some(model_info) => {
             let resolved = pricing_for_service_tier(&model_info, service_tier, effective_at);
-            // Token sources report disjoint billable categories here: ordinary
-            // input excludes cached reads and writes. Reads and writes can
-            // overlap, so their maximum reconstructs the cached portion without
-            // double-counting that overlap; adding it back recovers the prompt
-            // context used to select whole-request long-context brackets.
-            let context_tokens =
-                input_tokens.saturating_add(cache_creation_tokens.max(cache_read_tokens));
+            // Callers pass three separate buckets: plain input excludes cached
+            // reads and writes, and reads and writes never overlap (OpenAI-style
+            // reports are split by `split_openai_prompt_tokens` first). Their
+            // sum is the whole prompt, which is what selects a whole-request
+            // long-context bracket. Leaving one bucket out would price a
+            // request such as Haiku 5.5's 1K input + 50K write + 60K read
+            // (111K) at the under-100K rate.
+            let context_tokens = input_tokens
+                .saturating_add(cache_creation_tokens)
+                .saturating_add(cache_read_tokens);
             calculate_context_cost(
                 resolved.pricing,
                 resolved.caching,
@@ -4824,7 +4922,10 @@ fn calculate_tiered_cache_cost_with_writes(
     bracket_pricing: bool,
 ) -> f64 {
     debug_assert!(bracket_pricing);
-    let context_tokens = cache_creation_tokens.max(cache_read_tokens);
+    // This cache-only entry point has no plain-input count, so the cached
+    // tokens are the best available prompt size. Reads and writes are separate
+    // buckets, so both count toward it.
+    let context_tokens = cache_creation_tokens.saturating_add(cache_read_tokens);
 
     find_tier(context_tokens, tiers, |tier| tier.max_tokens)
         .map(|tier| {
@@ -5431,6 +5532,28 @@ mod tests {
         );
     }
 
+    /// Analyzers other than Claude Code (Piebald, OpenCode) price Claude rows
+    /// through the shared calculator, which must count all three prompt
+    /// buckets. This request is 111K tokens in total; dropping either cache
+    /// bucket, or taking only the larger one, would put it under 100K.
+    #[test]
+    fn shared_calculator_counts_cache_writes_and_reads_toward_brackets() {
+        let cost = calculate_total_cost_for_service_tier_at(
+            "claude-haiku-5-5",
+            ServiceTier::Standard,
+            1_000,
+            1_000,
+            50_000,
+            60_000,
+            None,
+        );
+
+        // Long-prompt card: $0.50 input, $2.50 output, $0.625 write, $0.05 read.
+        let expected =
+            (1_000.0 * 0.50 + 1_000.0 * 2.50 + 50_000.0 * 0.625 + 60_000.0 * 0.05) / 1_000_000.0;
+        approx_eq(cost, expected);
+    }
+
     #[test]
     fn claude_opus_5_alias_maps_to_pricing() {
         let model_info = get_model_info("claude-5-opus").expect("model should exist");
@@ -5636,10 +5759,10 @@ mod tests {
 
             approx_eq(calculate_input_cost(model, 200_000), 2.0);
             approx_eq(calculate_output_cost(model, 200_000), 10.0);
-            // Cache-only helpers select their bracket from the cache counts,
-            // so exercise both published tiers directly: 200K writes plus
-            // reads cost $2.50 + $0.20; one million of each costs $25 + $2.
-            approx_eq(calculate_cache_cost(model, 200_000, 200_000), 2.70);
+            // Cache-only helpers select their bracket from writes plus reads,
+            // so exercise both published tiers directly: 100K of each (200K)
+            // costs $1.25 + $0.10; one million of each costs $25 + $2.
+            approx_eq(calculate_cache_cost(model, 100_000, 100_000), 1.35);
             approx_eq(calculate_cache_cost(model, 1_000_000, 1_000_000), 27.0);
         }
     }
@@ -5698,14 +5821,16 @@ mod tests {
     #[test]
     fn gpt_6_sol_and_luna_use_published_rates_across_contexts_and_service_tiers() {
         // Each fixture bills 100K output, 100K cache writes, and 100K cache
-        // reads. GPT-6.1 Sol's totals sit exactly $0.01/$0.02 below GPT-6
-        // Sol's: that gap is the 100K cache reads at its halved cached-input
-        // rate ($0.10 vs $0.20 short, $0.20 vs $0.40 long), so these rows fail
-        // if 6.1 is ever priced as a plain alias of 6.
+        // reads, plus 50K input in the short row (a 250K prompt, under 272K)
+        // or 200K input in the long row (400K). GPT-6.1 Sol's totals sit
+        // exactly $0.01/$0.02 below GPT-6 Sol's: that gap is the 100K cache
+        // reads at its halved cached-input rate ($0.10 vs $0.20 short, $0.20
+        // vs $0.40 long), so these rows fail if 6.1 is ever priced as a plain
+        // alias of 6.
         for (model, short_standard, long_standard) in [
-            ("gpt-6-sol", 1.47, 2.84),
-            ("gpt-6.1-sol", 1.46, 2.82),
-            ("gpt-6-luna", 0.0735, 0.142),
+            ("gpt-6-sol", 1.37, 2.84),
+            ("gpt-6.1-sol", 1.36, 2.82),
+            ("gpt-6-luna", 0.0685, 0.142),
         ] {
             assert!(
                 !get_model_info(model)
@@ -5720,7 +5845,7 @@ mod tests {
                 (ServiceTier::Batch, 0.5),
             ] {
                 let short = calculate_total_cost_for_service_tier_at(
-                    model, tier, 100_000, 100_000, 100_000, 100_000, None,
+                    model, tier, 50_000, 100_000, 100_000, 100_000, None,
                 );
                 let long = calculate_total_cost_for_service_tier_at(
                     model, tier, 200_000, 100_000, 100_000, 100_000, None,
@@ -5735,15 +5860,16 @@ mod tests {
     #[test]
     fn gpt_6_1_terra_uses_published_rates_across_contexts_and_service_tiers() {
         // Same fixture as the GPT-6 Sol and Luna test above. The short row is
-        // 100K each of input, output, cache writes, and cache reads:
-        // $0.10 + $0.50 + $0.125 + $0.005 = $0.73. In the long row, 200K input
-        // plus the larger of the cache writes and reads (how the calculator
-        // sizes a prompt) makes 300K, past the 272K bracket, so every category
-        // moves to the long rate: $0.40 + $0.75 + $0.25 + $0.01 = $1.41.
-        // OpenAI priced Terra at exactly half of GPT-6.1 Sol in every column,
-        // so both totals are half of Sol's $1.46/$2.82 above; pricing Terra as
-        // an alias of Sol would double them. The provider-prefixed name checks
-        // that Priority (Fast), Flex, and Batch overrides survive the prefix.
+        // 50K input plus 100K each of output, cache writes, and cache reads:
+        // $0.05 + $0.50 + $0.125 + $0.005 = $0.68. In the long row, 200K input
+        // plus the cache writes and reads (the calculator sizes a prompt by
+        // adding all three) makes 400K, past the 272K bracket, so every
+        // category moves to the long rate: $0.40 + $0.75 + $0.25 + $0.01 =
+        // $1.41. OpenAI priced Terra at exactly half of GPT-6.1 Sol in every
+        // column, so both totals are half of Sol's $1.36/$2.82 above; pricing
+        // Terra as an alias of Sol would double them. The provider-prefixed
+        // name checks that Priority (Fast), Flex, and Batch overrides survive
+        // the prefix.
         for model in ["gpt-6.1-terra", "openai/gpt-6.1-terra"] {
             assert!(
                 !get_model_info(model)
@@ -5758,13 +5884,13 @@ mod tests {
                 (ServiceTier::Batch, 0.5),
             ] {
                 let short = calculate_total_cost_for_service_tier_at(
-                    model, tier, 100_000, 100_000, 100_000, 100_000, None,
+                    model, tier, 50_000, 100_000, 100_000, 100_000, None,
                 );
                 let long = calculate_total_cost_for_service_tier_at(
                     model, tier, 200_000, 100_000, 100_000, 100_000, None,
                 );
 
-                approx_eq(short, 0.73 * multiplier);
+                approx_eq(short, 0.68 * multiplier);
                 approx_eq(long, 1.41 * multiplier);
             }
         }
