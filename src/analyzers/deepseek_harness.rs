@@ -329,6 +329,7 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                     global_hash: hash_text(&format!("deepseek-harness:{message_id}")),
                     model: None,
                     stats: Stats::default(),
+                    is_tool_result: false,
                     role: MessageRole::User,
                     uuid: Some(message_id),
                     session_name: None,
@@ -393,6 +394,7 @@ fn parse_session_reader<R: Read>(path: &Path, reader: R) -> Result<Vec<Conversat
                         cost,
                         ..Default::default()
                     },
+                    is_tool_result: false,
                     role: MessageRole::Assistant,
                     uuid: Some(message_id),
                     session_name: None,

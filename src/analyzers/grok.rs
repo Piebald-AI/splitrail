@@ -453,6 +453,7 @@ pub fn parse_chat_history_file(path: &Path) -> Result<Vec<ConversationMessage>> 
             global_hash: hash_text(&format!("{file_path}:{line_index}")),
             model,
             stats,
+            is_tool_result: false,
             role,
             uuid: None,
             session_name: session_name.clone(),

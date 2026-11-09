@@ -783,6 +783,7 @@ fn convert_messages(
                 global_hash,
                 model: model_str,
                 stats,
+                is_tool_result: false,
                 role,
                 uuid: Some(msg.stable_id),
                 session_name: chat.title.clone(),

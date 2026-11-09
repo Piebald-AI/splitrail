@@ -42,6 +42,7 @@ fn session_detail_includes_sessions_active_after_their_start_date() {
             input_tokens,
             ..Stats::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: Some("Continued session".into()),
@@ -86,6 +87,7 @@ fn aggregate_sessions_splits_conversation_when_project_changes() {
             input_tokens,
             ..Default::default()
         },
+        is_tool_result: false,
         role: MessageRole::Assistant,
         uuid: None,
         session_name: None,
@@ -1117,6 +1119,7 @@ fn project_summary_and_filter_merge_tools_by_path() {
                 cost: 0.25,
                 ..Default::default()
             },
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: None,
             session_name: None,

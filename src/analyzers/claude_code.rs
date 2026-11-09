@@ -16,7 +16,7 @@ use std::time::SystemTime;
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
 use crate::models::calculate_total_cost_for_context_at;
-use crate::types::{Application, ConversationMessage, MessageRole, Stats};
+use crate::types::{Application, ConversationMessage, MessageRole, Stats, ToolCall};
 use crate::utils::{fast_hash, hash_text};
 use walkdir::WalkDir;
 
@@ -169,6 +169,17 @@ impl Analyzer for ClaudeCodeAnalyzer {
         Ok(deduplicate_messages(
             super::claude_code_history::merge_session(messages, &conversation_hash),
         ))
+    }
+
+    /// Tool calls come from `tool_use` blocks, and their duration from the
+    /// matching `tool_result`: Claude Code writes the result as a later user
+    /// message that references the call's id.
+    fn parse_tool_calls(&self, sources: &[DataSource]) -> Result<Vec<ToolCall>> {
+        use rayon::prelude::*;
+        Ok(sources
+            .par_iter()
+            .flat_map(|source| tool_calls_from_file(&source.path).unwrap_or_default())
+            .collect())
     }
 
     fn parse_sources_parallel_with_paths(
@@ -720,6 +731,68 @@ pub fn calculate_cost_from_tokens_at(
     )
 }
 
+/// Collect per-tool-call records from one Claude Code transcript.
+///
+/// Only identity and timing: the call id, the tool name, and — when the result
+/// message is present — a real duration. Arguments and results stay out of
+/// telemetry.
+pub(crate) fn tool_calls_from_file(path: &Path) -> Result<Vec<ToolCall>> {
+    let conversation_hash = hash_text(&path.to_string_lossy());
+    let mut buffer = Vec::new();
+    File::open(path)?.read_to_end(&mut buffer)?;
+
+    let mut started: Vec<(String, String, DateTime<Utc>)> = Vec::new();
+    let mut finished: HashMap<String, DateTime<Utc>> = HashMap::new();
+
+    for line in buffer.split(|byte| *byte == b'\n') {
+        if line.is_empty() || line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let mut line_bytes = line.to_vec();
+        let Ok(ClaudeCodeEntry::Message(message)) =
+            simd_json::from_slice::<ClaudeCodeEntry>(&mut line_bytes)
+        else {
+            continue;
+        };
+        let Some(Content::Blocks(blocks)) = message
+            .message
+            .as_ref()
+            .and_then(|message| message.content.clone())
+        else {
+            continue;
+        };
+        for block in blocks {
+            match block {
+                ContentBlock::ToolUse { id, name, .. } => {
+                    started.push((id, name, message.timestamp));
+                }
+                ContentBlock::ToolResult { tool_use_id, .. } => {
+                    finished.insert(tool_use_id, message.timestamp);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut seen = HashSet::with_capacity(started.len());
+    Ok(started
+        .into_iter()
+        .filter(|(id, _, _)| seen.insert(id.clone()))
+        .map(|(id, name, timestamp)| {
+            let duration_ms = finished
+                .get(&id)
+                .map(|finished_at| (*finished_at - timestamp).num_milliseconds().max(0));
+            ToolCall {
+                conversation_hash: conversation_hash.clone(),
+                timestamp,
+                name,
+                call_id: Some(id),
+                duration_ms,
+            }
+        })
+        .collect())
+}
+
 pub fn parse_jsonl_file<R: Read>(
     path: &Path,
     mut reader: R,
@@ -799,6 +872,9 @@ pub fn parse_jsonl_file<R: Read>(
                         project_path: current_project_path.clone(),
                         conversation_hash: conversation_hash.to_string(),
                         stats: Stats::default(), // Will be filled below
+                        is_tool_result: role.as_deref() == Some("user")
+                            && matches!(&content, Some(Content::Blocks(blocks))
+                                if !blocks.is_empty() && blocks.iter().all(|block| matches!(block, ContentBlock::ToolResult { .. }))),
                         role: match role.as_deref() {
                             Some("user") => MessageRole::User,
                             _ => MessageRole::Assistant,

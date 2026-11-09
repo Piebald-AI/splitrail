@@ -252,6 +252,42 @@ pub enum MessageRole {
     Assistant,
 }
 
+/// A single tool invocation, as recorded in an agent's transcript.
+///
+/// This exists for telemetry exporters, not for display: `Stats.tool_calls` is
+/// only a count, and a count cannot produce an `execute_tool` span. Analyzers
+/// opt in by implementing `Analyzer::parse_tool_calls`.
+///
+/// Deliberately content-free: no arguments, no results. Those are sensitive and
+/// large, and the exporter's job is cost and timing, not prompt capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    /// Conversation this call belongs to; matches `ConversationMessage::conversation_hash`.
+    pub conversation_hash: String,
+    /// When the agent issued the call.
+    pub timestamp: DateTime<Utc>,
+    /// Tool name as the agent recorded it (e.g. `Bash`, `shell`, `read_file`).
+    pub name: String,
+    /// The agent's id for the call, or a stable `splitrail-` identity synthesized
+    /// from its source position when the transcript has no id.
+    pub call_id: Option<String>,
+    /// Observed duration, when the transcript records both the call and its
+    /// result. `None` means the span duration will be derived.
+    pub duration_ms: Option<i64>,
+}
+
+impl ToolCall {
+    /// Stable identity for a call: its id when present, otherwise its time and
+    /// name. Used to derive span ids, so it must not depend on iteration order.
+    pub fn key(&self) -> String {
+        match &self.call_id {
+            Some(call_id) if !call_id.trim().is_empty() => call_id.clone(),
+            _ => format!("{}-{}", self.timestamp.timestamp_millis(), self.name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationMessage {
@@ -276,6 +312,9 @@ pub struct ConversationMessage {
     pub model: Option<String>, // None for user messages
     pub stats: Stats,
     pub role: MessageRole,
+    /// True for tool-result records that must not start a new human turn.
+    #[serde(default)]
+    pub is_tool_result: bool,
     pub uuid: Option<String>,
     pub session_name: Option<String>,
 }
@@ -840,6 +879,7 @@ mod tests {
                 cost: 0.01,
                 ..Stats::default()
             },
+            is_tool_result: false,
             role: MessageRole::Assistant,
             uuid: None,
             session_name: Some("Test Session".into()),
