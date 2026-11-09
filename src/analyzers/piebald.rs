@@ -9,7 +9,8 @@
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
 use crate::models::{
-    InputTokenSemantics, ServiceTier, calculate_total_cost_for_service_tier_at, get_model_info,
+    InputTokenSemantics, PromptTokens, ServiceTier, calculate_total_cost_for_service_tier_at,
+    get_model_info, split_openai_prompt_tokens,
 };
 use crate::types::{Application, ConversationMessage, MessageRole, Stats};
 use crate::utils::hash_text;
@@ -160,13 +161,84 @@ struct PiebaldMessage {
     updated_at: String,
 }
 
+/// Build the path projection and joins for the database's workspace layout.
+///
+/// Older databases and usage archives store `projects.directory` directly. Newer
+/// databases keep paths per installation. Only this database's installation may
+/// supply a local path: another computer's mapping, or a remote environment's
+/// path, would incorrectly group usage with a directory on this computer.
+/// Missing mappings leave the path NULL without dropping the chat's usage.
+fn project_path_sql(conn: &Connection) -> Result<(String, String)> {
+    let (legacy, projects, worktrees, settings, worktree_id, environment_id):
+        (bool, bool, bool, bool, bool, bool) = conn.query_row(
+        "SELECT
+            EXISTS(SELECT 1 FROM pragma_table_info('projects') WHERE name = 'directory'),
+            EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cross_device_project_paths'),
+            EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cross_device_worktree_paths')
+                AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_worktrees'),
+            EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'),
+            EXISTS(SELECT 1 FROM pragma_table_info('chats') WHERE name = 'worktree_id'),
+            EXISTS(SELECT 1 FROM pragma_table_info('chats') WHERE name = 'environment_id')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+    )?;
+    if legacy {
+        return Ok((
+            "p.directory".into(),
+            "LEFT JOIN projects p ON p.id = c.project_id".into(),
+        ));
+    }
+    // Some usage-only archives omit workspace storage. Do not require settings
+    // or invent a path in that case; accounting must still include their turns.
+    if !projects || !settings {
+        return Ok(("NULL".into(), String::new()));
+    }
+    let mut joins = String::from(
+        "LEFT JOIN cross_device_project_paths project_path
+            ON project_path.project_id = c.project_id
+            AND project_path.installation_id = (
+                SELECT value FROM settings WHERE key = 'workspace.installation_id')",
+    );
+    let mut path = String::from("project_path.path");
+    if worktree_id {
+        // An explicitly selected checkout must never fall back to its project
+        // root: that is a different directory. Validate project ownership too.
+        // Usage-only archives may omit either worktree table, so the join is
+        // available only when both exist; otherwise preserve usage with NULL.
+        let worktree_path = if worktrees {
+            joins.push_str(
+                " LEFT JOIN project_worktrees path_worktree
+                    ON path_worktree.id = c.worktree_id
+                    AND path_worktree.project_id = c.project_id
+                  LEFT JOIN cross_device_worktree_paths worktree_path
+                    ON worktree_path.worktree_id = path_worktree.id
+                    AND worktree_path.installation_id = (
+                        SELECT value FROM settings WHERE key = 'workspace.installation_id')",
+            );
+            "worktree_path.path"
+        } else {
+            "NULL"
+        };
+        path = format!("CASE WHEN c.worktree_id IS NOT NULL THEN {worktree_path} ELSE {path} END");
+    }
+    if environment_id {
+        // A remote absolute path is not a host filesystem path. Keep its usage,
+        // but do not mislabel it with the host's mapping of the same project.
+        path = format!(
+            "CASE WHEN c.environment_id IS NULL OR c.environment_id = 'local' THEN {path} ELSE NULL END"
+        );
+    }
+    Ok((path, joins))
+}
+
 /// Query all chats from the database.
 fn query_chats(conn: &Connection, layout: PiebaldLayout) -> Result<Vec<PiebaldChat>> {
     let (stable_id, legacy_join) = layout.stable_id_sql("chats", "c");
+    let (project_path, path_joins) = project_path_sql(conn)?;
     let sql = format!(
-        "SELECT CAST(c.id AS TEXT), {stable_id}, c.title, c.model, p.directory
+        "SELECT CAST(c.id AS TEXT), {stable_id}, c.title, c.model, {project_path}
          FROM chats c
-         LEFT JOIN projects p ON p.id = c.project_id
+         {path_joins}
          {legacy_join}
          ORDER BY c.created_at"
     );
@@ -559,23 +631,38 @@ fn model_uses_openai_token_semantics(model: Option<&str>) -> bool {
         .is_some_and(|info| info.input_token_semantics == InputTokenSemantics::IncludesCacheRead)
 }
 
-fn normalize_input_tokens(
+/// Split a Piebald usage row into the buckets the cost calculator bills.
+///
+/// Rows for Anthropic-style models already store plain input, cache writes,
+/// and cache reads separately. Rows for OpenAI-style models store the whole
+/// prompt in `input_tokens`, so they go through [`split_openai_prompt_tokens`],
+/// which also fills in the cache writes that ChatGPT-subscription providers
+/// report as 0. Callers pass a NULL write count as 0, the same as that zero.
+fn prompt_tokens(
     model: Option<&str>,
+    service_tier: ServiceTier,
+    date: DateTime<Utc>,
     input_tokens: u64,
     cache_read_tokens: u64,
-    cache_write_tokens: Option<u64>,
-) -> u64 {
-    if !model_uses_openai_token_semantics(model) {
-        return input_tokens;
+    cache_write_tokens: u64,
+) -> PromptTokens {
+    match model {
+        Some(model) if model_uses_openai_token_semantics(Some(model)) => {
+            split_openai_prompt_tokens(
+                model,
+                service_tier,
+                Some(date),
+                input_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            )
+        }
+        _ => PromptTokens {
+            input: input_tokens,
+            cache_write: cache_write_tokens,
+            cache_read: cache_read_tokens,
+        },
     }
-
-    let Some(cache_write_tokens) = cache_write_tokens else {
-        return input_tokens.saturating_sub(cache_read_tokens);
-    };
-
-    // OpenAI may report overlapping reads and writes. Remove their union from
-    // ordinary input so no token is billed at all three input rates.
-    input_tokens.saturating_sub(cache_read_tokens.max(cache_write_tokens))
 }
 
 fn billable_output_tokens(model: Option<&str>, output_tokens: u64, reasoning_tokens: u64) -> u64 {
@@ -641,20 +728,17 @@ fn convert_messages(
             };
 
             // Map token stats
-            let raw_input_tokens = msg.input_tokens.unwrap_or(0) as u64;
             let output_tokens = msg.output_tokens.unwrap_or(0) as u64;
             let reasoning_tokens = msg.reasoning_tokens.unwrap_or(0) as u64;
-            let cache_read_tokens = msg.cache_read_tokens.unwrap_or(0) as u64;
-            let cache_write_tokens = msg.cache_write_tokens.map(|tokens| tokens as u64);
-            let cache_creation_tokens = cache_write_tokens.unwrap_or(0);
-            let input_tokens = normalize_input_tokens(
-                model_str.as_deref(),
-                raw_input_tokens,
-                cache_read_tokens,
-                cache_write_tokens,
-            );
-
             let service_tier = parse_service_tier(msg.service_tier.as_deref());
+            let prompt = prompt_tokens(
+                model_str.as_deref(),
+                service_tier,
+                date,
+                msg.input_tokens.unwrap_or(0) as u64,
+                msg.cache_read_tokens.unwrap_or(0) as u64,
+                msg.cache_write_tokens.unwrap_or(0) as u64,
+            );
 
             // Calculate cost using splitrail's model pricing. OpenAI-style reasoning tokens are
             // billed at the output rate, while remaining separate in display stats.
@@ -664,10 +748,10 @@ fn convert_messages(
                 calculate_total_cost_for_service_tier_at(
                     model,
                     service_tier,
-                    input_tokens,
+                    prompt.input,
                     billable_output,
-                    cache_creation_tokens,
-                    cache_read_tokens,
+                    prompt.cache_write,
+                    prompt.cache_read,
                     Some(date),
                 )
             } else {
@@ -678,12 +762,12 @@ fn convert_messages(
             let tool_calls = tool_call_counts.get(&msg.id).copied().unwrap_or(0);
 
             let stats = Stats {
-                input_tokens,
+                input_tokens: prompt.input,
                 output_tokens,
                 reasoning_tokens,
-                cache_creation_tokens,
-                cache_read_tokens,
-                cached_tokens: cache_read_tokens + cache_creation_tokens,
+                cache_creation_tokens: prompt.cache_write,
+                cache_read_tokens: prompt.cache_read,
+                cached_tokens: prompt.cache_read + prompt.cache_write,
                 cost,
                 tool_calls,
                 ..Default::default()
@@ -731,7 +815,7 @@ fn deduplicate_turns(messages: Vec<ConversationMessage>) -> Vec<ConversationMess
 }
 
 /// Read every conversation turn from one Piebald database: the live `app.db`, or
-/// an archive in the same layout (see [`piebald_archive_dir`]).
+/// an archive in the same layout (see [`usage_archive_path`]).
 fn parse_database(path: &Path) -> Result<Vec<ConversationMessage>> {
     let mut conn = open_piebald_db(path)?;
     // Pin schema detection and all reads to one snapshot. Piebald may migrate
@@ -907,117 +991,152 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_normalize_input_tokens_subtracts_openai_cached_reads() {
-        assert_eq!(normalize_input_tokens(Some("gpt-5"), 1_000, 300, None), 700);
-    }
-
-    #[test]
-    fn test_normalize_input_tokens_subtracts_tiered_openai_cached_reads() {
-        assert_eq!(
-            normalize_input_tokens(Some("gpt-5.5"), 1_000, 300, None),
-            700
-        );
-    }
-
-    #[test]
-    fn test_normalize_input_tokens_subtracts_openai_cache_write_union() {
-        assert_eq!(
-            normalize_input_tokens(Some("gpt-5.6-sol"), 4_583, 3_945, Some(4_580)),
-            3
-        );
-    }
-
-    #[test]
-    fn test_normalize_input_tokens_subtracts_larger_openai_cache_read() {
-        assert_eq!(
-            normalize_input_tokens(Some("gpt-5.6-sol"), 5_000, 4_000, Some(3_000)),
-            1_000
-        );
-    }
-
-    #[test]
-    fn test_convert_messages_counts_cache_writes_toward_astra_context() {
+    /// Convert one assistant row and return its stats. `input` is Piebald's
+    /// raw `input_tokens`, which for OpenAI-style models is the whole prompt.
+    fn convert_one_row(
+        model: &str,
+        updated_at: &str,
+        input: i64,
+        cache_read: i64,
+        cache_write: Option<i64>,
+        output: i64,
+        reasoning: i64,
+    ) -> Stats {
         let chats = vec![PiebaldChat {
             id: "1".to_string(),
             stable_id: "1".to_string(),
-            title: Some("Long cached Astra chat".to_string()),
-            model: Some("gpt-6-astra".to_string()),
-            project_directory: Some("/tmp/project".to_string()),
+            title: None,
+            model: Some(model.to_string()),
+            project_directory: None,
         }];
         let messages = vec![PiebaldMessage {
             id: "10".to_string(),
             stable_id: "10".to_string(),
             parent_chat_id: "1".to_string(),
             role: "assistant".to_string(),
-            model: Some("gpt-6-astra".to_string()),
-            input_tokens: Some(400_000),
-            output_tokens: Some(10_000),
-            reasoning_tokens: Some(0),
-            cache_read_tokens: Some(0),
-            cache_write_tokens: Some(300_000),
+            model: Some(model.to_string()),
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            reasoning_tokens: Some(reasoning),
+            cache_read_tokens: Some(cache_read),
+            cache_write_tokens: cache_write,
             service_tier: None,
-            created_at: "2026-09-03T12:00:00Z".to_string(),
-            updated_at: "2026-09-03T12:00:01Z".to_string(),
+            created_at: updated_at.to_string(),
+            updated_at: updated_at.to_string(),
         }];
 
-        let converted = convert_messages(&chats, messages, &HashMap::new());
-        let stats = &converted[0].stats;
+        convert_messages(&chats, messages, &HashMap::new())
+            .remove(0)
+            .stats
+    }
 
-        // Piebald's raw 400K input includes the 300K cache write, leaving
-        // 100K ordinary input for billing. Reconstructing the prompt with the
-        // cache write crosses Astra's 272K boundary, so the full request uses
-        // $20/M input, $75/M output, and $25/M cache-write rates.
-        assert_eq!(stats.input_tokens, 100_000);
-        assert_eq!(stats.cache_creation_tokens, 300_000);
-        assert!((stats.cost - 10.25).abs() < 1e-9);
+    fn split(model: &str, input: u64, cache_read: u64, cache_write: u64) -> PromptTokens {
+        let date = parse_timestamp("2026-11-09T16:23:49Z").expect("valid timestamp");
+        prompt_tokens(
+            Some(model),
+            ServiceTier::Standard,
+            date,
+            input,
+            cache_read,
+            cache_write,
+        )
+    }
+
+    /// The OpenAI-style split on real Piebald rows: GPT-5 and GPT-5.5 have no
+    /// cache-write price, an OpenAI platform-API row reports its write, and a
+    /// ChatGPT Pro row reports 0 and gets one derived.
+    #[test]
+    fn test_prompt_tokens_splits_openai_rows() {
+        let no_writes = PromptTokens {
+            input: 700,
+            cache_write: 0,
+            cache_read: 300,
+        };
+        assert_eq!(split("gpt-5", 1_000, 300, 0), no_writes);
+        assert_eq!(split("gpt-5.5", 1_000, 300, 0), no_writes);
+
+        let api_row = PromptTokens {
+            input: 3,
+            cache_write: 12_783,
+            cache_read: 28_999,
+        };
+        assert_eq!(split("gpt-6.1-sol", 41_785, 28_999, 12_783), api_row);
+        // A reported write that differs from the derived one is kept as reported.
+        let r = split("gpt-6.1-sol", 1_000, 300, 200);
+        assert_eq!((r.input, r.cache_write, r.cache_read), (500, 200, 300));
+
+        let pro_row = PromptTokens {
+            input: 3,
+            cache_write: 236,
+            cache_read: 868_480,
+        };
+        assert_eq!(split("gpt-6.1-sol", 868_719, 868_480, 0), pro_row);
+
+        // A read larger than the prompt is clamped so the buckets add up.
+        let clamped = PromptTokens {
+            input: 0,
+            cache_write: 0,
+            cache_read: 100,
+        };
+        assert_eq!(split("gpt-5", 100, 300, 0), clamped);
     }
 
     #[test]
-    fn test_convert_messages_uses_cache_write_rate_without_double_charging() {
-        let chats = vec![PiebaldChat {
-            id: "1".to_string(),
-            stable_id: "1".to_string(),
-            title: Some("Cached chat".to_string()),
-            model: Some("gpt-5.6-sol".to_string()),
-            project_directory: Some("/tmp/project".to_string()),
-        }];
-        let messages = vec![PiebaldMessage {
-            id: "10".to_string(),
-            stable_id: "10".to_string(),
-            parent_chat_id: "1".to_string(),
-            role: "assistant".to_string(),
-            model: Some("gpt-5.6-sol".to_string()),
-            input_tokens: Some(4_583),
-            output_tokens: Some(0),
-            reasoning_tokens: Some(0),
-            cache_read_tokens: Some(3_945),
-            cache_write_tokens: Some(4_580),
-            service_tier: None,
-            created_at: "2026-07-10T12:00:00Z".to_string(),
-            updated_at: "2026-07-10T12:00:01Z".to_string(),
-        }];
+    fn test_prompt_tokens_preserves_anthropic_buckets() {
+        let buckets = PromptTokens {
+            input: 700,
+            cache_write: 200,
+            cache_read: 300,
+        };
+        assert_eq!(split("claude-sonnet-4-20250514", 700, 300, 200), buckets);
+    }
 
-        let converted = convert_messages(&chats, messages, &HashMap::new());
-        let stats = &converted[0].stats;
+    /// A real OpenAI platform-API row (GPT-6.1 Sol, Nov 1 2026). The reported
+    /// write is the uncached prompt minus 3 tokens, so also billing the
+    /// uncached prompt as plain input would charge those 12,783 tokens twice.
+    #[test]
+    fn test_convert_messages_bills_reported_openai_writes_once() {
+        let stats = convert_one_row(
+            "gpt-6.1-sol",
+            "2026-11-01T17:20:39Z",
+            41_785,
+            28_999,
+            Some(12_783),
+            0,
+            0,
+        );
 
         assert_eq!(stats.input_tokens, 3);
-        assert_eq!(stats.cache_read_tokens, 3_945);
-        assert_eq!(stats.cache_creation_tokens, 4_580);
-        assert!((stats.cost - 0.030_612_5).abs() < 1e-9);
+        assert_eq!(stats.cache_creation_tokens, 12_783);
+        assert_eq!(stats.cache_read_tokens, 28_999);
+        // Short-prompt card: $2 input, $2.50 cache write, $0.10 cache read.
+        let expected = (3.0 * 2.0 + 12_783.0 * 2.5 + 28_999.0 * 0.10) / 1_000_000.0;
+        assert!((stats.cost - expected).abs() < 1e-9);
     }
 
+    /// A real ChatGPT Pro row (GPT-6.1 Sol, Nov 9 2026) whose backend
+    /// reported 0 cache writes. The derived 236-token write prices it as the
+    /// API would. The 868,719-token prompt is past 272K, so every bucket uses
+    /// the long-context card, and the 112 reasoning tokens bill as output.
     #[test]
-    fn test_normalize_input_tokens_preserves_anthropic_input() {
-        assert_eq!(
-            normalize_input_tokens(Some("claude-sonnet-4-20250514"), 700, 300, Some(200)),
-            700
+    fn test_convert_messages_derives_writes_reported_as_zero() {
+        let stats = convert_one_row(
+            "gpt-6.1-sol",
+            "2026-11-09T16:23:49Z",
+            868_719,
+            868_480,
+            Some(0),
+            64,
+            112,
         );
-    }
 
-    #[test]
-    fn test_normalize_input_tokens_saturates_for_openai() {
-        assert_eq!(normalize_input_tokens(Some("gpt-5"), 100, 300, None), 0);
+        assert_eq!(stats.input_tokens, 3);
+        assert_eq!(stats.cache_creation_tokens, 236);
+        assert_eq!(stats.cache_read_tokens, 868_480);
+        assert_eq!(stats.cached_tokens, 868_716);
+        // Long-prompt card: $4 input, $5 cache write, $0.20 cache read, $15 output.
+        let expected = (3.0 * 4.0 + 236.0 * 5.0 + 868_480.0 * 0.20 + 176.0 * 15.0) / 1_000_000.0;
+        assert!((stats.cost - expected).abs() < 1e-9);
     }
 
     #[test]

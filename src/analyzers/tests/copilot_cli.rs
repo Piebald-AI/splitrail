@@ -218,6 +218,42 @@ fn test_copilot_cli_uses_shutdown_metrics_for_multi_turn_sessions() {
     assert!((messages[2].stats.cost - expected_claude_cost).abs() < f64::EPSILON);
 }
 
+/// Copilot's `inputTokens` includes cache writes as well as reads. This 91K
+/// prompt (1K plain + 30K written + 60K read) must stay under Haiku 5.5's
+/// 100K bracket, and its writes must be billed once.
+#[test]
+fn test_copilot_cli_bills_cache_writes_once_and_sizes_the_prompt_from_input() {
+    let temp_dir = tempdir().unwrap();
+    let session_file = temp_dir.path().join("events.jsonl");
+    std::fs::write(
+        &session_file,
+        concat!(
+            r#"{"type":"session.start","timestamp":"2026-11-08T05:00:00.000Z","data":{"sessionId":"cli-session-writes","context":{"cwd":"/home/user/project","model":"anthropic/claude-haiku-5.5"}}}"#,
+            "\n",
+            r#"{"type":"user.message","timestamp":"2026-11-08T05:00:01.000Z","data":{"content":"Summarize the parser"}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_start","timestamp":"2026-11-08T05:00:02.000Z","data":{"turnId":"0","interactionId":"interaction-1"}}"#,
+            "\n",
+            r#"{"type":"assistant.message","timestamp":"2026-11-08T05:00:03.000Z","data":{"messageId":"assistant-1","interactionId":"interaction-1","content":"Done.","outputTokens":1000}}"#,
+            "\n",
+            r#"{"type":"assistant.turn_end","timestamp":"2026-11-08T05:00:04.000Z","data":{"turnId":"0"}}"#,
+            "\n",
+            r#"{"type":"session.shutdown","timestamp":"2026-11-08T05:00:05.000Z","data":{"shutdownType":"routine","modelMetrics":{"claude-haiku-5.5":{"requests":{"count":1,"cost":0},"usage":{"inputTokens":91000,"outputTokens":1000,"cacheReadTokens":60000,"cacheWriteTokens":30000}}}}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let messages = parse_copilot_cli_session_file(&session_file).unwrap();
+    let assistant = &messages[1];
+
+    assert_eq!(assistant.stats.cache_creation_tokens, 30_000);
+    assert_eq!(assistant.stats.cache_read_tokens, 60_000);
+    // Short-prompt card: $0.10 input, $0.50 output, $0.125 write, $0.01 read.
+    let expected = (1_000.0 * 0.10 + 1_000.0 * 0.50 + 30_000.0 * 0.125 + 60_000.0 * 0.01) / 1e6;
+    assert!((assistant.stats.cost - expected).abs() < 1e-12);
+}
+
 #[test]
 fn test_copilot_cli_accumulates_multiple_shutdown_segments_in_one_session_file() {
     let temp_dir = tempdir().unwrap();

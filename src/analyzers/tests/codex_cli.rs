@@ -766,6 +766,90 @@ fn test_parse_codex_cli_event_model_backfill() {
     assert!((assistant_msg.stats.cost - expected_cost).abs() < f64::EPSILON);
 }
 
+/// Parse a session made of `token_count` payloads and return the stats of
+/// each usage entry, in order.
+fn parse_token_counts(model: &str, token_count_infos: &[&str]) -> Vec<crate::types::Stats> {
+    let mut temp_file = NamedTempFile::new().unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-11-05T16:25:42.000Z","type":"session_meta","payload":{{"id":"01a1ac87-ca50-7800-b7af-fe112781f638","timestamp":"2026-11-05T16:25:42.000Z"}}}}"#
+    )
+    .unwrap();
+    writeln!(
+        temp_file,
+        r#"{{"timestamp":"2026-11-05T16:25:43.000Z","type":"turn_context","payload":{{"model":"{model}"}}}}"#
+    )
+    .unwrap();
+    for (second, info) in token_count_infos.iter().enumerate() {
+        writeln!(
+            temp_file,
+            r#"{{"timestamp":"2026-11-05T16:26:0{second}.000Z","type":"event_msg","payload":{{"type":"token_count","info":{info}}}}}"#
+        )
+        .unwrap();
+    }
+
+    let (messages, _model) = parse_codex_cli_jsonl_file(temp_file.path()).unwrap();
+    messages
+        .into_iter()
+        .filter(|msg| msg.stats.input_tokens + msg.stats.cached_tokens > 0)
+        .map(|msg| msg.stats)
+        .collect()
+}
+
+/// A real usage line from a ChatGPT-login Codex CLI 0.160.0 session on GPT-6
+/// Luna. The backend logs 0 cache writes, so the uncached prompt minus 3
+/// tokens is billed as a write, the same as OpenAI's API reports it.
+#[test]
+fn test_parse_codex_cli_derives_cache_writes_logged_as_zero() {
+    let stats = parse_token_counts(
+        "gpt-6-luna",
+        &[
+            r#"{"last_token_usage":{"input_tokens":25218,"cached_input_tokens":24704,"cache_write_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0,"total_tokens":25258}}"#,
+        ],
+    );
+
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].input_tokens, 3);
+    assert_eq!(stats[0].cache_creation_tokens, 511);
+    assert_eq!(stats[0].cache_read_tokens, 24_704);
+    assert_eq!(stats[0].cached_tokens, 25_215);
+    // Short-prompt card: $0.10 input, $0.125 cache write, $0.01 read, $0.50 output.
+    let expected = (3.0 * 0.10 + 511.0 * 0.125 + 24_704.0 * 0.01 + 40.0 * 0.50) / 1_000_000.0;
+    assert!((stats[0].cost - expected).abs() < 1e-12);
+}
+
+/// Sessions that log only cumulative totals must subtract cache writes
+/// between events like every other count. The totals here are two real
+/// OpenAI API responses added up, and a non-zero logged write is kept as is.
+#[test]
+fn test_parse_codex_cli_keeps_logged_cache_writes_across_cumulative_totals() {
+    let stats = parse_token_counts(
+        "gpt-6.1-sol",
+        &[
+            r#"{"total_token_usage":{"input_tokens":29002,"cached_input_tokens":0,"cache_write_input_tokens":28999,"output_tokens":100,"reasoning_output_tokens":0,"total_tokens":29102}}"#,
+            r#"{"total_token_usage":{"input_tokens":70787,"cached_input_tokens":28999,"cache_write_input_tokens":41782,"output_tokens":150,"reasoning_output_tokens":0,"total_tokens":70937}}"#,
+        ],
+    );
+
+    assert_eq!(stats.len(), 2);
+    assert_eq!(
+        (
+            stats[0].input_tokens,
+            stats[0].cache_creation_tokens,
+            stats[0].cache_read_tokens
+        ),
+        (3, 28_999, 0)
+    );
+    assert_eq!(
+        (
+            stats[1].input_tokens,
+            stats[1].cache_creation_tokens,
+            stats[1].cache_read_tokens
+        ),
+        (3, 12_783, 28_999)
+    );
+}
+
 #[test]
 fn test_codex_availability() {
     let analyzer = CodexCliAnalyzer::new();

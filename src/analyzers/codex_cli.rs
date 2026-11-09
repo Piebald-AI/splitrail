@@ -13,7 +13,9 @@ use walkdir::WalkDir;
 
 use crate::analyzer::{Analyzer, DataSource};
 use crate::contribution_cache::ContributionStrategy;
-use crate::models::{ServiceTier, calculate_total_cost_for_service_tier_at};
+use crate::models::{
+    PromptTokens, ServiceTier, calculate_total_cost_for_service_tier_at, split_openai_prompt_tokens,
+};
 use crate::types::{Application, ConversationMessage, MessageRole, Stats, ToolCall};
 use crate::utils::{deserialize_utc_timestamp, hash_text, warn_once};
 
@@ -239,6 +241,10 @@ struct CodexCliTokenUsage {
     output_tokens: u64,
     #[serde(default)]
     cached_input_tokens: u64,
+    /// Cache writes, logged by newer Codex CLI builds. Sessions signed in with
+    /// ChatGPT always log 0 here; [`prompt_tokens`] fills that zero in.
+    #[serde(default)]
+    cache_write_input_tokens: u64,
     #[serde(default)]
     reasoning_output_tokens: u64,
     #[serde(default)]
@@ -817,27 +823,24 @@ fn normalize_project_path(raw: &str) -> Option<String> {
     Some(normalized.to_string_lossy().replace('\\', "/"))
 }
 
-fn calculate_cost_from_tokens(
+/// Split a Codex token report into the buckets the cost calculator bills.
+///
+/// Codex logs OpenAI's usage fields: `input_tokens` is the whole prompt, and
+/// `cached_input_tokens` and `cache_write_input_tokens` are parts of it. See
+/// [`split_openai_prompt_tokens`] for how a logged write count of 0 is filled
+/// in.
+fn prompt_tokens(
     usage: &CodexCliTokenUsage,
     model_name: &str,
     effective_at: DateTime<Utc>,
-) -> f64 {
-    // Codex's output_tokens already include any reasoning tokens. Treat them as-is
-    // so we don't double-charge for structured reasoning output.
-    let total_output_tokens = usage.output_tokens;
-
-    // Subtract cached input tokens from total input tokens
-    // since Codex input_tokens is a superset that includes cached tokens
-    let actual_input_tokens = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
-
-    calculate_total_cost_for_service_tier_at(
+) -> PromptTokens {
+    split_openai_prompt_tokens(
         model_name,
         ServiceTier::Standard,
-        actual_input_tokens,
-        total_output_tokens,
-        0, // Codex CLI doesn't have separate cache creation tokens
-        usage.cached_input_tokens,
         Some(effective_at),
+        usage.input_tokens,
+        usage.cached_input_tokens,
+        usage.cache_write_input_tokens,
     )
 }
 
@@ -846,19 +849,27 @@ fn stats_from_usage(
     model_name: &str,
     effective_at: DateTime<Utc>,
 ) -> Stats {
-    // Keep the reported output token count; reasoning tokens are informational only.
-    let total_output_tokens = usage.output_tokens;
-    let actual_input_tokens = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+    let prompt = prompt_tokens(usage, model_name, effective_at);
 
-    let cost = calculate_cost_from_tokens(usage, model_name, effective_at);
+    // Codex's output_tokens already include any reasoning tokens, so they are
+    // billed as-is; reasoning_tokens is kept for display only.
+    let cost = calculate_total_cost_for_service_tier_at(
+        model_name,
+        ServiceTier::Standard,
+        prompt.input,
+        usage.output_tokens,
+        prompt.cache_write,
+        prompt.cache_read,
+        Some(effective_at),
+    );
 
     Stats {
-        input_tokens: actual_input_tokens,
-        output_tokens: total_output_tokens,
+        input_tokens: prompt.input,
+        output_tokens: usage.output_tokens,
         reasoning_tokens: usage.reasoning_output_tokens,
-        cache_creation_tokens: 0,
-        cache_read_tokens: 0,
-        cached_tokens: usage.cached_input_tokens,
+        cache_creation_tokens: prompt.cache_write,
+        cache_read_tokens: prompt.cache_read,
+        cached_tokens: prompt.cache_read + prompt.cache_write,
         cost,
         tool_calls: 0,
         ..Default::default()
@@ -871,6 +882,7 @@ fn subtract_token_usage(
 ) -> CodexCliTokenUsage {
     let prev_input = previous.map_or(0, |p| p.input_tokens);
     let prev_cached = previous.map_or(0, |p| p.cached_input_tokens);
+    let prev_cache_write = previous.map_or(0, |p| p.cache_write_input_tokens);
     let prev_output = previous.map_or(0, |p| p.output_tokens);
     let prev_reasoning = previous.map_or(0, |p| p.reasoning_output_tokens);
     let prev_total = previous.map_or(0, |p| p.total_tokens);
@@ -878,6 +890,9 @@ fn subtract_token_usage(
     CodexCliTokenUsage {
         input_tokens: current.input_tokens.saturating_sub(prev_input),
         cached_input_tokens: current.cached_input_tokens.saturating_sub(prev_cached),
+        cache_write_input_tokens: current
+            .cache_write_input_tokens
+            .saturating_sub(prev_cache_write),
         output_tokens: current.output_tokens.saturating_sub(prev_output),
         reasoning_output_tokens: current
             .reasoning_output_tokens
