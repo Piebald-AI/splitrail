@@ -102,7 +102,9 @@ fn assert_history(messages: &[ConversationMessage]) {
     assert_eq!(assistant.stats.output_tokens, 200);
     assert_eq!(assistant.stats.reasoning_tokens, 30);
     assert_eq!(assistant.stats.cache_read_tokens, 100);
-    assert_eq!(assistant.stats.cache_creation_tokens, 50);
+    // GPT-5.5 has no cache-write price, so its 50 reported writes stay in the
+    // plain input above (1,000 prompt - 100 read) instead of a write bucket.
+    assert_eq!(assistant.stats.cache_creation_tokens, 0);
     assert_eq!(assistant.stats.tool_calls, 2);
     assert_eq!(
         assistant.project_path.as_deref(),
@@ -125,7 +127,7 @@ fn assert_history(messages: &[ConversationMessage]) {
         ServiceTier::Priority,
         900,
         230,
-        50,
+        0,
         100,
         Some(assistant.date),
     );
