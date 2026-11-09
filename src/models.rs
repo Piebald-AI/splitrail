@@ -2119,6 +2119,54 @@ fn populate_defaults(
 
     // Anthropic Models
     // Source: https://docs.claude.com/en/docs/about-claude/pricing
+    //
+    // Fable 5.2 is 20% cheaper than Fable 5.1 in every category and keeps
+    // 5.1's unusual 0.025x cache-read multiplier ($0.20 on $8 input), so do
+    // not derive its read rate from Anthropic's usual 0.1x rule. As with 5.1,
+    // cache writes use the 5-minute rate ($10) because the token sources merge
+    // 5-minute and 1-hour ($16) writes into one count before pricing runs.
+    add_model!(
+        "claude-fable-5-2",
+        PricingStructure::Flat {
+            input_per_1m: 8.0,
+            output_per_1m: 40.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 10.0,
+            cache_read_per_1m: 0.2
+        },
+        false
+    );
+    // Batch halves every category, cache prices included, the same way it
+    // does for Fable 5.1 below.
+    add_service_tier_pricing!(
+        "claude-fable-5-2",
+        ServiceTier::Batch,
+        PricingStructure::Flat {
+            input_per_1m: 4.0,
+            output_per_1m: 20.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 5.0,
+            cache_read_per_1m: 0.1
+        }
+    );
+    // Fast mode (`speed: "fast"`, which the Piebald analyzer resolves to
+    // `ServiceTier::Priority`) is $16/$80, 2x standard. The pricing page says
+    // prompt-caching multipliers apply on top of fast-mode prices, so the
+    // cache rates double too: $20 for 5-minute writes and $0.40 for reads.
+    add_service_tier_pricing!(
+        "claude-fable-5-2",
+        ServiceTier::Priority,
+        PricingStructure::Flat {
+            input_per_1m: 16.0,
+            output_per_1m: 80.0
+        },
+        CachingSupport::Anthropic {
+            cache_write_per_1m: 20.0,
+            cache_read_per_1m: 0.4
+        }
+    );
     add_model!(
         "claude-fable-5-1",
         PricingStructure::Flat {
@@ -2245,9 +2293,10 @@ fn populate_defaults(
     // component of each card scales by that model's single factor, so these are
     // deliberate vendor rate cards rather than transcription noise. Do not
     // "normalize" 4.6/4.7 down to 2x on the assumption the family shares one
-    // ratio. These five models are the complete set Claude Code prices for fast
-    // mode; every other model falls back to standard pricing, which is the
-    // correct behavior rather than a gap to fill in.
+    // ratio. These five models are the complete Opus set Claude Code prices for
+    // fast mode; Fable 5.2 has its own 2x card next to its standard entry, and
+    // every other model falls back to standard pricing, which is the correct
+    // behavior rather than a gap to fill in.
     add_service_tier_pricing!(
         "claude-opus-5-5",
         ServiceTier::Priority,
@@ -4002,6 +4051,20 @@ fn populate_defaults(
     add_alias!("openai.gpt-oss-safeguard-120b", "gpt-oss-safeguard-120b");
 
     // Anthropic aliases
+    // Bedrock prefixes follow the Opus 5.5 set: the bare `anthropic.` ID plus
+    // the regional and global inference-profile forms. Lookup matches whole
+    // names only, so each spelling needs its own row.
+    add_alias!("claude-fable-5-2", "claude-fable-5-2");
+    add_alias!("claude-fable-5.2", "claude-fable-5-2");
+    add_alias!("claude-5.2-fable", "claude-fable-5-2");
+    add_alias!("anthropic.claude-fable-5-2", "claude-fable-5-2");
+    add_alias!("us.anthropic.claude-fable-5-2", "claude-fable-5-2");
+    add_alias!("eu.anthropic.claude-fable-5-2", "claude-fable-5-2");
+    add_alias!("apac.anthropic.claude-fable-5-2", "claude-fable-5-2");
+    add_alias!("jp.anthropic.claude-fable-5-2", "claude-fable-5-2");
+    add_alias!("au.anthropic.claude-fable-5-2", "claude-fable-5-2");
+    add_alias!("us-gov.anthropic.claude-fable-5-2", "claude-fable-5-2");
+    add_alias!("global.anthropic.claude-fable-5-2", "claude-fable-5-2");
     add_alias!("claude-fable-5-1", "claude-fable-5-1");
     add_alias!("claude-fable-5.1", "claude-fable-5-1");
     add_alias!("claude-5.1-fable", "claude-fable-5-1");
@@ -5580,6 +5643,61 @@ mod tests {
         approx_eq(input_cost, 5.0);
         approx_eq(output_cost, 25.0);
         approx_eq(cache_cost, 6.75);
+    }
+
+    /// Fable 5.2 keeps Fable 5.1's 0.025x cache-read multiplier. The cache
+    /// assertion is the one that catches a read rate re-derived with the
+    /// usual 0.1x rule: that would give $0.80 and $10.80 instead of $10.20.
+    #[test]
+    fn claude_fable_5_2_aliases_map_to_official_pricing() {
+        for model in [
+            "claude-fable-5-2",
+            "claude-fable-5.2",
+            "claude-5.2-fable",
+            "anthropic.claude-fable-5-2",
+            "us.anthropic.claude-fable-5-2",
+            "global.anthropic.claude-fable-5-2",
+        ] {
+            let model_info = get_model_info(model).expect("Fable 5.2 alias should resolve");
+            assert!(!model_info.is_estimated, "{model} should not be estimated");
+
+            approx_eq(calculate_input_cost(model, 1_000_000), 8.0);
+            approx_eq(calculate_output_cost(model, 1_000_000), 40.0);
+            approx_eq(calculate_cache_cost(model, 1_000_000, 1_000_000), 10.2);
+        }
+    }
+
+    /// Fable 5.2 and 5.1 differ only in the last character, and a slip in the
+    /// alias table would bill one at the other's rates (25% off either way).
+    #[test]
+    fn claude_fable_5_2_is_distinct_from_claude_fable_5_1() {
+        let fable_5_1 = get_model_info("claude-fable-5-1").expect("Fable 5.1 should exist");
+        let fable_5_2 = get_model_info("claude-fable-5-2").expect("Fable 5.2 should exist");
+
+        assert!(!std::sync::Arc::ptr_eq(&fable_5_1, &fable_5_2));
+        approx_eq(calculate_input_cost("claude-fable-5-1", 1_000_000), 10.0);
+        approx_eq(calculate_input_cost("claude-fable-5-2", 1_000_000), 8.0);
+    }
+
+    /// One million tokens in each category. Batch: $4 + $20 + $5 + $0.10.
+    /// Fast mode: $16 + $80 + $20 + $0.40, because cache multipliers apply on
+    /// top of the doubled fast-mode input price.
+    #[test]
+    fn claude_fable_5_2_batch_and_fast_tiers_price_every_category() {
+        for (tier, expected) in [(ServiceTier::Batch, 29.1), (ServiceTier::Priority, 116.4)] {
+            approx_eq(
+                calculate_total_cost_for_service_tier_at(
+                    "claude-fable-5-2",
+                    tier,
+                    1_000_000,
+                    1_000_000,
+                    1_000_000,
+                    1_000_000,
+                    None,
+                ),
+                expected,
+            );
+        }
     }
 
     #[test]
