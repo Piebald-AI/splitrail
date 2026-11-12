@@ -2711,36 +2711,39 @@ fn populate_defaults(
             bracket_pricing: false,
         })
     );
-    // Gemini 4 Carbon was announced on 2026-10-28 with access limited to cyber
-    // defenders and other trusted partners in the Fairwind Program; developers
-    // cannot use it yet. The launch post sets "the same introductory price as
-    // Argon": $2/$10 per 1M tokens, with cached input at 95% off input ($0.10).
-    // The standard $4/$20 applies "after the introductory period expires", but
-    // Google has not said when that is. The same 95% cache discount would make
-    // the standard cached rate $0.20, as it is for Argon.
+    // Gemini 4 Carbon was announced on 2026-10-28 for Fairwind Program
+    // partners and became generally available on 2026-11-10 as
+    // `gemini-4-carbon`. Its pricing now matches Argon's on every row: the
+    // pricing page bills the introductory $2/$10 (cached $0.10) "through
+    // November 30, 2026" and the standard $4/$20 (cached $0.20) "starting
+    // December 1, 2026". So, like `gemini-4-argon` above, the base entry
+    // carries the standard rates and the dated override covers the
+    // introductory window, ending on 2026-12-01 because `valid_until` is
+    // exclusive. The override's earliest period also covers the pre-GA
+    // Fairwind usage, which the launch post priced at the same introductory
+    // rate.
     //
-    // That is why this base entry holds the introductory rate rather than the
-    // durable one, unlike `gemini-4-argon` above: a dated override needs a real
-    // exclusive `valid_until`, and a guessed one would silently misprice usage
-    // on whichever side of the guess turns out wrong. Borrowing Argon's
-    // November 30 end date would be exactly such a guess, because the launch
-    // post ties Carbon to Argon's introductory price, not to its end date. Once
-    // Google publishes Carbon's end date, move $4/$20 + $0.20 into this entry
-    // and add the introductory rate as a dated override ending on that date,
-    // the way Argon's entry does.
-    //
-    // Google has announced no long-context (>200K) tier for Carbon, so the
-    // pricing is flat, and no Batch, Flex, or Priority rates, so it has no
-    // service-tier overrides. Its API model ID is unpublished as well;
-    // `gemini-4-carbon` follows `gemini-4-argon`, the ID Google gave Argon at
-    // general availability.
-    //
-    // Carbon is not on the Gemini API pricing page yet, so the section source
-    // above does not cover it; move this entry under the section source once
-    // the page lists it.
-    // Source: https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-carbon/
+    // The pricing page lists no long-context (>200K) tier for Carbon, so the
+    // pricing is flat. Its Batch, Flex, and Priority rates are not modelled,
+    // matching the other Gemini entries here.
     add_model!(
         "gemini-4-carbon",
+        PricingStructure::Flat {
+            input_per_1m: 4.0,
+            output_per_1m: 20.0
+        },
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![CachingTier {
+                max_tokens: None,
+                cached_input_per_1m: 0.20
+            }],
+            bracket_pricing: false,
+        }),
+        false
+    );
+    add_dated_pricing!(
+        "gemini-4-carbon",
+        NaiveDate::from_ymd_opt(2026, 12, 1).expect("valid date"),
         PricingStructure::Flat {
             input_per_1m: 2.0,
             output_per_1m: 10.0
@@ -2751,8 +2754,7 @@ fn populate_defaults(
                 cached_input_per_1m: 0.10
             }],
             bracket_pricing: false,
-        }),
-        false
+        })
     );
     // Gemini 4 Hydrogen became generally available on 2026-11-12 as
     // `gemini-4-hydrogen`, the Gemini 4 successor to `gemini-3.8-flash`.
@@ -7151,22 +7153,25 @@ mod tests {
         }
     }
 
-    /// Gemini 4 Carbon has no announced end to its introductory rates, so they
-    /// must apply at the 2026-10-28 announcement and on any later date alike.
-    /// The far-future instant guards against a dated override with a guessed
-    /// end date, including Argon's: Carbon shares Argon's introductory price,
-    /// not a published end date. When Google publishes the real one, replace
-    /// this test with a boundary test like the Gemini 4 Argon one above. Every
-    /// check bills a 1M-token request, well past the 200K threshold where
-    /// `gemini-3.1-pro-preview` switches to long-context rates, which also pins
-    /// the pricing as flat: Google has announced no >200K rate.
+    /// Gemini 4 Carbon's introductory rates end on the same day as Argon's.
+    /// The checks cover the 2026-10-28 Fairwind announcement (pre-GA usage must
+    /// stay on the introductory rate), the last hour of the introductory
+    /// window, and the first instant of standard pricing, so an off-by-one in
+    /// the exclusive `valid_until` fails here. Every check bills a 1M-token
+    /// request, well past the 200K threshold where `gemini-3.1-pro-preview`
+    /// switches to long-context rates, which also pins the pricing as flat:
+    /// Google lists no >200K rate.
     #[test]
-    fn gemini_4_carbon_bills_introductory_rates_until_end_date_is_announced() {
+    fn gemini_4_carbon_switches_from_introductory_to_standard_rates() {
         for model in ["gemini-4-carbon", "google/gemini-4-carbon"] {
             let info = get_model_info(model).expect("Gemini 4 Carbon should resolve");
             assert!(!info.is_estimated);
 
-            for instant in [utc(2026, 10, 28, 17, 0), utc(2030, 1, 1, 0, 0)] {
+            for (instant, input, output, cached) in [
+                (utc(2026, 10, 28, 17, 0), 2.0, 10.0, 0.10),
+                (utc(2026, 11, 30, 23, 0), 2.0, 10.0, 0.10),
+                (utc(2026, 12, 1, 0, 0), 4.0, 20.0, 0.20),
+            ] {
                 approx_eq(
                     calculate_input_cost_for_service_tier_at(
                         model,
@@ -7174,7 +7179,7 @@ mod tests {
                         1_000_000,
                         Some(instant),
                     ),
-                    2.0,
+                    input,
                 );
                 approx_eq(
                     calculate_output_cost_for_service_tier_at(
@@ -7183,7 +7188,7 @@ mod tests {
                         1_000_000,
                         Some(instant),
                     ),
-                    10.0,
+                    output,
                 );
                 approx_eq(
                     calculate_cache_cost_for_service_tier_at(
@@ -7193,7 +7198,7 @@ mod tests {
                         1_000_000,
                         Some(instant),
                     ),
-                    0.10,
+                    cached,
                 );
             }
         }
