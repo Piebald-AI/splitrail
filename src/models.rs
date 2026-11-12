@@ -2754,6 +2754,29 @@ fn populate_defaults(
         }),
         false
     );
+    // Gemini 4 Hydrogen became generally available on 2026-11-12 as
+    // `gemini-4-hydrogen`, the Gemini 4 successor to `gemini-3.8-flash`.
+    // Unlike Argon, Carbon, and 3.8 Flash, it launched straight at its
+    // standard price with no introductory window, so it needs no dated
+    // override: $1.50/$7.50, with implicit-cache hits at 95% off input
+    // ($0.075). Google bills it flat "across the full 1M context window", so
+    // there is no long-context (>200K) tier. Its Batch, Flex, and Priority
+    // rates are not modelled, matching the other Gemini entries here.
+    add_model!(
+        "gemini-4-hydrogen",
+        PricingStructure::Flat {
+            input_per_1m: 1.50,
+            output_per_1m: 7.50
+        },
+        CachingSupport::Tiered(TieredCaching {
+            tiers: vec![CachingTier {
+                max_tokens: None,
+                cached_input_per_1m: 0.075
+            }],
+            bracket_pricing: false,
+        }),
+        false
+    );
     add_model!(
         "gemini-3.1-pro-preview",
         PricingStructure::Tiered(TieredPricing {
@@ -4182,6 +4205,7 @@ fn populate_defaults(
     add_alias!("gemini-3.8-flash", "gemini-3.8-flash");
     add_alias!("gemini-4-argon", "gemini-4-argon");
     add_alias!("gemini-4-carbon", "gemini-4-carbon");
+    add_alias!("gemini-4-hydrogen", "gemini-4-hydrogen");
     add_alias!("gemini-3.1-pro-preview", "gemini-3.1-pro-preview");
     add_alias!(
         "gemini-3.1-pro-preview-customtools",
@@ -7170,6 +7194,57 @@ mod tests {
                         Some(instant),
                     ),
                     0.10,
+                );
+            }
+        }
+    }
+
+    /// Gemini 4 Hydrogen launched at its standard price with no introductory
+    /// window, so the same rates must apply on launch day and on any later
+    /// date. The 2027-01-01 instant matters because that is when
+    /// `gemini-3.8-flash`, whose standard rates Hydrogen shares, leaves its
+    /// promotional window: Hydrogen must not pick up that dated override or
+    /// any other. Every check bills a 1M-token request, well past the 200K
+    /// threshold where `gemini-3.1-pro-preview` switches to long-context
+    /// rates, which also pins the pricing as flat: Google lists no >200K rate.
+    #[test]
+    fn gemini_4_hydrogen_bills_standard_rates_from_launch() {
+        for model in ["gemini-4-hydrogen", "google/gemini-4-hydrogen"] {
+            let info = get_model_info(model).expect("Gemini 4 Hydrogen should resolve");
+            assert!(!info.is_estimated);
+
+            for instant in [
+                utc(2026, 11, 12, 18, 0),
+                utc(2027, 1, 1, 0, 0),
+                utc(2030, 1, 1, 0, 0),
+            ] {
+                approx_eq(
+                    calculate_input_cost_for_service_tier_at(
+                        model,
+                        ServiceTier::Standard,
+                        1_000_000,
+                        Some(instant),
+                    ),
+                    1.50,
+                );
+                approx_eq(
+                    calculate_output_cost_for_service_tier_at(
+                        model,
+                        ServiceTier::Standard,
+                        1_000_000,
+                        Some(instant),
+                    ),
+                    7.50,
+                );
+                approx_eq(
+                    calculate_cache_cost_for_service_tier_at(
+                        model,
+                        ServiceTier::Standard,
+                        0,
+                        1_000_000,
+                        Some(instant),
+                    ),
+                    0.075,
                 );
             }
         }
