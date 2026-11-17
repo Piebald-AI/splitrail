@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.13.1] - 2026-11-17
+- Add GPT-6.2 Sol and Astra pricing (#306) - @mike1858
+- Fix main's CI: update quinn-udp for RUSTSEC-2026-0538 and satisfy nightly clippy (#307) - @mike1858
+- Add Gemini 4 Hydrogen pricing (#304) - @mike1858
+- Bill Gemini 4 Carbon at standard rates from December 1 (#305) - @mike1858
+
 ## [3.13.0] - 2026-11-09
 - feat(web): add active time, replies, and work activity insights (#283) - @jimyag
 - Add last-24-hour and custom minute-precision usage ranges (#293) - @jimyag
