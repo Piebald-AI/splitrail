@@ -1388,6 +1388,85 @@ fn populate_defaults(
         false
     );
 
+    // GPT-6.2 Sol and GPT-6.2 Astra, released 2026-11-17. Sol's card is
+    // identical to GPT-6.1 Sol's in every column. Astra is $8 input / $40
+    // output, 0.8x GPT-6 Astra, but its cached input is $0.40 (5% of input,
+    // the Sol-style discount) rather than the 0.8x-scaled $0.80. Both keep
+    // the whole-request 272K bracket (2x input and cache rates, 1.5x output),
+    // and the cache-write column is the 30-minute rate as for the other GPT-6
+    // entries. Ultrafast (3x Standard until 2027-03-01, then 6x) and the
+    // discounted background completion windows have no Splitrail service
+    // tier, so they are not modeled.
+    // Source: https://developers.openai.com/api/docs/pricing
+    add_model!(
+        "gpt-6.2-sol",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 2.0,
+                    output_per_1m: 10.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 4.0,
+                    output_per_1m: 15.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+            tiers: vec![
+                CachingTierWithWrites {
+                    max_tokens: Some(272_000),
+                    cache_write_per_1m: 2.50,
+                    cache_read_per_1m: 0.10
+                },
+                CachingTierWithWrites {
+                    max_tokens: None,
+                    cache_write_per_1m: 5.0,
+                    cache_read_per_1m: 0.20
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+    add_model!(
+        "gpt-6.2-astra",
+        PricingStructure::Tiered(TieredPricing {
+            tiers: vec![
+                PricingTier {
+                    max_tokens: Some(272_000),
+                    input_per_1m: 8.0,
+                    output_per_1m: 40.0
+                },
+                PricingTier {
+                    max_tokens: None,
+                    input_per_1m: 16.0,
+                    output_per_1m: 60.0
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        CachingSupport::TieredWithWrites(TieredCachingWithWrites {
+            tiers: vec![
+                CachingTierWithWrites {
+                    max_tokens: Some(272_000),
+                    cache_write_per_1m: 10.0,
+                    cache_read_per_1m: 0.40
+                },
+                CachingTierWithWrites {
+                    max_tokens: None,
+                    cache_write_per_1m: 20.0,
+                    cache_read_per_1m: 0.80
+                },
+            ],
+            bracket_pricing: true,
+        }),
+        false
+    );
+
     add_model!(
         "gpt-6-luna",
         PricingStructure::Tiered(TieredPricing {
@@ -1712,6 +1791,57 @@ fn populate_defaults(
     add_tiered_service_tier_pricing_with_cache_writes!(
         "gpt-6.1-sol",
         ServiceTier::Priority,
+        4.0,
+        5.0,
+        0.20,
+        20.0,
+        8.0,
+        10.0,
+        0.40,
+        30.0
+    );
+    add_tiered_service_tier_pricing_with_cache_writes!(
+        "gpt-6.2-sol",
+        ServiceTier::Priority,
+        4.0,
+        5.0,
+        0.20,
+        20.0,
+        8.0,
+        10.0,
+        0.40,
+        30.0
+    );
+    add_tiered_service_tier_pricing_with_cache_writes!(
+        "gpt-6.2-astra",
+        ServiceTier::Priority,
+        16.0,
+        20.0,
+        0.80,
+        80.0,
+        32.0,
+        40.0,
+        1.60,
+        120.0
+    );
+    // GPT-6.2 is listed under Batch but not Flex on the pricing page, so only
+    // Batch gets the 0.5x card. A Flex request (not offered for these models)
+    // falls back to Standard in `pricing_for_service_tier`.
+    add_tiered_service_tier_pricing_with_cache_writes!(
+        "gpt-6.2-sol",
+        ServiceTier::Batch,
+        1.0,
+        1.25,
+        0.05,
+        5.0,
+        2.0,
+        2.50,
+        0.10,
+        7.50
+    );
+    add_tiered_service_tier_pricing_with_cache_writes!(
+        "gpt-6.2-astra",
+        ServiceTier::Batch,
         4.0,
         5.0,
         0.20,
@@ -4067,6 +4197,8 @@ fn populate_defaults(
     add_alias!("gpt-6-sol", "gpt-6-sol");
     add_alias!("gpt-6.1-sol", "gpt-6.1-sol");
     add_alias!("gpt-6.1-terra", "gpt-6.1-terra");
+    add_alias!("gpt-6.2-sol", "gpt-6.2-sol");
+    add_alias!("gpt-6.2-astra", "gpt-6.2-astra");
     add_alias!("gpt-6-luna", "gpt-6-luna");
     add_alias!("gpt-5.6", "gpt-5.6-sol");
     add_alias!("gpt-5.6-sol", "gpt-5.6-sol");
@@ -5101,7 +5233,7 @@ mod tests {
         calculate_output_cost_for_service_tier_at, calculate_total_cost_for_context_at,
         calculate_total_cost_for_service_tier, calculate_total_cost_for_service_tier_at, clock,
         dated_period_mut, get_model_info, get_registry_lock, init_external_models,
-        push_dated_pricing,
+        is_model_estimated, push_dated_pricing,
     };
 
     use chrono::{DateTime, NaiveDate, TimeZone, Utc};
@@ -6036,6 +6168,44 @@ mod tests {
 
                 approx_eq(short, 0.68 * multiplier);
                 approx_eq(long, 1.41 * multiplier);
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_6_2_uses_published_rates_across_contexts_and_service_tiers() {
+        // Same fixture as the GPT-6.1 Terra test above: 100K each of output,
+        // cache writes, and cache reads, plus 50K input in the short row (a
+        // 250K prompt, under 272K) or 200K input in the long row (400K).
+        //
+        // Sol matches GPT-6.1 Sol: $1.36 short, $2.82 long.
+        // Astra short: $0.40 + $4.00 + $1.00 + $0.04 = $5.44. Astra long:
+        // $3.20 + $6.00 + $2.00 + $0.08 = $11.28. Astra's cache read is 5% of
+        // input ($0.40), not GPT-6 Astra's 10%, so a plain 0.8x scaling of
+        // GPT-6 Astra would land $0.04 / $0.08 high here.
+        //
+        // Flex stays at 1.0x: OpenAI does not offer Flex for GPT-6.2, so no
+        // override exists and the calculator falls back to Standard.
+        for (model, short_standard, long_standard) in
+            [("gpt-6.2-sol", 1.36, 2.82), ("gpt-6.2-astra", 5.44, 11.28)]
+        {
+            assert!(!is_model_estimated(model), "{model} is published");
+
+            for (tier, multiplier) in [
+                (ServiceTier::Standard, 1.0),
+                (ServiceTier::Priority, 2.0),
+                (ServiceTier::Flex, 1.0),
+                (ServiceTier::Batch, 0.5),
+            ] {
+                let short = calculate_total_cost_for_service_tier_at(
+                    model, tier, 50_000, 100_000, 100_000, 100_000, None,
+                );
+                let long = calculate_total_cost_for_service_tier_at(
+                    model, tier, 200_000, 100_000, 100_000, 100_000, None,
+                );
+
+                approx_eq(short, short_standard * multiplier);
+                approx_eq(long, long_standard * multiplier);
             }
         }
     }
