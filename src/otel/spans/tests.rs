@@ -550,9 +550,10 @@ fn tool_calls_attach_to_the_turn_that_preceded_them() {
             .map(|span| span.name.clone())
             .collect()
     };
-    assert!(names(0).contains(&"execute_tool Read".to_string()));
-    assert!(!names(0).contains(&"execute_tool Edit".to_string()));
-    assert!(names(1).contains(&"execute_tool Edit".to_string()));
+    let has = |index: usize, name: &str| names(index).iter().any(|span| span == name);
+    assert!(has(0, "execute_tool Read"));
+    assert!(!has(0, "execute_tool Edit"));
+    assert!(has(1, "execute_tool Edit"));
 }
 
 #[test]
