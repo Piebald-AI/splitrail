@@ -450,7 +450,14 @@ fn input_token_semantics_for_model(model_name: &str) -> InputTokenSemantics {
         .map(|(_, name)| name)
         .unwrap_or(model_name);
 
-    if name.starts_with("gpt-") || name.starts_with('o') {
+    // DeepSeek's API is OpenAI-compatible: `prompt_tokens` is the whole prompt
+    // and the cache hits are a part of it, and OpenRouter passes that through
+    // unchanged. Every DeepSeek row Piebald has recorded (`deepseek/deepseek-*`
+    // through OpenRouter) has input >= cache reads. Counting them the Anthropic
+    // way bills every cache hit twice, once as cache read and again as full-price
+    // input. The hyphen keeps out the Bedrock id `deepseek.v3.2`, whose input
+    // convention hasn't been checked against real rows.
+    if name.starts_with("gpt-") || name.starts_with('o') || name.starts_with("deepseek-") {
         InputTokenSemantics::IncludesCacheRead
     } else {
         InputTokenSemantics::ExcludesCache

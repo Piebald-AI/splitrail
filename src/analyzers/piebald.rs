@@ -1081,6 +1081,35 @@ mod tests {
         assert_eq!(split("gpt-5", 100, 300, 0), clamped);
     }
 
+    /// A real Piebald DeepSeek row (through OpenRouter, Nov 26, 2026): input is
+    /// the whole prompt with the cache hits inside it, the write count is NULL,
+    /// and reasoning is stored apart from output. Only the 1,639 tokens past the
+    /// cache are fresh input, and reasoning is billed as output.
+    #[test]
+    fn test_convert_messages_splits_deepseek_prompt() {
+        // Saturday, so DeepSeek's half-price off-peak rate applies all day.
+        let stats = convert_one_row(
+            "deepseek/deepseek-v4-flash",
+            "2026-11-21T12:00:00Z",
+            36_711,
+            35_072,
+            None,
+            227,
+            468,
+        );
+
+        assert_eq!(stats.input_tokens, 1_639);
+        assert_eq!(stats.cache_read_tokens, 35_072);
+        assert_eq!(stats.cache_creation_tokens, 0);
+        // ($0.30 x 1,639 + $0.006 x 35,072 + $1.20 x (227 + 468)) / 1M, halved.
+        let expected = (0.30 * 1_639.0 + 0.006 * 35_072.0 + 1.20 * 695.0) / 1_000_000.0 * 0.5;
+        assert!(
+            (stats.cost - expected).abs() < 1e-12,
+            "cost {} != {expected}",
+            stats.cost
+        );
+    }
+
     #[test]
     fn test_prompt_tokens_preserves_anthropic_buckets() {
         let buckets = PromptTokens {
