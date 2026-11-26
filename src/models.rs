@@ -4427,6 +4427,13 @@ fn populate_defaults(
 
     // DeepSeek aliases
     add_alias!("deepseek-flash", "deepseek-v4-flash");
+    // DeepSeek's pricing page names DeepSeek-V4.1-Flash-1017 as the model
+    // version behind `deepseek-flash`, and OpenRouter lists that snapshot as
+    // `deepseek/deepseek-v4.1-flash-1017`. `get_model_info` strips the
+    // `deepseek/` prefix, so this bare name is all that needs mapping. It
+    // prices at DeepSeek's own rates (with its off-peak discount), which can
+    // be higher than what a cheaper OpenRouter host actually charges.
+    add_alias!("deepseek-v4.1-flash-1017", "deepseek-v4-flash");
 
     // Moonshot / ByteDance / Qwen / Xiaomi / Meituan aliases
     add_alias!("doubao-seed-code", "doubao-seed-2.0-code");
@@ -7608,12 +7615,18 @@ mod tests {
 
     #[test]
     fn deepseek_flash_family_shares_the_peak_schedule() {
-        // The legacy name and the current `deepseek-flash` alias resolve to the
-        // same model, so both must price identically at the same instant.
+        // The legacy name, the current `deepseek-flash` alias, and OpenRouter's
+        // dated snapshot name all resolve to the same model, so they must price
+        // identically at the same instant. The OpenRouter name also checks
+        // that the `deepseek/` prefix is stripped before the alias lookup.
         let peak = utc(2026, 9, 7, 2, 0);
         let off_peak = utc(2026, 9, 7, 12, 0);
 
-        for model in ["deepseek-flash", "deepseek-v4-flash"] {
+        for model in [
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek/deepseek-v4.1-flash-1017",
+        ] {
             approx_eq(deepseek_total_at(model, peak), 1.506);
             approx_eq(deepseek_total_at(model, off_peak), 0.753);
         }
